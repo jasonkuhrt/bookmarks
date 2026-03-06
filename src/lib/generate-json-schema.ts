@@ -4,8 +4,8 @@
  *
  * Usage: bun src/lib/generate-json-schema.ts
  *
- * Writes bookmarks.schema.json to both the package source and the managed
- * ~/.bookmarks true-dir so YAML schema lookup works from the live path too.
+ * Writes bookmarks.schema.json to the repo copy and, when BOOKMARKS_SCHEMA_PATH
+ * is set, mirrors it to that external location as well.
  */
 
 import { JSONSchema } from "effect"
@@ -18,7 +18,7 @@ const jsonSchema = JSONSchema.make(BookmarksConfig)
 const content = JSON.stringify(jsonSchema, null, 2) + "\n"
 const outPaths = [
   path.resolve(import.meta.dirname, "bookmarks.schema.json"),
-  path.resolve(import.meta.dirname, "../../../../symlink-roots/bookmarks/bookmarks.schema.json"),
+  ...(process.env["BOOKMARKS_SCHEMA_PATH"] ? [path.resolve(process.env["BOOKMARKS_SCHEMA_PATH"])] : []),
 ]
 
 for (const outPath of outPaths) {

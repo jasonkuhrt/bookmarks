@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * bookmarks - Cross-browser bookmark sync from dotfiles
+ * bookmarks - Cross-browser bookmark sync from YAML
  *
  * Usage:
  *   bookmarks <command> [options]
@@ -30,7 +30,7 @@ import * as SyncModule from "../lib/sync.js"
 import * as YamlModule from "../lib/yaml.js"
 
 const USAGE = `
-bookmarks - Cross-browser bookmark sync from dotfiles
+bookmarks - Cross-browser bookmark sync from YAML
 
 Usage:
   bookmarks <command> [options]

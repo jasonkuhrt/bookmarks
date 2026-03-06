@@ -1,14 +1,25 @@
 {
   "name": "@jasonkuhrt/bookmarks",
   "version": "0.0.0",
+  "description": "Cross-browser bookmark sync driven by ~/.bookmarks/bookmarks.yaml",
   "type": "module",
   "sideEffects": false,
   "bin": {
     "bookmarks": "./src/bin/bookmarks.ts"
   },
   "scripts": {
+    "test": "bun test",
+    "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov",
     "bookmarks": "bun src/bin/bookmarks.ts",
     "generate:json-schema": "bun src/lib/generate-json-schema.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:jasonkuhrt/bookmarks.git"
+  },
+  "homepage": "https://github.com/jasonkuhrt/bookmarks",
+  "bugs": {
+    "url": "https://github.com/jasonkuhrt/bookmarks/issues"
   },
   "dependencies": {
     "@clack/prompts": "^0.9.1",
