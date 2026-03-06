@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import * as Doctor from "./doctor.js"
+import { BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
+import { copyChromeBookmarksFixture } from "./test-fixtures.js"
+import * as YamlModule from "./yaml.js"
 
 // -- Test helpers --
 
@@ -120,29 +126,82 @@ describe("formatReport", () => {
 // -- runDiagnostics --
 
 describe("runDiagnostics", () => {
-  test("returns a DoctorResult with all expected checks", async () => {
-    const result = await run(Doctor.runDiagnostics())
-    expect(result.checks.length).toBeGreaterThanOrEqual(6)
-    expect(typeof result.allPassed).toBe("boolean")
+  test("reports the actual configured targets and browser processes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+    const chromePath = join(dir, "Chrome-Bookmarks.json")
 
-    const names = result.checks.map((c) => c.name)
-    expect(names).toContain("Full Disk Access")
-    expect(names).toContain("Safari plist exists")
-    expect(names).toContain("Chrome default profile exists")
-    expect(names).toContain("YAML source of truth")
-    expect(names).toContain("Safari not running")
-    expect(names).toContain("Google Chrome not running")
+    try {
+      await copyChromeBookmarksFixture(chromePath)
+      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
+        targets: {
+          chrome: {
+            work: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: BookmarkTree.make({}),
+      })))
+
+      const result = await run(Doctor.runDiagnostics(yamlPath))
+      const names = result.checks.map((check) => check.name)
+
+      expect(typeof result.allPassed).toBe("boolean")
+      expect(names).toContain("YAML source of truth")
+      expect(names).toContain("Enabled targets")
+      expect(names).toContain("Configured target chrome/work exists")
+      expect(names).toContain("Google Chrome not running")
+      expect(names).not.toContain("Safari plist exists")
+      expect(names).not.toContain("Chrome default profile exists")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("surfaces YAML errors without inventing target checks", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-invalid-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+
+    try {
+      await Bun.write(yamlPath, "targets:\n  chrome:\n    default: [")
+
+      const result = await run(Doctor.runDiagnostics(yamlPath))
+
+      expect(result.allPassed).toBe(false)
+      expect(result.checks).toHaveLength(1)
+      expect(result.checks[0]?.name).toBe("YAML source of truth")
+      expect(result.checks[0]?.passed).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("each check has required fields", async () => {
-    const result = await run(Doctor.runDiagnostics())
-    for (const check of result.checks) {
-      expect(typeof check.name).toBe("string")
-      expect(typeof check.passed).toBe("boolean")
-      expect(typeof check.message).toBe("string")
-      if (check.fix !== undefined) {
-        expect(typeof check.fix).toBe("string")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-shape-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+    const chromePath = join(dir, "Chrome-Bookmarks.json")
+
+    try {
+      await copyChromeBookmarksFixture(chromePath)
+      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: BookmarkTree.make({}),
+      })))
+
+      const result = await run(Doctor.runDiagnostics(yamlPath))
+      for (const check of result.checks) {
+        expect(typeof check.name).toBe("string")
+        expect(typeof check.passed).toBe("boolean")
+        expect(typeof check.message).toBe("string")
+        if (check.fix !== undefined) {
+          expect(typeof check.fix).toBe("string")
+        }
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
     }
   })
 })

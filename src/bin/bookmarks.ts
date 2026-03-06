@@ -92,7 +92,13 @@ const parseMaxAge = (input: string): Effect.Effect<Duration.Duration, CliExitErr
 
 const printSyncSummary = (label: string, result: SyncModule.SyncResult) =>
   Effect.gen(function* () {
-    yield* Console.log(`\n${label}: ${result.applied.length} applied, ${result.graveyarded.length} graveyarded`)
+    if (result.orchestration) {
+      const verb = result.orchestration.state === "queued" ? "queued" : "deferred"
+      yield* Console.log(`\n${label} ${verb}: ${result.orchestration.message}`)
+      return
+    }
+
+    yield* Console.log(`\n${label} complete: ${result.applied.length} applied, ${result.graveyarded.length} graveyarded`)
     for (const targetResult of result.targets) {
       yield* Console.log(
         `  ${targetResult.target.browser}/${targetResult.target.profile}: ` +
@@ -145,7 +151,7 @@ const program = Effect.gen(function* () {
         yamlPath: Paths.defaultYamlPath(),
         dryRun: pushFlags.dryRun,
       })
-      yield* printSyncSummary("Push complete", pushResult)
+      yield* printSyncSummary("Push", pushResult)
       break
     }
     case "pull": {
@@ -154,7 +160,7 @@ const program = Effect.gen(function* () {
         yamlPath: Paths.defaultYamlPath(),
         dryRun: pullFlags.dryRun,
       })
-      yield* printSyncSummary("Pull complete", pullResult)
+      yield* printSyncSummary("Pull", pullResult)
       break
     }
     case "sync": {
@@ -163,7 +169,7 @@ const program = Effect.gen(function* () {
         yamlPath: Paths.defaultYamlPath(),
         dryRun: syncFlags.dryRun,
       })
-      yield* printSyncSummary("Sync complete", syncResult)
+      yield* printSyncSummary("Sync", syncResult)
       break
     }
     case "status": {
@@ -190,7 +196,7 @@ const program = Effect.gen(function* () {
         yamlPath: Paths.defaultYamlPath(),
         graveyardMaxAge: maxAge,
       })
-      yield* printSyncSummary("GC complete", gcResult)
+      yield* printSyncSummary("GC", gcResult)
       break
     }
     case "daemon": {

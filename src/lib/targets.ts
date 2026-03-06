@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import * as Chrome from "./chrome.js"
 import * as Patch from "./patch.js"
+import * as Paths from "./paths.js"
 import * as Safari from "./safari.js"
 import { BookmarksConfig, BookmarkTree } from "./schema/__.js"
 
@@ -16,6 +17,20 @@ export const keyOf = (target: Pick<TargetDescriptor, "browser" | "profile">): st
 
 export const displayNameOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
   `${target.browser}/${target.profile}`
+
+export const processNameOf = (browser: string): string => {
+  switch (browser) {
+    case "safari":
+      return "Safari"
+    case "chrome":
+      return "Google Chrome"
+    default:
+      return browser
+  }
+}
+
+export const requiresFullDiskAccess = (target: Pick<TargetDescriptor, "browser" | "path">): boolean =>
+  target.browser === "safari" && target.path === Paths.defaultSafariPlistPath()
 
 export const graveyardSourceOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
   target.browser === "safari" && target.profile === "default"

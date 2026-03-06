@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
@@ -478,6 +478,76 @@ describe("push", () => {
         dryRun: true,
       }))).rejects.toThrow('Duplicate URL "https://dup.example"')
     } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("fails clearly for permanently missing configured targets", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-missing-target-"))
+
+    try {
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: join(dir, "missing-Bookmarks") }),
+          },
+        },
+        base: new BookmarkTree({
+          favorites_bar: [leaf("First", "https://first.example")],
+        }),
+      })
+
+      await expect(run(Sync.push({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+      }))).rejects.toThrow("Target unavailable")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("defers when another sync already holds the runtime lock", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-locked-"))
+    const chromePath = join(dir, "Bookmarks")
+    const runtimeDir = join(dir, "runtime")
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+
+    try {
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await writeChromeFixture(chromePath, ["First"])
+      await mkdir(runtimeDir, { recursive: true })
+      await Bun.write(join(runtimeDir, "sync.lock.json"), JSON.stringify({
+        pid: process.pid,
+        operation: "sync",
+        yamlPath: join(dir, "bookmarks.yaml"),
+        acquiredAt: "2026-01-01T00:00:00.000Z",
+      }))
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({
+          favorites_bar: [leaf("First", "https://first.example")],
+        }),
+      })
+
+      const result = await run(Sync.push({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+      }))
+
+      expect(result.applied).toHaveLength(0)
+      expect(result.orchestration?.state).toBe("busy")
+      expect(result.orchestration?.message).toContain("already running")
+    } finally {
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"]
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })

@@ -1,16 +1,15 @@
 /**
  * Doctor — pre-flight diagnostics for bookmark sync.
  *
- * Runs independent checks (Full Disk Access, plist paths, Chrome paths,
- * YAML validity, browser processes) and produces a checklist-style report.
+ * Runs independent checks against the actual configured targets and produces a
+ * checklist-style report.
  * Read-only — no side effects.
  */
 
 import { Effect } from "effect"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import * as Paths from "./paths.js"
 import * as Permissions from "./permissions.js"
+import * as Targets from "./targets.js"
 import * as YamlModule from "./yaml.js"
 
 // ---------------------------------------------------------------------------
@@ -28,17 +27,6 @@ export interface DoctorResult {
   readonly checks: readonly DoctorCheck[]
   readonly allPassed: boolean
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const SAFARI_PLIST_PATH = join(homedir(), "Library/Safari/Bookmarks.plist")
-
-const CHROME_DEFAULT_BOOKMARKS = join(
-  homedir(),
-  "Library/Application Support/Google/Chrome/Default/Bookmarks",
-)
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,33 +52,11 @@ const fail = (name: string, message: string, fix: string): DoctorCheck => ({
 const checkFullDiskAccess = (): Effect.Effect<DoctorCheck> =>
   Effect.map(Permissions.checkFullDiskAccess(), (ok) =>
     ok
-      ? pass("Full Disk Access", "Terminal has Full Disk Access — can read Safari plist")
+      ? pass("Full Disk Access for Safari targets", "Terminal has Full Disk Access for the configured Safari targets")
       : fail(
-          "Full Disk Access",
+          "Full Disk Access for Safari targets",
           "Terminal lacks Full Disk Access",
           "Open System Settings > Privacy & Security > Full Disk Access and enable your terminal app.",
-        ),
-  )
-
-const checkSafariPlist = (): Effect.Effect<DoctorCheck> =>
-  Effect.map(Permissions.checkTargetAvailable(SAFARI_PLIST_PATH), (ok) =>
-    ok
-      ? pass("Safari plist exists", `Found Safari plist at ${SAFARI_PLIST_PATH}`)
-      : fail(
-          "Safari plist exists",
-          `Safari plist not found at ${SAFARI_PLIST_PATH}`,
-          "Ensure Safari has been launched at least once so the plist is created.",
-        ),
-  )
-
-const checkChromeProfile = (): Effect.Effect<DoctorCheck> =>
-  Effect.map(Permissions.checkTargetAvailable(CHROME_DEFAULT_BOOKMARKS), (ok) =>
-    ok
-      ? pass("Chrome default profile exists", `Found Chrome bookmarks at ${CHROME_DEFAULT_BOOKMARKS}`)
-      : fail(
-          "Chrome default profile exists",
-          `Chrome bookmarks not found at ${CHROME_DEFAULT_BOOKMARKS}`,
-          "Ensure Google Chrome has been launched at least once so the Default profile is created.",
         ),
   )
 
@@ -106,6 +72,32 @@ const checkYamlValid = (yamlPath: string): Effect.Effect<DoctorCheck> =>
         ),
       ),
     ),
+  )
+
+const checkEnabledTargets = (targets: readonly Targets.TargetDescriptor[]): DoctorCheck =>
+  targets.length > 0
+    ? pass(
+        "Enabled targets",
+        `Found ${targets.length} enabled target${targets.length === 1 ? "" : "s"}.`,
+      )
+    : fail(
+        "Enabled targets",
+        "No enabled targets are configured in bookmarks.yaml.",
+        "Add at least one enabled target under targets: before syncing.",
+      )
+
+const checkConfiguredTarget = (target: Targets.TargetDescriptor): Effect.Effect<DoctorCheck> =>
+  Effect.map(Permissions.checkTargetAvailable(target.path), (ok) =>
+    ok
+      ? pass(
+          `Configured target ${Targets.displayNameOf(target)} exists`,
+          `Found configured target at ${target.path}`,
+        )
+      : fail(
+          `Configured target ${Targets.displayNameOf(target)} exists`,
+          `Configured target not found at ${target.path}`,
+          `Update bookmarks.yaml with a valid path for ${Targets.displayNameOf(target)} or create the target file before syncing.`,
+        ),
   )
 
 const checkBrowserNotRunning = (browser: string): Effect.Effect<DoctorCheck> =>
@@ -130,22 +122,39 @@ const checkBrowserNotRunning = (browser: string): Effect.Effect<DoctorCheck> =>
 export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult> => {
   const resolvedYamlPath = yamlPath ?? Paths.defaultYamlPath()
 
-  return Effect.all(
-    [
-      checkFullDiskAccess(),
-      checkSafariPlist(),
-      checkChromeProfile(),
-      checkYamlValid(resolvedYamlPath),
-      checkBrowserNotRunning("Safari"),
-      checkBrowserNotRunning("Google Chrome"),
-    ],
-    { concurrency: "unbounded" },
-  ).pipe(
-    Effect.map((checks): DoctorResult => ({
+  return Effect.gen(function* () {
+    const yamlCheck = yield* checkYamlValid(resolvedYamlPath)
+    const config = yield* YamlModule.load(resolvedYamlPath).pipe(
+      Effect.option,
+    )
+
+    if (config._tag === "None") {
+      return {
+        checks: [yamlCheck],
+        allPassed: false,
+      }
+    }
+
+    const enabledTargets = Targets.listEnabledTargets(config.value)
+    const needsFullDiskAccess = enabledTargets.some((target) => Targets.requiresFullDiskAccess(target))
+    const browserChecks = [...new Set(enabledTargets.map((target) => Targets.processNameOf(target.browser)))]
+
+    const checks = yield* Effect.all(
+      [
+        Effect.succeed(yamlCheck),
+        Effect.succeed(checkEnabledTargets(enabledTargets)),
+        ...(needsFullDiskAccess ? [checkFullDiskAccess()] : []),
+        ...enabledTargets.map((target) => checkConfiguredTarget(target)),
+        ...browserChecks.map((browser) => checkBrowserNotRunning(browser)),
+      ],
+      { concurrency: "unbounded" },
+    )
+
+    return {
       checks,
-      allPassed: checks.every((c) => c.passed),
-    })),
-  )
+      allPassed: checks.every((check) => check.passed),
+    }
+  })
 }
 
 /**

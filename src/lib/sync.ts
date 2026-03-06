@@ -13,7 +13,9 @@ import * as Path from "node:path"
 import * as Yaml from "yaml"
 import * as Paths from "./paths.js"
 import * as Graveyard from "./graveyard.js"
+import * as Orchestration from "./orchestration.js"
 import * as Patch from "./patch.js"
+import * as Permissions from "./permissions.js"
 import * as Targets from "./targets.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
 import * as YamlModule from "./yaml.js"
@@ -22,6 +24,7 @@ export interface SyncResult {
   readonly applied: readonly Patch.BookmarkPatch[]
   readonly graveyarded: readonly Patch.BookmarkPatch[]
   readonly targets: readonly TargetResult[]
+  readonly orchestration?: Orchestration.SyncNotice
 }
 
 export interface ConflictResolution {
@@ -461,6 +464,78 @@ const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =
         return yield* YamlModule.load(config.yamlPath)
       })
 
+const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =>
+  orchestration
+    ? {
+        applied: [],
+        graveyarded: [],
+        targets: [],
+        orchestration,
+      }
+    : {
+        applied: [],
+        graveyarded: [],
+        targets: [],
+      }
+
+const ensureMutationSafety = (
+  yamlConfig: BookmarksConfig,
+): Effect.Effect<void, Error | Orchestration.TemporarySyncBlocker> =>
+  Effect.gen(function* () {
+    const enabledTargets = Targets.listEnabledTargets(yamlConfig)
+
+    if (enabledTargets.some((target) => Targets.requiresFullDiskAccess(target))) {
+      yield* Permissions.requireFullDiskAccess()
+    }
+
+    for (const target of enabledTargets) {
+      yield* Permissions.requireTargetAvailable(Targets.displayNameOf(target), target.path)
+    }
+
+    const runningBrowsers: string[] = []
+
+    for (const browser of new Set(enabledTargets.map((target) => Targets.processNameOf(target.browser)))) {
+      if (yield* Permissions.checkBrowserRunning(browser)) {
+        runningBrowsers.push(browser)
+      }
+    }
+
+    if (runningBrowsers.length > 0) {
+      yield* new Orchestration.TemporarySyncBlocker({ blockers: runningBrowsers })
+    }
+  })
+
+const runManagedOperation = (
+  requestedOperation: Orchestration.SyncOperation,
+  config: SyncConfig,
+): Effect.Effect<SyncResult, Error> =>
+  Orchestration.withOrchestratedSync(
+    config.yamlPath,
+    requestedOperation,
+    (operation) =>
+      Effect.gen(function* () {
+        const yamlConfig = yield* loadConfig(config)
+        yield* ensureMutationSafety(yamlConfig)
+
+        const nextConfig = { ...config, yamlOverride: yamlConfig }
+
+        switch (operation) {
+          case "pull":
+            return yield* runPull(nextConfig)
+          case "push":
+            return yield* runPush(nextConfig)
+          case "sync":
+            return yield* runSync(nextConfig)
+        }
+      }),
+  ).pipe(
+    Effect.map((outcome) =>
+      outcome._tag === "completed"
+        ? outcome.value
+        : emptySyncResult(outcome.notice),
+    ),
+  )
+
 const nodesEqual = (left: BookmarkNode, right: BookmarkNode): boolean => {
   if (BookmarkLeaf.is(left) && BookmarkLeaf.is(right)) {
     return left.name === right.name && left.url === right.url
@@ -743,7 +818,7 @@ const gcTree = (
  * current YAML on disk (user edits), and current Safari (browser changes).
  * Newest-wins conflict resolution, YAML tie-break.
  */
-export const sync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const baselineConfig = (yield* readGitBaselineConfig(config.yamlPath))
@@ -782,7 +857,7 @@ export const sync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     }
   })
 
-export const pull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+const runPull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
@@ -811,7 +886,7 @@ export const pull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     }
   })
 
-export const push = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
@@ -830,6 +905,21 @@ export const push = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       targets: targetResults,
     }
   })
+
+export const sync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+  config.dryRun
+    ? runSync(config)
+    : runManagedOperation("sync", config)
+
+export const pull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+  config.dryRun
+    ? runPull(config)
+    : runManagedOperation("pull", config)
+
+export const push = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+  config.dryRun
+    ? runPush(config)
+    : runManagedOperation("push", config)
 
 export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =>
   Effect.gen(function* () {
