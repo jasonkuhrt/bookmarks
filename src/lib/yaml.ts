@@ -45,19 +45,18 @@ export const save = (path: string, config: BookmarksConfig): Effect.Effect<void,
 export const resolveProfile = (
   config: BookmarksConfig,
   profileKey: string,
-): Effect.Effect<BookmarkTree, Error> =>
-  Effect.gen(function* () {
-    const base = config.base
-    const overlay = config.profiles?.[profileKey]
-    if (!overlay) return base
+): Effect.Effect<BookmarkTree, Error> => {
+  const base = config.base
+  const overlay = config.profiles?.[profileKey]
+  if (!overlay) return Effect.succeed(base)
 
-    return BookmarkTree.make({
-      favorites_bar: mergeSection(base.favorites_bar, overlay.favorites_bar),
-      other: mergeSection(base.other, overlay.other),
-      reading_list: mergeSection(base.reading_list, overlay.reading_list),
-      mobile: mergeSection(base.mobile, overlay.mobile),
-    })
-  })
+  return Effect.succeed(BookmarkTree.make({
+    favorites_bar: mergeSection(base.favorites_bar, overlay.favorites_bar),
+    other: mergeSection(base.other, overlay.other),
+    reading_list: mergeSection(base.reading_list, overlay.reading_list),
+    mobile: mergeSection(base.mobile, overlay.mobile),
+  }))
+}
 
 /** Append profile-specific items after base items in a section. */
 const mergeSection = (

@@ -1,18 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { copyFile, mkdtemp, rm, unlink } from "node:fs/promises"
+import { mkdtemp, rm, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
 import * as Patch from "./patch.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.js"
+import { CHROME_BOOKMARKS_FIXTURE_PATH, copyChromeBookmarksFixture } from "./test-fixtures.js"
 
 // -- Test helpers --
 
-const BOOKMARKS_PATH = join(
-  process.env["HOME"]!,
-  "Library/Application Support/Google/Chrome/Default/Bookmarks",
-)
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
 const now = DateTime.unsafeNow()
 
@@ -51,15 +48,15 @@ describe("unixMsToChromeTimestamp", () => {
 // -- Checksum --
 
 describe("calculateChecksum", () => {
-  test("matches the stored checksum in the real Chrome bookmarks file", async () => {
-    const text = await Bun.file(BOOKMARKS_PATH).text()
+  test("matches the stored checksum in the fixture Chrome bookmarks file", async () => {
+    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text()
     const file = JSON.parse(text)
     const calculated = Chrome.calculateChecksum(file.roots)
     expect(calculated).toBe(file.checksum)
   })
 
   test("produces a 32-character hex string", async () => {
-    const text = await Bun.file(BOOKMARKS_PATH).text()
+    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text()
     const file = JSON.parse(text)
     const checksum = Chrome.calculateChecksum(file.roots)
     expect(checksum).toMatch(/^[0-9a-f]{32}$/)
@@ -69,19 +66,19 @@ describe("calculateChecksum", () => {
 // -- readBookmarks --
 
 describe("readBookmarks", () => {
-  test("reads actual Chrome bookmarks and produces a BookmarkTree", async () => {
-    const tree = await run(Chrome.readBookmarks(BOOKMARKS_PATH))
+  test("reads fixture Chrome bookmarks and produces a BookmarkTree", async () => {
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
     expect(tree).toBeInstanceOf(BookmarkTree)
   })
 
   test("favorites_bar contains bookmarks from bookmark_bar", async () => {
-    const tree = await run(Chrome.readBookmarks(BOOKMARKS_PATH))
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
     expect(tree.favorites_bar).toBeDefined()
     expect(tree.favorites_bar!.length).toBeGreaterThan(0)
   })
 
   test("leaf nodes have name and url", async () => {
-    const tree = await run(Chrome.readBookmarks(BOOKMARKS_PATH))
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
     // Find a leaf somewhere in the tree
     const findLeaf = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): BookmarkLeaf | undefined => {
       for (const n of nodes) {
@@ -100,7 +97,7 @@ describe("readBookmarks", () => {
   })
 
   test("folder nodes have name and children", async () => {
-    const tree = await run(Chrome.readBookmarks(BOOKMARKS_PATH))
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
     const folder = tree.favorites_bar?.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n),
     )
@@ -273,12 +270,12 @@ describe("readBookmarks", () => {
 
 describe("applyPatches", () => {
   const tmpBookmarks = join(
-    process.env["HOME"]!,
-    "Library/Application Support/Google/Chrome/Default/Bookmarks.test-copy",
+    tmpdir(),
+    "bookmarks.chrome.test-copy.json",
   )
 
   const setupCopy = async () => {
-    await copyFile(BOOKMARKS_PATH, tmpBookmarks)
+    await copyChromeBookmarksFixture(tmpBookmarks)
     return tmpBookmarks
   }
 

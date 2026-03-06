@@ -1,0 +1,92 @@
+{
+  "checksum": "715da0c85d5f90fc8ec243136c4d4873",
+  "version": 1,
+  "roots": {
+    "bookmark_bar": {
+      "type": "folder",
+      "name": "Bookmarks Bar",
+      "id": "1",
+      "guid": "root-bookmark-bar",
+      "date_added": "0",
+      "date_modified": "0",
+      "children": [
+        {
+          "type": "folder",
+          "name": "Work",
+          "id": "2",
+          "guid": "work-folder",
+          "date_added": "0",
+          "date_modified": "0",
+          "date_last_used": "0",
+          "children": [
+            {
+              "type": "url",
+              "name": "Docs",
+              "url": "https://docs.example",
+              "id": "3",
+              "guid": "docs-link",
+              "date_added": "0",
+              "date_last_used": "0"
+            }
+          ]
+        },
+        {
+          "type": "url",
+          "name": "Top Link",
+          "url": "https://top.example",
+          "id": "4",
+          "guid": "top-link",
+          "date_added": "0",
+          "date_last_used": "0"
+        },
+        {
+          "type": "folder",
+          "name": "Empty",
+          "id": "5",
+          "guid": "empty-folder",
+          "date_added": "0",
+          "date_modified": "0",
+          "date_last_used": "0",
+          "children": []
+        },
+        {
+          "type": "url",
+          "name": "Move Me",
+          "url": "https://move.example",
+          "id": "6",
+          "guid": "move-link",
+          "date_added": "0",
+          "date_last_used": "0"
+        }
+      ]
+    },
+    "other": {
+      "type": "folder",
+      "name": "Other Bookmarks",
+      "id": "7",
+      "guid": "root-other",
+      "date_added": "0",
+      "date_modified": "0",
+      "children": [
+        {
+          "type": "url",
+          "name": "Other Link",
+          "url": "https://other.example",
+          "id": "8",
+          "guid": "other-link",
+          "date_added": "0",
+          "date_last_used": "0"
+        }
+      ]
+    },
+    "synced": {
+      "type": "folder",
+      "name": "Mobile Bookmarks",
+      "id": "9",
+      "guid": "root-synced",
+      "date_added": "0",
+      "date_modified": "0",
+      "children": []
+    }
+  }
+}

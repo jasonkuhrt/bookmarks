@@ -8,8 +8,12 @@
     "bookmarks": "./src/bin/bookmarks.ts"
   },
   "scripts": {
+    "lint": "oxlint . --deny-warnings",
+    "typecheck": "bunx tsgo --noEmit -p tsconfig.json",
     "test": "bun test",
-    "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov",
+    "test:integration": "bun test src/bin/bookmarks.test.ts",
+    "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir coverage",
+    "coverage:check": "bun scripts/check-coverage.ts coverage/lcov.info 85 55",
     "bookmarks": "bun src/bin/bookmarks.ts",
     "generate:json-schema": "bun src/lib/generate-json-schema.ts"
   },
@@ -30,6 +34,7 @@
   },
   "devDependencies": {
     "@tsconfig/strictest": "^2.0.8",
-    "@types/bun": "^1.2.0"
+    "@types/bun": "^1.2.0",
+    "oxlint": "^1.51.0"
   }
 }

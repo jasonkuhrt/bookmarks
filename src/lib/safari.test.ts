@@ -1,73 +1,104 @@
 import { describe, expect, test } from "bun:test"
 import { serialize } from "@plist/binary.serialize"
 import { DateTime, Effect } from "effect"
-import { copyFile, mkdtemp, rm, unlink } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Patch from "./patch.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.js"
 import * as Safari from "./safari.js"
+import { writeSafariBookmarksFixture } from "./test-fixtures.js"
 
 // -- Test helpers --
 
-const PLIST_PATH = join(process.env["HOME"]!, "Library/Safari/Bookmarks.plist")
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
 const now = DateTime.unsafeNow()
+
+const setupFixture = async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-fixture-"))
+  const path = join(dir, "Bookmarks.plist")
+  await writeSafariBookmarksFixture(path)
+  return { dir, path }
+}
+
+const withFixture = async <A>(fn: (path: string) => Promise<A>): Promise<A> => {
+  const { dir, path } = await setupFixture()
+
+  try {
+    return await fn(path)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
 
 // -- readBookmarks --
 
 describe("readBookmarks", () => {
-  test("reads actual Safari plist and produces a BookmarkTree", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    expect(tree).toBeInstanceOf(BookmarkTree)
+  test("reads fixture Safari plist and produces a BookmarkTree", async () => {
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      expect(tree).toBeInstanceOf(BookmarkTree)
+    })
   })
 
   test("favorites_bar contains folders from BookmarksBar", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    expect(tree.favorites_bar).toBeDefined()
-    expect(tree.favorites_bar!.length).toBeGreaterThan(0)
-    const firstItem = tree.favorites_bar![0]!
-    expect(firstItem).toBeInstanceOf(BookmarkFolder)
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      expect(tree.favorites_bar).toBeDefined()
+      expect(tree.favorites_bar!.length).toBeGreaterThan(0)
+      const firstItem = tree.favorites_bar![0]!
+      expect(firstItem).toBeInstanceOf(BookmarkFolder)
+    })
   })
 
   test("reading_list contains leaves from com.apple.ReadingList", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    expect(tree.reading_list).toBeDefined()
-    expect(tree.reading_list!.length).toBeGreaterThan(0)
-    const firstItem = tree.reading_list![0]!
-    expect(firstItem).toBeInstanceOf(BookmarkLeaf)
-    expect((firstItem as BookmarkLeaf).url).toMatch(/^https?:\/\//)
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      expect(tree.reading_list).toBeDefined()
+      expect(tree.reading_list!.length).toBeGreaterThan(0)
+      const firstItem = tree.reading_list![0]!
+      expect(firstItem).toBeInstanceOf(BookmarkLeaf)
+      expect((firstItem as BookmarkLeaf).url).toMatch(/^https?:\/\//)
+    })
   })
 
   test("other section collects root-level folders and BookmarksMenu content", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    expect(tree.other).toBeDefined()
-    expect(tree.other!.length).toBeGreaterThan(0)
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      expect(tree.other).toBeDefined()
+      expect(tree.other!.length).toBeGreaterThan(0)
+    })
   })
 
   test("History proxy is excluded", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    const allNames = [
-      ...(tree.favorites_bar ?? []),
-      ...(tree.other ?? []),
-      ...(tree.reading_list ?? []),
-    ].map((n) => ("name" in n ? n.name : ""))
-    expect(allNames).not.toContain("History")
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      const allNames = [
+        ...(tree.favorites_bar ?? []),
+        ...(tree.other ?? []),
+        ...(tree.reading_list ?? []),
+      ].map((n) => ("name" in n ? n.name : ""))
+      expect(allNames).not.toContain("History")
+    })
   })
 
   test("leaf nodes have name and url", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    const leaf = tree.reading_list![0]! as BookmarkLeaf
-    expect(leaf.name).toBeTruthy()
-    expect(leaf.url).toBeTruthy()
-    expect(leaf.url).toMatch(/^https?:\/\//)
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      const leaf = tree.reading_list![0]! as BookmarkLeaf
+      expect(leaf.name).toBeTruthy()
+      expect(leaf.url).toBeTruthy()
+      expect(leaf.url).toMatch(/^https?:\/\//)
+    })
   })
 
   test("folder nodes have name and children", async () => {
-    const tree = await run(Safari.readBookmarks(PLIST_PATH))
-    const folder = tree.favorites_bar![0]! as BookmarkFolder
-    expect(folder.name).toBeTruthy()
-    expect(Array.isArray(folder.children)).toBe(true)
+    await withFixture(async (path) => {
+      const tree = await run(Safari.readBookmarks(path))
+      const folder = tree.favorites_bar![0]! as BookmarkFolder
+      expect(folder.name).toBeTruthy()
+      expect(Array.isArray(folder.children)).toBe(true)
+    })
   })
 
   test("preserves sibling ordering and empty folders in a hermetic fixture", async () => {
@@ -179,19 +210,16 @@ describe("readBookmarks", () => {
 // -- applyPatches --
 
 describe("applyPatches", () => {
-  const tmpPlist = join(process.env["HOME"]!, "Library/Safari/Bookmarks.plist.test-copy")
-
   const setupCopy = async () => {
-    await copyFile(PLIST_PATH, tmpPlist)
-    return tmpPlist
+    return setupFixture()
   }
 
-  const cleanup = async () => {
-    try { await unlink(tmpPlist) } catch { /* ignore */ }
+  const cleanup = async (dir: string) => {
+    await rm(dir, { recursive: true, force: true })
   }
 
   test("Add patch inserts a new leaf", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const testUrl = "https://test-bookmark-add.example.com/"
       const testName = "Test Add Bookmark"
@@ -207,12 +235,12 @@ describe("applyPatches", () => {
       expect(found).toBeDefined()
       expect(found!.name).toBe(testName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Remove patch deletes a leaf", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Safari.readBookmarks(path))
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
@@ -227,12 +255,12 @@ describe("applyPatches", () => {
         .map((n) => n.url)
       expect(remainingUrls).not.toContain(target.url)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Rename patch updates a leaf's title", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Safari.readBookmarks(path))
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
@@ -249,12 +277,12 @@ describe("applyPatches", () => {
       expect(found).toBeDefined()
       expect(found!.name).toBe(newName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Move patch relocates a leaf to a different section", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Safari.readBookmarks(path))
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
@@ -278,12 +306,12 @@ describe("applyPatches", () => {
       expect(found).toBeDefined()
       expect(found!.name).toBe(target.name)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Add patch into nested folder path creates folders as needed", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const testUrl = "https://test-nested-add.example.com/"
       const testName = "Nested Add Test"
@@ -308,7 +336,7 @@ describe("applyPatches", () => {
       expect(leaf).toBeDefined()
       expect(leaf!.name).toBe(testName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 })

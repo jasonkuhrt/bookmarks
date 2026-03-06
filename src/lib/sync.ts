@@ -119,8 +119,10 @@ const resolveGitTarget = (filePath: string): Effect.Effect<{ repoRoot: string; r
   Effect.gen(function* () {
     const realDir = yield* Effect.tryPromise({
       try: () => Fs.realpath(Path.dirname(filePath)),
-      catch: () => Path.dirname(filePath),
-    })
+      catch: (e) => new Error(`Failed to resolve real path for ${filePath}: ${e}`),
+    }).pipe(
+      Effect.catchAll(() => Effect.succeed(Path.dirname(filePath))),
+    )
     const canonicalPath = Path.join(realDir, Path.basename(filePath))
     const repoRoot = yield* gitRepoRoot(canonicalPath)
     return {
@@ -190,42 +192,41 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
 export const resolveConflicts = (
   yamlPatches: readonly Patch.BookmarkPatch[],
   browserPatches: readonly Patch.BookmarkPatch[],
-): Effect.Effect<ConflictResolution, Error> =>
-  Effect.gen(function* () {
-    const yamlByUrl = Arr.groupBy(yamlPatches, (p) => p.url)
-    const browserByUrl = Arr.groupBy(browserPatches, (p) => p.url)
+): Effect.Effect<ConflictResolution, Error> => {
+  const yamlByUrl = Arr.groupBy(yamlPatches, (p) => p.url)
+  const browserByUrl = Arr.groupBy(browserPatches, (p) => p.url)
 
-    const apply: Patch.BookmarkPatch[] = []
-    const graveyard: Patch.BookmarkPatch[] = []
+  const apply: Patch.BookmarkPatch[] = []
+  const graveyard: Patch.BookmarkPatch[] = []
 
-    // Collect all unique URLs from both sides
-    const allUrls = new Set([...Object.keys(yamlByUrl), ...Object.keys(browserByUrl)])
+  // Collect all unique URLs from both sides
+  const allUrls = new Set([...Object.keys(yamlByUrl), ...Object.keys(browserByUrl)])
 
-    for (const url of allUrls) {
-      const yamlGroup = yamlByUrl[url]
-      const browserGroup = browserByUrl[url]
+  for (const url of allUrls) {
+    const yamlGroup = yamlByUrl[url]
+    const browserGroup = browserByUrl[url]
 
-      if (yamlGroup && !browserGroup) {
-        apply.push(...yamlGroup)
-      } else if (browserGroup && !yamlGroup) {
+    if (yamlGroup && !browserGroup) {
+      apply.push(...yamlGroup)
+    } else if (browserGroup && !yamlGroup) {
+      apply.push(...browserGroup)
+    } else if (yamlGroup && browserGroup) {
+      const yamlMax = maxDate(yamlGroup)
+      const browserMax = maxDate(browserGroup)
+
+      if (DateTime.greaterThan(browserMax, yamlMax)) {
         apply.push(...browserGroup)
-      } else if (yamlGroup && browserGroup) {
-        const yamlMax = maxDate(yamlGroup)
-        const browserMax = maxDate(browserGroup)
-
-        if (DateTime.greaterThan(browserMax, yamlMax)) {
-          apply.push(...browserGroup)
-          graveyard.push(...yamlGroup)
-        } else {
-          // YAML wins (tie-break: YAML wins when equal)
-          apply.push(...yamlGroup)
-          graveyard.push(...browserGroup)
-        }
+        graveyard.push(...yamlGroup)
+      } else {
+        // YAML wins (tie-break: YAML wins when equal)
+        apply.push(...yamlGroup)
+        graveyard.push(...browserGroup)
       }
     }
+  }
 
-    return { apply, graveyard }
-  })
+  return Effect.succeed({ apply, graveyard })
+}
 
 /** Find the maximum date among a group of patches. */
 const maxDate = (patches: readonly Patch.BookmarkPatch[]): DateTime.Utc =>
@@ -240,25 +241,29 @@ const maxDate = (patches: readonly Patch.BookmarkPatch[]): DateTime.Utc =>
 export const applyPatches = (
   tree: BookmarkTree,
   patches: readonly Patch.BookmarkPatch[],
-): Effect.Effect<BookmarkTree, Error> =>
-  Effect.gen(function* () {
-    let nextTree = Patch.toTrie(tree)
+): Effect.Effect<BookmarkTree, Error> => {
+  let nextTree = Patch.toTrie(tree)
 
-    // Sort patches: Remove -> Move -> Rename -> Add
-    const opPriority: Record<Patch.BookmarkPatch["_tag"], number> = { Remove: 0, Move: 1, Rename: 2, Add: 3 }
-    const byOpOrder = Order.mapInput(Order.number, (p: Patch.BookmarkPatch) => opPriority[p._tag])
-    const sorted = Arr.sort(patches, byOpOrder)
+  // Sort patches: Remove -> Move -> Rename -> Add
+  const opPriority: Record<Patch.BookmarkPatch["_tag"], number> = { Remove: 0, Move: 1, Rename: 2, Add: 3 }
+  const byOpOrder = Order.mapInput(Order.number, (p: Patch.BookmarkPatch) => opPriority[p._tag])
+  const sorted = Arr.sort(patches, byOpOrder)
 
-    for (const patch of sorted) {
-      nextTree = applyOne(nextTree, patch)
-    }
+  for (const patch of sorted) {
+    nextTree = applyOne(nextTree, patch)
+  }
 
-    return Patch.fromTrie(nextTree)
-  })
+  return Effect.succeed(Patch.fromTrie(nextTree))
+}
 
 const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
 
 type SectionKey = (typeof sectionKeys)[number]
+type MutableBookmarkSection = BookmarkNode[]
+type MutableBookmarkTree = Record<SectionKey, MutableBookmarkSection | undefined>
+
+const asMutableTree = (tree: BookmarkTree): MutableBookmarkTree =>
+  tree as unknown as MutableBookmarkTree
 
 const cloneNode = (node: BookmarkNode): BookmarkNode =>
   BookmarkLeaf.is(node)
@@ -275,22 +280,22 @@ const normalizeSection = (nodes: BookmarkSection | undefined): BookmarkSection |
   nodes && nodes.length > 0 ? nodes : undefined
 
 const setSection = (tree: BookmarkTree, sectionKey: SectionKey, nodes: BookmarkSection | undefined): void => {
-  tree[sectionKey] = nodes
+  asMutableTree(tree)[sectionKey] = nodes as MutableBookmarkSection | undefined
 }
 
-const ensureSection = (tree: BookmarkTree, sectionKey: SectionKey): BookmarkSection => {
-  const existing = tree[sectionKey]
+const ensureSection = (tree: BookmarkTree, sectionKey: SectionKey): MutableBookmarkSection => {
+  const existing = asMutableTree(tree)[sectionKey]
   if (existing) return existing
 
-  const created: BookmarkSection = []
+  const created: MutableBookmarkSection = []
   setSection(tree, sectionKey, created)
   return created
 }
 
 const ensureFolderPath = (
-  nodes: BookmarkSection,
+  nodes: MutableBookmarkSection,
   folderPath: readonly string[],
-): BookmarkSection => {
+): MutableBookmarkSection => {
   let current = nodes
 
   for (const folderName of folderPath) {
@@ -299,13 +304,13 @@ const ensureFolderPath = (
     )
 
     if (existing) {
-      current = existing.children as BookmarkSection
+      current = existing.children as MutableBookmarkSection
       continue
     }
 
     const created = BookmarkFolder.make({ name: folderName, children: [] })
     current.push(created)
-    current = created.children as BookmarkSection
+    current = created.children as MutableBookmarkSection
   }
 
   return current
@@ -330,9 +335,9 @@ const cleanupEmptyRootSections = (tree: BookmarkTree): void => {
 }
 
 const findLeafLocationInSection = (
-  nodes: BookmarkSection,
+  nodes: MutableBookmarkSection,
   url: string,
-): { readonly children: BookmarkSection; readonly index: number } | undefined => {
+): { readonly children: MutableBookmarkSection; readonly index: number } | undefined => {
   for (let index = 0; index < nodes.length; index++) {
     const node = nodes[index]!
 
@@ -341,7 +346,7 @@ const findLeafLocationInSection = (
     }
 
     if (BookmarkFolder.is(node)) {
-      const found = findLeafLocationInSection(node.children as BookmarkSection, url)
+      const found = findLeafLocationInSection(node.children as MutableBookmarkSection, url)
       if (found) return found
     }
   }
@@ -352,9 +357,9 @@ const findLeafLocationInSection = (
 const findLeafLocation = (
   tree: BookmarkTree,
   url: string,
-): { readonly children: BookmarkSection; readonly index: number } | undefined => {
+): { readonly children: MutableBookmarkSection; readonly index: number } | undefined => {
   for (const sectionKey of sectionKeys) {
-    const section = normalizeSection(tree[sectionKey])
+    const section = asMutableTree(tree)[sectionKey]
     if (!section) continue
 
     const found = findLeafLocationInSection(section, url)
@@ -873,10 +878,10 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
     for (const candidate of candidates) {
       const destination = Path.join(backupDir, candidate.filename)
-      const exists = yield* Effect.tryPromise({
-        try: () => Fs.access(candidate.path).then(() => true, () => false),
-        catch: () => false,
-      })
+    const exists = yield* Effect.tryPromise({
+      try: () => Fs.access(candidate.path).then(() => true, () => false),
+      catch: (e) => new Error(`Failed to inspect backup candidate ${candidate.path}: ${e}`),
+    })
 
       if (!exists) {
         skipped.push(candidate.label)

@@ -1,0 +1,80 @@
+{
+  "Children": [
+    {
+      "WebBookmarkType": "WebBookmarkTypeList",
+      "Title": "BookmarksBar",
+      "Children": [
+        {
+          "WebBookmarkType": "WebBookmarkTypeList",
+          "Title": "Favorites Folder",
+          "Children": [
+            {
+              "WebBookmarkType": "WebBookmarkTypeLeaf",
+              "URLString": "https://docs.example",
+              "URIDictionary": {
+                "title": "Docs"
+              }
+            }
+          ]
+        },
+        {
+          "WebBookmarkType": "WebBookmarkTypeLeaf",
+          "URLString": "https://top.example",
+          "URIDictionary": {
+            "title": "Top Link"
+          }
+        }
+      ]
+    },
+    {
+      "WebBookmarkType": "WebBookmarkTypeList",
+      "Title": "BookmarksMenu",
+      "Children": [
+        {
+          "WebBookmarkType": "WebBookmarkTypeLeaf",
+          "URLString": "https://menu.example",
+          "URIDictionary": {
+            "title": "Menu Link"
+          }
+        }
+      ]
+    },
+    {
+      "WebBookmarkType": "WebBookmarkTypeList",
+      "Title": "Loose Folder",
+      "Children": [
+        {
+          "WebBookmarkType": "WebBookmarkTypeLeaf",
+          "URLString": "https://loose-folder.example",
+          "URIDictionary": {
+            "title": "Loose Folder Link"
+          }
+        }
+      ]
+    },
+    {
+      "WebBookmarkType": "WebBookmarkTypeLeaf",
+      "URLString": "https://loose.example",
+      "URIDictionary": {
+        "title": "Loose Leaf"
+      }
+    },
+    {
+      "WebBookmarkType": "WebBookmarkTypeList",
+      "Title": "com.apple.ReadingList",
+      "Children": [
+        {
+          "WebBookmarkType": "WebBookmarkTypeLeaf",
+          "URLString": "https://reading.example",
+          "URIDictionary": {
+            "title": "Reading Item"
+          }
+        }
+      ]
+    },
+    {
+      "WebBookmarkType": "WebBookmarkTypeProxy",
+      "Title": "History"
+    }
+  ]
+}

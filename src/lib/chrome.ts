@@ -10,7 +10,8 @@ import { DateTime, Effect, Schema } from "effect"
 import { rename } from "node:fs/promises"
 import * as Patch from "./patch.js"
 import { BookmarkLeaf, BookmarkFolder, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
-import { BookmarkIssue, separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.js"
+import { separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.js"
+import type { BookmarkIssue } from "./unsupported.js"
 
 // -- Chrome JSON type aliases --
 
