@@ -1,4 +1,4 @@
-import { Data } from "effect"
+import { Data, Effect } from "effect"
 import { BookmarkFolder, BookmarkLeaf, BookmarkSection, BookmarkTree } from "./schema/__.js"
 
 export interface BookmarkIssue {
@@ -61,6 +61,17 @@ export const collectDuplicateUrlIssues = (
 
   return issues
 }
+
+export const ensureMutationSupported = (
+  tree: BookmarkTree,
+  source: string,
+): Effect.Effect<void, UnsupportedBookmarks> =>
+  Effect.gen(function* () {
+    const issues = collectDuplicateUrlIssues(tree)
+    if (issues.length > 0) {
+      return yield* Effect.fail(new UnsupportedBookmarks({ source, issues }))
+    }
+  })
 
 export const separatorIssue = (path: string, detail: string): BookmarkIssue => ({
   code: "separator",

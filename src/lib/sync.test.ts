@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
@@ -423,8 +423,14 @@ describe("push", () => {
   test("projects structural-only YAML changes exactly through a target rewrite", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-"))
     const chromePath = join(dir, "Bookmarks")
+    const backupDir = join(dir, "backups")
+    const runtimeDir = join(dir, "runtime")
+    const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
 
     try {
+      process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
       await writeChromeFixture(chromePath, ["First", "Last"])
 
       const config = BookmarksConfig.make({
@@ -448,9 +454,24 @@ describe("push", () => {
       }))
 
       expect(result.targets[0]?.writeMode).toBe("rewrite")
+      expect(result.backup?.backupDir).toBe(backupDir)
+      expect(result.backup?.files).toHaveLength(1)
+      expect(result.backup?.files[0]).toContain("chrome--default--Bookmarks")
+      expect(result.backup?.skipped).toEqual(["yaml"])
+      expect(await readdir(backupDir)).toHaveLength(1)
       const browserTree = await run(Chrome.readBookmarks(chromePath))
       expect(browserTree).toEqual(config.base)
     } finally {
+      if (originalBackupDir === undefined) {
+        delete process.env["BOOKMARKS_BACKUP_DIR"]
+      } else {
+        process.env["BOOKMARKS_BACKUP_DIR"] = originalBackupDir
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"]
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })
@@ -458,8 +479,14 @@ describe("push", () => {
   test("refuses duplicate URLs in YAML with actionable diagnostics", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-duplicates-"))
     const chromePath = join(dir, "Bookmarks")
+    const backupDir = join(dir, "backups")
+    const runtimeDir = join(dir, "runtime")
+    const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
 
     try {
+      process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
       await writeChromeFixture(chromePath, ["First"])
 
       const config = BookmarksConfig.make({
@@ -479,17 +506,30 @@ describe("push", () => {
       await expect(run(Sync.push({
         yamlPath: join(dir, "bookmarks.yaml"),
         yamlOverride: config,
-        dryRun: true,
       }))).rejects.toThrow('Duplicate URL "https://dup.example"')
+      await expect(readdir(backupDir)).rejects.toThrow()
     } finally {
+      if (originalBackupDir === undefined) {
+        delete process.env["BOOKMARKS_BACKUP_DIR"]
+      } else {
+        process.env["BOOKMARKS_BACKUP_DIR"] = originalBackupDir
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"]
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })
 
   test("fails clearly for permanently missing configured targets", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-missing-target-"))
+    const runtimeDir = join(dir, "runtime")
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
 
     try {
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
       const config = BookmarksConfig.make({
         targets: {
           chrome: {
@@ -506,6 +546,11 @@ describe("push", () => {
         yamlOverride: config,
       }))).rejects.toThrow("Target unavailable")
     } finally {
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"]
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })
@@ -621,6 +666,50 @@ describe("pull", () => {
         dryRun: true,
       }))).rejects.toThrow("Bookmark separators are not supported")
     } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("sync", () => {
+  test("fails clearly for duplicate URLs in the browser before queueing or backup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-browser-duplicates-"))
+    const chromePath = join(dir, "Bookmarks")
+    const backupDir = join(dir, "backups")
+    const runtimeDir = join(dir, "runtime")
+    const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+
+    try {
+      process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await writeChromeFixture(chromePath, ["Dup", "Dup"])
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({}),
+      })
+
+      await expect(run(Sync.sync({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+      }))).rejects.toThrow('Duplicate URL "https://dup.example"')
+      await expect(readdir(backupDir)).rejects.toThrow()
+    } finally {
+      if (originalBackupDir === undefined) {
+        delete process.env["BOOKMARKS_BACKUP_DIR"]
+      } else {
+        process.env["BOOKMARKS_BACKUP_DIR"] = originalBackupDir
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"]
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })

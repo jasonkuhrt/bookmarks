@@ -234,6 +234,7 @@ const serializeSyncResult = (
   yamlPath,
   dryRun,
   orchestration: result.orchestration ?? null,
+  backup: result.backup ?? null,
   applied: result.applied.map(serializePatch),
   graveyarded: result.graveyarded.map(serializePatch),
   targets: result.targets.map((targetResult) => ({
@@ -273,6 +274,15 @@ const printSyncSummary = (
     }
 
     yield* Console.log(`\n${label} complete: ${result.applied.length} applied, ${result.graveyarded.length} graveyarded`)
+    if (result.backup) {
+      yield* Console.log(`  backup: ${result.backup.backupDir}`)
+      for (const file of result.backup.files) {
+        yield* Console.log(`    wrote ${file}`)
+      }
+      for (const skipped of result.backup.skipped) {
+        yield* Console.log(`    skipped ${skipped}`)
+      }
+    }
     for (const targetResult of result.targets) {
       yield* Console.log(
         `  ${targetResult.target.browser}/${targetResult.target.profile}: ` +

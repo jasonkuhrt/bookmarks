@@ -120,4 +120,60 @@ describe("bookmarks CLI", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("sync --json reports automatic backups for managed mutations", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const backupDir = join(dir, "backups")
+    const runtimeDir = join(dir, "runtime")
+
+    try {
+      await copyChromeBookmarksFixture(chromePath)
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({}),
+      })
+
+      await run(YamlModule.save(yamlPath, config))
+
+      await runGit(dir, "init", "-b", "main")
+      await runGit(dir, "config", "user.name", "Bookmarks Test")
+      await runGit(dir, "config", "user.email", "bookmarks-test@example.com")
+      await runGit(dir, "add", "bookmarks.yaml")
+      await runGit(dir, "commit", "-m", "baseline")
+
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_BACKUP_DIR: backupDir,
+        BOOKMARKS_RUNTIME_DIR: runtimeDir,
+      }
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
+
+      const syncJson = await runCommand(dir, [process.execPath, cliPath, "sync", "--json"], cliEnv)
+      expect(syncJson.exitCode).toBe(0)
+
+      const parsedSync = JSON.parse(syncJson.stdout) as {
+        readonly backup: {
+          readonly backupDir: string
+          readonly files: readonly string[]
+          readonly skipped: readonly string[]
+        } | null
+      }
+
+      expect(parsedSync.backup?.backupDir).toBe(backupDir)
+      expect(parsedSync.backup?.files).toHaveLength(2)
+      expect(parsedSync.backup?.skipped).toHaveLength(0)
+
+      const yamlAfter = await readFile(yamlPath, "utf-8")
+      expect(yamlAfter).toContain("Top Link")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

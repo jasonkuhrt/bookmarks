@@ -2,7 +2,7 @@ import { Data, DateTime, Effect } from "effect"
 import * as Fs from "node:fs/promises"
 import * as Paths from "./paths.js"
 
-export type SyncOperation = "pull" | "push" | "sync"
+export type SyncOperation = "gc" | "pull" | "push" | "sync"
 
 interface SyncLockState {
   readonly pid: number

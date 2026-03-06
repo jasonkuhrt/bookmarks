@@ -93,6 +93,8 @@ Notes:
 
 - `status` shows pending changes in both directions and now includes patch previews.
 - `push`, `pull`, and `sync` support `--dry-run` and `--json`.
+- non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.bookmarks/backups/` before they attempt writes.
+- the explicit `bookmarks backup` command is still available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
 - runtime orchestration serializes active sync runs and queues temporary browser-open blockers instead of forcing manual retry loops.
 

@@ -18,6 +18,7 @@ import * as Patch from "./patch.js"
 import * as Permissions from "./permissions.js"
 import * as Targets from "./targets.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
+import { ensureMutationSupported } from "./unsupported.js"
 import * as YamlModule from "./yaml.js"
 
 export interface SyncResult {
@@ -25,6 +26,7 @@ export interface SyncResult {
   readonly graveyarded: readonly Patch.BookmarkPatch[]
   readonly targets: readonly TargetResult[]
   readonly orchestration?: Orchestration.SyncNotice
+  readonly backup?: BackupResult
 }
 
 export interface ConflictResolution {
@@ -437,6 +439,7 @@ export interface SyncConfig {
 export interface BackupConfig {
   readonly yamlPath: string
   readonly backupDir: string
+  readonly yamlOverride?: BookmarksConfig
 }
 
 const defaultTargets = () => ({
@@ -479,9 +482,9 @@ const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =
         targets: [],
       }
 
-const ensureMutationSafety = (
+const ensurePermanentMutationSafety = (
   yamlConfig: BookmarksConfig,
-): Effect.Effect<void, Error | Orchestration.TemporarySyncBlocker> =>
+): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     const enabledTargets = Targets.listEnabledTargets(yamlConfig)
 
@@ -492,6 +495,20 @@ const ensureMutationSafety = (
     for (const target of enabledTargets) {
       yield* Permissions.requireTargetAvailable(Targets.displayNameOf(target), target.path)
     }
+
+    for (const target of enabledTargets) {
+      const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
+      yield* ensureMutationSupported(yamlTree, `yaml profile ${Targets.displayNameOf(target)}`)
+      const browserTree = yield* Targets.readTree(target)
+      yield* ensureMutationSupported(browserTree, `${Targets.displayNameOf(target)} target`)
+    }
+  })
+
+const ensureTemporaryMutationSafety = (
+  yamlConfig: BookmarksConfig,
+): Effect.Effect<void, Orchestration.TemporarySyncBlocker> =>
+  Effect.gen(function* () {
+    const enabledTargets = Targets.listEnabledTargets(yamlConfig)
 
     const runningBrowsers: string[] = []
 
@@ -506,6 +523,16 @@ const ensureMutationSafety = (
     }
   })
 
+const createMutationBackup = (
+  config: SyncConfig,
+  yamlConfig: BookmarksConfig,
+): Effect.Effect<BackupResult, Error> =>
+  backup({
+    yamlPath: config.yamlPath,
+    backupDir: Paths.defaultBackupDir(),
+    yamlOverride: yamlConfig,
+  })
+
 const runManagedOperation = (
   requestedOperation: Orchestration.SyncOperation,
   config: SyncConfig,
@@ -516,17 +543,33 @@ const runManagedOperation = (
     (operation) =>
       Effect.gen(function* () {
         const yamlConfig = yield* loadConfig(config)
-        yield* ensureMutationSafety(yamlConfig)
+        yield* ensurePermanentMutationSafety(yamlConfig)
+        yield* ensureTemporaryMutationSafety(yamlConfig)
+        const mutationBackup = yield* createMutationBackup(config, yamlConfig)
 
         const nextConfig = { ...config, yamlOverride: yamlConfig }
 
         switch (operation) {
           case "pull":
-            return yield* runPull(nextConfig)
+            return {
+              ...(yield* runPull(nextConfig)),
+              backup: mutationBackup,
+            }
           case "push":
-            return yield* runPush(nextConfig)
+            return {
+              ...(yield* runPush(nextConfig)),
+              backup: mutationBackup,
+            }
+          case "gc":
+            return {
+              ...(yield* runGc(nextConfig)),
+              backup: mutationBackup,
+            }
           case "sync":
-            return yield* runSync(nextConfig)
+            return {
+              ...(yield* runSync(nextConfig)),
+              backup: mutationBackup,
+            }
         }
       }),
   ).pipe(
@@ -945,7 +988,11 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
 
 export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error> =>
   Effect.gen(function* () {
-    const yamlConfig = yield* loadConfig({ yamlPath: config.yamlPath })
+    const yamlConfig = yield* loadConfig(
+      config.yamlOverride
+        ? { yamlPath: config.yamlPath, yamlOverride: config.yamlOverride }
+        : { yamlPath: config.yamlPath },
+    )
     const backupDir = config.backupDir
     const timestamp = DateTime.formatIso(DateTime.unsafeNow())
       .replaceAll(":", "-")
@@ -969,10 +1016,10 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
     for (const candidate of candidates) {
       const destination = Path.join(backupDir, candidate.filename)
-    const exists = yield* Effect.tryPromise({
-      try: () => Fs.access(candidate.path).then(() => true, () => false),
-      catch: (e) => new Error(`Failed to inspect backup candidate ${candidate.path}: ${e}`),
-    })
+      const exists = yield* Effect.tryPromise({
+        try: () => Fs.access(candidate.path).then(() => true, () => false),
+        catch: (e) => new Error(`Failed to inspect backup candidate ${candidate.path}: ${e}`),
+      })
 
       if (!exists) {
         skipped.push(candidate.label)
@@ -989,7 +1036,7 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
     return { backupDir, files, skipped }
   })
 
-export const gc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const maxAge = config.graveyardMaxAge ?? Duration.days(90)
@@ -1023,3 +1070,8 @@ export const gc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       targets: targetResults,
     }
   })
+
+export const gc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+  config.dryRun
+    ? runGc(config)
+    : runManagedOperation("gc", config)
