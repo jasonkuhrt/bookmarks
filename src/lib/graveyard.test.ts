@@ -22,8 +22,26 @@ const mkDate = (iso: string): DateTime.Utc => DateTime.unsafeMake(iso) as DateTi
 const mkAddPatch = (url: string, name: string, path: string, date: DateTime.Utc): Patch.BookmarkPatch =>
   Patch.Add({ url, name, path, date })
 
-const mkRemovePatch = (url: string, path: string, date: DateTime.Utc): Patch.BookmarkPatch =>
-  Patch.Remove({ url, path, date })
+const mkRemovePatch = (url: string, name: string, path: string, date: DateTime.Utc): Patch.BookmarkPatch =>
+  Patch.Remove({ url, name, path, date })
+
+const mkRenamePatch = (
+  url: string,
+  path: string,
+  oldName: string,
+  newName: string,
+  date: DateTime.Utc,
+): Patch.BookmarkPatch =>
+  Patch.Rename({ url, path, oldName, newName, date })
+
+const mkMovePatch = (
+  url: string,
+  name: string,
+  fromPath: string,
+  toPath: string,
+  date: DateTime.Utc,
+): Patch.BookmarkPatch =>
+  Patch.Move({ url, name, fromPath, toPath, date })
 
 // -- parseEventFolderName --
 
@@ -136,7 +154,7 @@ describe("addToGraveyard", () => {
 
   test("handles Remove patch", async () => {
     const tree = emptyTree()
-    const patch = mkRemovePatch("https://removed.com", "favorites_bar/Old", mkDate("2025-01-01"))
+    const patch = mkRemovePatch("https://removed.com", "Old Bookmark", "favorites_bar/Old", mkDate("2025-01-01"))
 
     const result = await run(
       Graveyard.addToGraveyard(tree, patch, "safari", "deleted"),
@@ -148,6 +166,65 @@ describe("addToGraveyard", () => {
     expect(graveyardFolder.children.length).toBe(1)
     const eventFolder = graveyardFolder.children[0] as BookmarkFolder
     expect(eventFolder.name).toMatch(/^\d{4}-\d{2}-\d{2}_safari_deleted$/)
+    const pathRoot = eventFolder.children[0] as BookmarkFolder
+    const oldFolder = pathRoot.children[0] as BookmarkFolder
+    const leafNode = oldFolder.children[0] as BookmarkLeaf
+    expect(leafNode.name).toBe("Old Bookmark")
+    expect(leafNode.url).toBe("https://removed.com")
+  })
+
+  test("preserves original path and old title for Rename patch", async () => {
+    const tree = emptyTree()
+    const patch = mkRenamePatch(
+      "https://renamed.com",
+      "favorites_bar/Research",
+      "Old Title",
+      "New Title",
+      mkDate("2025-01-01"),
+    )
+
+    const result = await run(
+      Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
+    )
+
+    const graveyardFolder = result.other!.find(
+      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
+    )!
+    const eventFolder = graveyardFolder.children[0] as BookmarkFolder
+    const pathRoot = eventFolder.children[0] as BookmarkFolder
+    const researchFolder = pathRoot.children[0] as BookmarkFolder
+    const leafNode = researchFolder.children[0] as BookmarkLeaf
+    expect(pathRoot.name).toBe("favorites_bar")
+    expect(researchFolder.name).toBe("Research")
+    expect(leafNode.name).toBe("Old Title")
+    expect(leafNode.url).toBe("https://renamed.com")
+  })
+
+  test("preserves original path and title for Move patch", async () => {
+    const tree = emptyTree()
+    const patch = mkMovePatch(
+      "https://moved.com",
+      "Moved Bookmark",
+      "favorites_bar/Projects",
+      "other/Archive",
+      mkDate("2025-01-01"),
+    )
+
+    const result = await run(
+      Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
+    )
+
+    const graveyardFolder = result.other!.find(
+      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
+    )!
+    const eventFolder = graveyardFolder.children[0] as BookmarkFolder
+    const pathRoot = eventFolder.children[0] as BookmarkFolder
+    const projectsFolder = pathRoot.children[0] as BookmarkFolder
+    const leafNode = projectsFolder.children[0] as BookmarkLeaf
+    expect(pathRoot.name).toBe("favorites_bar")
+    expect(projectsFolder.name).toBe("Projects")
+    expect(leafNode.name).toBe("Moved Bookmark")
+    expect(leafNode.url).toBe("https://moved.com")
   })
 })
 

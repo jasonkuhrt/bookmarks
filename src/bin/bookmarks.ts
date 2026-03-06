@@ -6,18 +6,22 @@
  *   bookmarks <command> [options]
  *
  * Commands:
+ *   import      browsers -> workspace files
  *   push        YAML -> browsers
  *   pull        browsers -> YAML
  *   sync        bidirectional (pull then push)
+ *   plan        workspace -> publish plan
+ *   publish     workspace -> browsers
+ *   next        guided workflow router
  *   status      show current state
  *   backup      timestamped backups
  *   gc          clean graveyard
  *   daemon      launchd lifecycle
- *   validate    schema check only
+ *   validate    validate workspace or YAML
  */
 
 import { Cause, Console, Data, DateTime, Duration, Effect, Exit, LogLevel, Logger, Option } from "effect"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { access, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { BookmarkPatch } from "../lib/patch.js"
 
@@ -31,6 +35,8 @@ import * as Doctor from "../lib/doctor.js"
 import * as Paths from "../lib/paths.js"
 import * as SyncModule from "../lib/sync.js"
 import { UnsupportedBookmarks } from "../lib/unsupported.js"
+import * as Workspace from "../lib/workspace.js"
+import type { WorkspaceNextResult, WorkspacePlan } from "../lib/workspace-types.js"
 import * as YamlModule from "../lib/yaml.js"
 
 const JSON_OUTPUT = process.argv.includes("--json")
@@ -43,15 +49,19 @@ Usage:
   bookmarks <command> [options]
 
 Commands:
+  bookmarks import [target...] [--json]      browsers -> workspace files
   bookmarks push [--dry-run] [--json]    YAML -> browsers
   bookmarks pull [--dry-run] [--json]    browsers -> YAML
   bookmarks sync [--dry-run] [--json]    bidirectional (pull then push)
+  bookmarks plan [--json]                workspace -> publish plan
+  bookmarks publish [--json]             workspace -> browsers
+  bookmarks next [--json]                guided workflow router
   bookmarks status [--json]              show current state
   bookmarks backup [--json]              timestamped backups
   bookmarks gc [--max-age=90d] [--json]  clean graveyard
   bookmarks daemon start|stop|status     launchd lifecycle
   bookmarks doctor [--json]              pre-flight diagnostics
-  bookmarks validate [--json]            schema check only
+  bookmarks validate [--json]            validate workspace or YAML
 `.trim()
 
 interface CliFlags {
@@ -83,6 +93,12 @@ const parseArgs = (args: string[]) => {
 
 const printJson = (value: unknown) =>
   Console.log(JSON.stringify(value, null, 2))
+
+const pathExists = (path: string): Effect.Effect<boolean, Error> =>
+  Effect.tryPromise({
+    try: () => access(path).then(() => true, () => false),
+    catch: (e) => new Error(`Failed to inspect ${path}: ${e}`),
+  })
 
 const emitCliError = (message: string, json: boolean): Effect.Effect<never, CliExitError> =>
   Effect.gen(function* () {
@@ -155,11 +171,12 @@ const serializePatch = (patch: BookmarkPatch) => {
     case "Add":
       return { tag: patch._tag, url: patch.url, name: patch.name, path: patch.path, date: patch.date.toJSON() }
     case "Remove":
-      return { tag: patch._tag, url: patch.url, path: patch.path, date: patch.date.toJSON() }
+      return { tag: patch._tag, url: patch.url, name: patch.name, path: patch.path, date: patch.date.toJSON() }
     case "Rename":
       return {
         tag: patch._tag,
         url: patch.url,
+        path: patch.path,
         oldName: patch.oldName,
         newName: patch.newName,
         date: patch.date.toJSON(),
@@ -168,6 +185,7 @@ const serializePatch = (patch: BookmarkPatch) => {
       return {
         tag: patch._tag,
         url: patch.url,
+        name: patch.name,
         fromPath: patch.fromPath,
         toPath: patch.toPath,
         date: patch.date.toJSON(),
@@ -180,11 +198,11 @@ const formatPatch = (patch: BookmarkPatch): string => {
     case "Add":
       return `+ Add "${patch.name}" -> ${patch.path} (${patch.url})`
     case "Remove":
-      return `- Remove ${patch.url} from ${patch.path}`
+      return `- Remove "${patch.name}" from ${patch.path} (${patch.url})`
     case "Rename":
-      return `~ Rename ${patch.url} "${patch.oldName}" -> "${patch.newName}"`
+      return `~ Rename "${patch.oldName}" -> "${patch.newName}" at ${patch.path} (${patch.url})`
     case "Move":
-      return `> Move ${patch.url} ${patch.fromPath} -> ${patch.toPath}`
+      return `> Move "${patch.name}" ${patch.fromPath} -> ${patch.toPath} (${patch.url})`
   }
 }
 
@@ -325,6 +343,103 @@ const printBackupSummary = (result: SyncModule.BackupResult) =>
     }
   })
 
+const printWorkspaceImportSummary = (result: Workspace.WorkspaceImportResult) =>
+  Effect.gen(function* () {
+    yield* Console.log(`Workspace import complete: ${result.snapshotId}`)
+    yield* Console.log(`  workspace: ${result.workspacePath}`)
+    yield* Console.log(`  import lock: ${result.importLockPath}`)
+    yield* Console.log(`  targets: ${result.targets.join(", ")}`)
+    if (result.backup) {
+      yield* Console.log(`  backup: ${result.backup.backupDir}`)
+      for (const file of result.backup.files) {
+        yield* Console.log(`    wrote ${file}`)
+      }
+      for (const skipped of result.backup.skipped) {
+        yield* Console.log(`    skipped ${skipped}`)
+      }
+    }
+  })
+
+const printWorkspaceValidation = (result: Workspace.WorkspaceValidationResult) =>
+  Effect.gen(function* () {
+    if (result.valid) {
+      yield* Console.log(`Workspace is valid: ${result.workspacePath}`)
+      return
+    }
+
+    yield* Console.error(`Workspace validation failed: ${result.workspacePath}`)
+    for (const error of result.errors) {
+      yield* Console.error(`  - ${error}`)
+    }
+  })
+
+const printWorkspacePlan = (plan: WorkspacePlan) =>
+  Effect.gen(function* () {
+    yield* Console.log(`Plan generated: ${plan.generatedAt}`)
+    yield* Console.log(`  workspace: ${plan.workspacePath}`)
+    yield* Console.log(`  snapshot:  ${plan.snapshotId}`)
+    yield* Console.log(`  blockers:  ${plan.summary.blockerCount}`)
+    yield* Console.log(`  inbox:     ${plan.summary.inboxItems}`)
+    yield* Console.log(`  archive:   ${plan.summary.archiveItems}`)
+    yield* Console.log(`  quarantine:${plan.summary.quarantineItems}`)
+
+    for (const blocker of plan.blockers) {
+      const target = blocker.targetId ? ` [${blocker.targetId}]` : ""
+      const location = blocker.location ? ` (${blocker.location})` : ""
+      yield* Console.log(`  blocker${target}: ${blocker.message}${location}`)
+    }
+
+    for (const target of plan.targets) {
+      yield* Console.log(`  ${target.targetId}: ${target.status} (${target.writeMode})`)
+      for (const blocker of target.blockers) {
+        yield* Console.log(`    blocker: ${blocker.message}`)
+      }
+    }
+  })
+
+const printWorkspacePublishSummary = (result: Workspace.WorkspacePublishResult) =>
+  Effect.gen(function* () {
+    yield* Console.log(`Publish complete: ${result.publishedTargets.length} target(s) updated`)
+    yield* Console.log(`  generated at: ${result.plan.generatedAt}`)
+    yield* Console.log(`  published at: ${result.plan.publishedAt}`)
+    yield* Console.log(`  backup: ${result.backup.backupDir}`)
+    for (const file of result.backup.files) {
+      yield* Console.log(`    wrote ${file}`)
+    }
+    for (const skipped of result.backup.skipped) {
+      yield* Console.log(`    skipped ${skipped}`)
+    }
+    for (const targetId of result.publishedTargets) {
+      yield* Console.log(`  published: ${targetId}`)
+    }
+  })
+
+const printWorkspaceNext = (result: WorkspaceNextResult) =>
+  Effect.gen(function* () {
+    yield* Console.log(`Next: ${result.state}`)
+    yield* Console.log(
+      `  summary: inbox=${result.summary.inboxItems}, canonical=${result.summary.canonicalItems}, archive=${result.summary.archiveItems}, quarantine=${result.summary.quarantineItems}, blockers=${result.summary.blockerCount}`,
+    )
+    for (const blocker of result.blockers) {
+      const target = blocker.targetId ? ` [${blocker.targetId}]` : ""
+      const location = blocker.location ? ` (${blocker.location})` : ""
+      yield* Console.log(`  blocker${target}: ${blocker.message}${location}`)
+    }
+
+    switch (result.nextAction.kind) {
+      case "run_command":
+        yield* Console.log(`  run: ${result.nextAction.command}`)
+        break
+      case "edit_file":
+      case "inspect_file":
+        yield* Console.log(`  file: ${result.nextAction.path}`)
+        break
+      case "done":
+        break
+    }
+    yield* Console.log(`  message: ${result.nextAction.message}`)
+  })
+
 const program = Effect.gen(function* () {
   const [command, ...args] = process.argv.slice(2)
 
@@ -336,6 +451,48 @@ const program = Effect.gen(function* () {
   const { flags, positional } = parseArgs(args)
 
   switch (command) {
+    case "import": {
+      const importResult = yield* Workspace.importState(positional)
+      if (flags.json) {
+        yield* printJson(importResult)
+      } else {
+        yield* printWorkspaceImportSummary(importResult)
+      }
+      break
+    }
+    case "plan": {
+      const workspacePlan = yield* Workspace.plan()
+      if (flags.json) {
+        yield* printJson(workspacePlan)
+      } else {
+        yield* printWorkspacePlan(workspacePlan)
+      }
+      if (workspacePlan.blockers.length > 0) {
+        return yield* Effect.fail(new CliExitError())
+      }
+      break
+    }
+    case "publish": {
+      const publishResult = yield* Workspace.publish()
+      if (flags.json) {
+        yield* printJson(publishResult)
+      } else {
+        yield* printWorkspacePublishSummary(publishResult)
+      }
+      break
+    }
+    case "next": {
+      const nextResult = yield* Workspace.next()
+      if (flags.json) {
+        yield* printJson(nextResult)
+      } else {
+        yield* printWorkspaceNext(nextResult)
+      }
+      if (nextResult.state === "has_blockers") {
+        return yield* Effect.fail(new CliExitError())
+      }
+      break
+    }
     case "push": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
       const preview = flags.dryRun
@@ -492,17 +649,39 @@ const program = Effect.gen(function* () {
       break
     }
     case "validate": {
-      const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
+      const workspacePath = Paths.defaultWorkspacePath()
+      if (yield* pathExists(workspacePath)) {
+        const result = yield* Workspace.validate()
+        if (flags.json) {
+          yield* printJson(result)
+        } else {
+          yield* printWorkspaceValidation(result)
+        }
+        if (!result.valid) {
+          return yield* Effect.fail(new CliExitError())
+        }
+        break
+      }
+
+      const yamlPath = Paths.defaultYamlPath()
+      if (!(yield* pathExists(yamlPath))) {
+        return yield* emitCliError(
+          `No workspace found at ${workspacePath} and no bookmarks.yaml found at ${yamlPath}.`,
+          flags.json,
+        )
+      }
+
+      const managed = yield* ensureManagedFiles(yamlPath)
       yield* YamlModule.load(managed.yamlPath).pipe(
         Effect.flatMap(() =>
           flags.json
-            ? printJson({ yamlPath: managed.yamlPath, valid: true })
+            ? printJson({ path: managed.yamlPath, kind: "yaml", valid: true })
             : Console.log("bookmarks.yaml is valid"),
         ),
         Effect.catchAll((e) =>
           Effect.gen(function* () {
             if (flags.json) {
-              yield* printJson({ yamlPath: managed.yamlPath, valid: false, error: e.message })
+              yield* printJson({ path: managed.yamlPath, kind: "yaml", valid: false, error: e.message })
             } else {
               yield* Console.error(e.message)
             }

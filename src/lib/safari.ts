@@ -12,8 +12,10 @@ import { Effect, Schema } from "effect"
 import { rename } from "node:fs/promises"
 import * as Patch from "./patch.js"
 import { BookmarkLeaf, BookmarkFolder, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
+import type { WorkspaceNode, WorkspaceTree } from "./schema/workspace.js"
 import { separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.js"
 import type { BookmarkIssue } from "./unsupported.js"
+import type { ImportedOccurrence, ImportedTargetSnapshot } from "./workspace-types.js"
 
 // -- Plist type aliases (matches @plist/common; avoids direct dependency on internal package) --
 
@@ -159,6 +161,165 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
       other: sections.other,
       reading_list: sections.reading_list,
     })
+  })
+
+const plistToJson = (value: PlistValue): unknown => {
+  if (value === null) return null
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value
+  if (typeof value === "bigint") return value.toString()
+  if (value instanceof Date) return value.toISOString()
+  if (value instanceof ArrayBuffer) return { type: "ArrayBuffer", byteLength: value.byteLength }
+  if (Array.isArray(value)) return value.map((entry) => plistToJson(entry))
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, plistToJson(entry)]),
+  )
+}
+
+export const importBookmarks = (
+  plistPath: string,
+  targetId: string,
+): Effect.Effect<ImportedTargetSnapshot, Error> =>
+  Effect.gen(function* () {
+    const data = yield* Effect.tryPromise({
+      try: () => Bun.file(plistPath).arrayBuffer(),
+      catch: (cause) => new Error(`Failed to read plist at ${plistPath}`, { cause }),
+    })
+
+    const root = parse(data) as PlistDict
+    const children = (root["Children"] as PlistDict[] | undefined) ?? []
+    const occurrences: ImportedOccurrence[] = []
+    const targetToken = targetId.replaceAll("/", "__").replaceAll(/[^a-zA-Z0-9_]/g, "_")
+    let nextNodeId = 1
+    let nextOccurrenceId = 1
+
+    const allocateNodeId = () => `node_${targetToken}_${nextNodeId++}`
+    const allocateOccurrenceId = () => `occ_${targetToken}_${nextOccurrenceId++}`
+
+    const importNodes = (
+      nodes: PlistDict[],
+      parentPath: readonly string[],
+    ): WorkspaceNode[] =>
+      nodes.map((node, index) => {
+        const type = String(node["WebBookmarkType"] ?? "")
+        const title = typeof node["Title"] === "string"
+          ? node["Title"]
+          : typeof (node["URIDictionary"] as PlistDict | undefined)?.["title"] === "string"
+            ? String((node["URIDictionary"] as PlistDict)["title"])
+            : `[${index + 1}]`
+        const occurrenceId = allocateOccurrenceId()
+        const itemPath = [...parentPath, title]
+        const nativeId = typeof node["WebBookmarkUUID"] === "string"
+          ? node["WebBookmarkUUID"]
+          : null
+
+        if (type === "WebBookmarkTypeLeaf") {
+          const url = typeof node["URLString"] === "string" ? node["URLString"] : ""
+          occurrences.push({
+            id: occurrenceId,
+            targetId,
+            nativeId,
+            kind: "bookmark",
+            title,
+            url,
+            path: itemPath,
+            nativeKinds: [type],
+          })
+          return {
+            kind: "bookmark" as const,
+            id: allocateNodeId(),
+            title,
+            url,
+            sources: [occurrenceId],
+          }
+        }
+
+        if (type === "WebBookmarkTypeList") {
+          occurrences.push({
+            id: occurrenceId,
+            targetId,
+            nativeId,
+            kind: "folder",
+            title,
+            path: itemPath,
+            nativeKinds: [type],
+          })
+          return {
+            kind: "folder" as const,
+            id: allocateNodeId(),
+            title,
+            children: importNodes((node["Children"] as PlistDict[] | undefined) ?? [], itemPath) ?? [],
+            sources: [occurrenceId],
+          }
+        }
+
+        if (type.includes("Separator") || title.toLowerCase().includes("separator")) {
+          occurrences.push({
+            id: occurrenceId,
+            targetId,
+            nativeId,
+            kind: "separator",
+            title,
+            path: itemPath,
+            nativeKinds: [type],
+            payload: plistToJson(node),
+          })
+          return {
+            kind: "separator" as const,
+            id: allocateNodeId(),
+            sources: [occurrenceId],
+            note: `Imported Safari separator-like node "${type}"`,
+          }
+        }
+
+        occurrences.push({
+          id: occurrenceId,
+          targetId,
+          nativeId,
+          kind: "raw",
+          title,
+          path: itemPath,
+          nativeKinds: [type],
+          payload: plistToJson(node),
+        })
+        return {
+          kind: "raw" as const,
+          id: allocateNodeId(),
+          title,
+          nativeKinds: [type],
+          sources: [occurrenceId],
+          note: `Imported unsupported Safari node type "${type}"`,
+        }
+      })
+
+    const tree: WorkspaceTree = {}
+    const other: WorkspaceNode[] = []
+
+    for (const child of children) {
+      const type = String(child["WebBookmarkType"] ?? "")
+      const title = typeof child["Title"] === "string" ? child["Title"] : undefined
+      const sectionKey = title ? SECTION_TITLE_TO_KEY[title] : undefined
+
+      if (sectionKey && child["Children"]) {
+        tree[sectionKey] = importNodes(child["Children"] as PlistDict[], [sectionKey])
+        continue
+      }
+
+      if (title === "BookmarksMenu") {
+        other.push(...importNodes((child["Children"] as PlistDict[] | undefined) ?? [], ["other"]))
+        continue
+      }
+
+      if (type === "WebBookmarkTypeProxy" && title === "History") {
+        other.push(...importNodes([child], ["other"]))
+        continue
+      }
+
+      other.push(...importNodes([child], ["other"]))
+    }
+
+    if (other.length > 0) tree.other = other
+
+    return { tree, occurrences }
   })
 
 // -- applyPatches --

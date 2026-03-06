@@ -126,7 +126,7 @@ describe("resolveConflicts", () => {
   test("one side empty: all from other side applied", async () => {
     const patches = [
       Patch.Add({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
-      Patch.Remove({ url: "https://b.com", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://b.com", name: "B", path: "favorites_bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.resolveConflicts(patches, []))
     expect(result.apply.length).toBe(2)
@@ -180,7 +180,7 @@ describe("applyPatches", () => {
       favorites_bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://a.com", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
     expect(result.favorites_bar).toBeDefined()
@@ -195,7 +195,7 @@ describe("applyPatches", () => {
       other: [leaf("B", "https://b.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://a.com", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
     expect(result.favorites_bar).toBeUndefined()
@@ -207,7 +207,7 @@ describe("applyPatches", () => {
       favorites_bar: [leaf("Old Name", "https://a.com")],
     })
     const patches = [
-      Patch.Rename({ url: "https://a.com", oldName: "Old Name", newName: "New Name", date: makeDate("2025-01-01") }),
+      Patch.Rename({ url: "https://a.com", path: "favorites_bar", oldName: "Old Name", newName: "New Name", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
     expect(result.favorites_bar).toBeDefined()
@@ -223,7 +223,7 @@ describe("applyPatches", () => {
       favorites_bar: [leaf("A", "https://a.com")],
     })
     const patches = [
-      Patch.Move({ url: "https://a.com", fromPath: "favorites_bar", toPath: "other", date: makeDate("2025-01-01") }),
+      Patch.Move({ url: "https://a.com", name: "A", fromPath: "favorites_bar", toPath: "other", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
     expect(result.favorites_bar).toBeUndefined()
@@ -240,8 +240,8 @@ describe("applyPatches", () => {
       favorites_bar: [leaf("ToRemove", "https://remove.com"), leaf("ToRename", "https://rename.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://remove.com", path: "favorites_bar", date: makeDate("2025-01-01") }),
-      Patch.Rename({ url: "https://rename.com", oldName: "ToRename", newName: "Renamed", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://remove.com", name: "ToRemove", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Rename({ url: "https://rename.com", path: "favorites_bar", oldName: "ToRename", newName: "Renamed", date: makeDate("2025-01-01") }),
       Patch.Add({ url: "https://new.com", name: "New", path: "favorites_bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
@@ -294,7 +294,7 @@ describe("applyPatches", () => {
     })
 
     const result = await run(Sync.applyPatches(tree, [
-      Patch.Remove({ url: "https://only.example", path: "favorites_bar/Projects", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://only.example", name: "Only", path: "favorites_bar/Projects", date: makeDate("2025-01-01") }),
     ]))
 
     expect(result).toEqual(new BookmarkTree({

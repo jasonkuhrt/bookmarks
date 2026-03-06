@@ -17,9 +17,9 @@ import { ensureMutationSupported } from "./unsupported.js"
 
 export type BookmarkPatch = Data.TaggedEnum<{
   Add: { readonly url: string; readonly name: string; readonly path: string; readonly date: DateTime.Utc }
-  Remove: { readonly url: string; readonly path: string; readonly date: DateTime.Utc }
-  Rename: { readonly url: string; readonly oldName: string; readonly newName: string; readonly date: DateTime.Utc }
-  Move: { readonly url: string; readonly fromPath: string; readonly toPath: string; readonly date: DateTime.Utc }
+  Remove: { readonly url: string; readonly name: string; readonly path: string; readonly date: DateTime.Utc }
+  Rename: { readonly url: string; readonly path: string; readonly oldName: string; readonly newName: string; readonly date: DateTime.Utc }
+  Move: { readonly url: string; readonly name: string; readonly fromPath: string; readonly toPath: string; readonly date: DateTime.Utc }
 }>
 
 export const { Add, Remove, Rename, Move, $is, $match } = Data.taggedEnum<BookmarkPatch>()
@@ -138,10 +138,10 @@ export const generatePatches = (
       } else {
         const prev = lastEntry.value
         if (prev.path !== entry.path) {
-          patches.push(Move({ url, fromPath: prev.path, toPath: entry.path, date: dateFor(url) }))
+          patches.push(Move({ url, name: prev.name, fromPath: prev.path, toPath: entry.path, date: dateFor(url) }))
         }
         if (prev.name !== entry.name) {
-          patches.push(Rename({ url, oldName: prev.name, newName: entry.name, date: dateFor(url) }))
+          patches.push(Rename({ url, path: prev.path, oldName: prev.name, newName: entry.name, date: dateFor(url) }))
         }
       }
     })
@@ -149,7 +149,7 @@ export const generatePatches = (
     // URLs in lastSync but not in current → remove
     HashMap.forEach(lastIndex, (entry, url) => {
       if (Option.isNone(HashMap.get(currentIndex, url))) {
-        patches.push(Remove({ url, path: entry.path, date: dateFor(url) }))
+        patches.push(Remove({ url, name: entry.name, path: entry.path, date: dateFor(url) }))
       }
     })
 

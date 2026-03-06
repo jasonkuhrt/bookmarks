@@ -246,7 +246,7 @@ describe("applyPatches", () => {
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
 
       await run(Safari.applyPatches(path, [
-        Patch.Remove({ url: target.url, path: "reading_list", date: now }),
+        Patch.Remove({ url: target.url, name: target.name, path: "reading_list", date: now }),
       ]))
 
       const treeAfter = await run(Safari.readBookmarks(path))
@@ -267,7 +267,7 @@ describe("applyPatches", () => {
       const newName = "RENAMED_TEST_BOOKMARK"
 
       await run(Safari.applyPatches(path, [
-        Patch.Rename({ url: target.url, oldName: target.name, newName, date: now }),
+        Patch.Rename({ url: target.url, path: "reading_list", oldName: target.name, newName, date: now }),
       ]))
 
       const treeAfter = await run(Safari.readBookmarks(path))
@@ -288,7 +288,7 @@ describe("applyPatches", () => {
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
 
       await run(Safari.applyPatches(path, [
-        Patch.Move({ url: target.url, fromPath: "reading_list", toPath: "favorites_bar", date: now }),
+        Patch.Move({ url: target.url, name: target.name, fromPath: "reading_list", toPath: "favorites_bar", date: now }),
       ]))
 
       const treeAfter = await run(Safari.readBookmarks(path))

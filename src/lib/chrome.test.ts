@@ -355,7 +355,7 @@ describe("applyPatches", () => {
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Remove({ url: target!.url, path: "favorites_bar", date: now }),
+          Patch.Remove({ url: target!.url, name: target!.name, path: "favorites_bar", date: now }),
         ]),
       )
 
@@ -397,7 +397,7 @@ describe("applyPatches", () => {
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Rename({ url: target!.url, oldName: target!.name, newName, date: now }),
+          Patch.Rename({ url: target!.url, path: "favorites_bar", oldName: target!.name, newName, date: now }),
         ]),
       )
 
@@ -446,6 +446,7 @@ describe("applyPatches", () => {
         Chrome.applyPatches(path, [
           Patch.Move({
             url: target!.url,
+            name: target!.name,
             fromPath: "favorites_bar",
             toPath: "other",
             date: now,

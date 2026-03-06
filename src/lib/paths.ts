@@ -10,6 +10,15 @@ export const defaultYamlPath = (): string =>
 export const defaultSchemaPath = (): string =>
   process.env["BOOKMARKS_SCHEMA_PATH"] ?? join(defaultBookmarksDir(), "bookmarks.schema.json")
 
+export const defaultWorkspacePath = (): string =>
+  process.env["BOOKMARKS_WORKSPACE_PATH"] ?? join(defaultBookmarksDir(), "workspace.yaml")
+
+export const defaultImportLockPath = (): string =>
+  process.env["BOOKMARKS_IMPORT_LOCK_PATH"] ?? join(defaultBookmarksDir(), "import.lock.json")
+
+export const defaultPublishPlanPath = (): string =>
+  process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] ?? join(defaultBookmarksDir(), "publish.plan.json")
+
 export const defaultBackupDir = (): string =>
   process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultBookmarksDir(), "backups")
 
@@ -24,3 +33,6 @@ export const defaultSyncQueuePath = (): string =>
 
 export const defaultSafariPlistPath = (): string =>
   join(homedir(), "Library/Safari/Bookmarks.plist")
+
+export const defaultChromeBookmarksPath = (): string =>
+  join(homedir(), "Library/Application Support/Google/Chrome/Default/Bookmarks")

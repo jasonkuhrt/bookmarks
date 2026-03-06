@@ -75,9 +75,9 @@ const buildPathFolders = (
 const patchToBookmarkInfo = (patch: Patch.BookmarkPatch): { url: string; name: string; pathSegments: string[] } =>
   Patch.$match(patch, {
     Add: (p) => ({ url: p.url, name: p.name, pathSegments: p.path.split("/") }),
-    Remove: (p) => ({ url: p.url, name: p.url, pathSegments: p.path.split("/") }),
-    Rename: (p) => ({ url: p.url, name: p.oldName, pathSegments: [] }),
-    Move: (p) => ({ url: p.url, name: p.url, pathSegments: p.fromPath.split("/") }),
+    Remove: (p) => ({ url: p.url, name: p.name, pathSegments: p.path.split("/") }),
+    Rename: (p) => ({ url: p.url, name: p.oldName, pathSegments: p.path.split("/") }),
+    Move: (p) => ({ url: p.url, name: p.name, pathSegments: p.fromPath.split("/") }),
   })
 
 /**

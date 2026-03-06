@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { copyChromeBookmarksFixture } from "../lib/test-fixtures.js"
 import { BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "../lib/schema/__.js"
+import * as Workspace from "../lib/workspace.js"
 import * as YamlModule from "../lib/yaml.js"
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
@@ -34,6 +35,52 @@ const runGit = async (cwd: string, ...args: string[]) => {
   const result = await runCommand(cwd, ["git", ...args])
   expect(result.exitCode).toBe(0)
   return result
+}
+
+const writeChromeBookmarks = async (path: string): Promise<void> => {
+  await Bun.write(path, JSON.stringify({
+    checksum: "",
+    version: 1,
+    roots: {
+      bookmark_bar: {
+        type: "folder",
+        name: "Bookmarks Bar",
+        id: "1",
+        guid: "root-bookmark-bar",
+        date_added: "0",
+        date_modified: "0",
+        children: [
+          {
+            type: "url",
+            name: "Top Link",
+            url: "https://top.example",
+            id: "2",
+            guid: "top-link",
+            date_added: "0",
+            date_last_used: "0",
+          },
+        ],
+      },
+      other: {
+        type: "folder",
+        name: "Other Bookmarks",
+        id: "3",
+        guid: "root-other",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+      synced: {
+        type: "folder",
+        name: "Mobile Bookmarks",
+        id: "4",
+        guid: "root-synced",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+    },
+  }, null, 2))
 }
 
 describe("bookmarks CLI", () => {
@@ -172,6 +219,96 @@ describe("bookmarks CLI", () => {
 
       const yamlAfter = await readFile(yamlPath, "utf-8")
       expect(yamlAfter).toContain("Top Link")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("import, next, plan, publish, and validate drive the workspace workflow", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-workspace-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+    const workspacePath = join(dir, "workspace.yaml")
+    const importLockPath = join(dir, "import.lock.json")
+    const publishPlanPath = join(dir, "publish.plan.json")
+    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const backupDir = join(dir, "backups")
+    const runtimeDir = join(dir, "runtime")
+
+    try {
+      await writeChromeBookmarks(chromePath)
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({}),
+      })
+
+      await run(YamlModule.save(yamlPath, config))
+
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_WORKSPACE_PATH: workspacePath,
+        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
+        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
+        BOOKMARKS_BACKUP_DIR: backupDir,
+        BOOKMARKS_RUNTIME_DIR: runtimeDir,
+      }
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
+
+      const imported = await runCommand(dir, [process.execPath, cliPath, "import", "--json"], cliEnv)
+      expect(imported.exitCode).toBe(0)
+      const parsedImport = JSON.parse(imported.stdout) as {
+        readonly targets: readonly string[]
+      }
+      expect(parsedImport.targets).toEqual(["chrome/default"])
+
+      const nextNeedsReview = await runCommand(dir, [process.execPath, cliPath, "next", "--json"], cliEnv)
+      expect(nextNeedsReview.exitCode).toBe(0)
+      const parsedNextNeedsReview = JSON.parse(nextNeedsReview.stdout) as {
+        readonly state: string
+      }
+      expect(parsedNextNeedsReview.state).toBe("needs_review")
+
+      const workspace = await run(Workspace.load(workspacePath))
+      const importedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
+      expect(importedNode?.kind).toBe("bookmark")
+      if (!importedNode || importedNode.kind !== "bookmark") {
+        throw new Error("Expected imported bookmark in favorites_bar")
+      }
+      workspace.inbox = {}
+      workspace.canonical = {
+        favorites_bar: [{ ...importedNode, title: "CLI Curated Link" }],
+      }
+      await run(Workspace.save(workspacePath, workspace))
+
+      const validated = await runCommand(dir, [process.execPath, cliPath, "validate", "--json"], cliEnv)
+      expect(validated.exitCode).toBe(0)
+      const parsedValidation = JSON.parse(validated.stdout) as { readonly valid: boolean }
+      expect(parsedValidation.valid).toBe(true)
+
+      const planned = await runCommand(dir, [process.execPath, cliPath, "plan", "--json"], cliEnv)
+      expect(planned.exitCode).toBe(0)
+      const parsedPlan = JSON.parse(planned.stdout) as {
+        readonly summary: { readonly blockerCount: number }
+      }
+      expect(parsedPlan.summary.blockerCount).toBe(0)
+
+      const published = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], cliEnv)
+      expect(published.exitCode).toBe(0)
+      const parsedPublish = JSON.parse(published.stdout) as {
+        readonly publishedTargets: readonly string[]
+      }
+      expect(parsedPublish.publishedTargets).toEqual(["chrome/default"])
+
+      const nextDone = await runCommand(dir, [process.execPath, cliPath, "next", "--json"], cliEnv)
+      expect(nextDone.exitCode).toBe(0)
+      const parsedNextDone = JSON.parse(nextDone.stdout) as {
+        readonly state: string
+      }
+      expect(parsedNextDone.state).toBe("done")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

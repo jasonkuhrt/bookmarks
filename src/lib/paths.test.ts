@@ -7,6 +7,9 @@ const ENV_KEYS = [
   "BOOKMARKS_DIR",
   "BOOKMARKS_YAML_PATH",
   "BOOKMARKS_SCHEMA_PATH",
+  "BOOKMARKS_WORKSPACE_PATH",
+  "BOOKMARKS_IMPORT_LOCK_PATH",
+  "BOOKMARKS_PUBLISH_PLAN_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
 ] as const
@@ -33,6 +36,9 @@ describe("paths", () => {
     expect(Paths.defaultBookmarksDir()).toBe(join(homedir(), ".bookmarks"))
     expect(Paths.defaultYamlPath()).toBe(join(homedir(), ".bookmarks", "bookmarks.yaml"))
     expect(Paths.defaultSchemaPath()).toBe(join(homedir(), ".bookmarks", "bookmarks.schema.json"))
+    expect(Paths.defaultWorkspacePath()).toBe(join(homedir(), ".bookmarks", "workspace.yaml"))
+    expect(Paths.defaultImportLockPath()).toBe(join(homedir(), ".bookmarks", "import.lock.json"))
+    expect(Paths.defaultPublishPlanPath()).toBe(join(homedir(), ".bookmarks", "publish.plan.json"))
     expect(Paths.defaultBackupDir()).toBe(join(homedir(), ".bookmarks", "backups"))
     expect(Paths.defaultRuntimeDir()).toBe(join(homedir(), ".bookmarks", "runtime"))
     expect(Paths.defaultSyncLockPath()).toBe(join(homedir(), ".bookmarks", "runtime", "sync.lock.json"))
@@ -43,12 +49,18 @@ describe("paths", () => {
     process.env["BOOKMARKS_DIR"] = "/tmp/bookmarks"
     process.env["BOOKMARKS_YAML_PATH"] = "/tmp/custom.yaml"
     process.env["BOOKMARKS_SCHEMA_PATH"] = "/tmp/custom.schema.json"
+    process.env["BOOKMARKS_WORKSPACE_PATH"] = "/tmp/workspace.yaml"
+    process.env["BOOKMARKS_IMPORT_LOCK_PATH"] = "/tmp/import.lock.json"
+    process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] = "/tmp/publish.plan.json"
     process.env["BOOKMARKS_BACKUP_DIR"] = "/tmp/custom-backups"
     process.env["BOOKMARKS_RUNTIME_DIR"] = "/tmp/custom-runtime"
 
     expect(Paths.defaultBookmarksDir()).toBe("/tmp/bookmarks")
     expect(Paths.defaultYamlPath()).toBe("/tmp/custom.yaml")
     expect(Paths.defaultSchemaPath()).toBe("/tmp/custom.schema.json")
+    expect(Paths.defaultWorkspacePath()).toBe("/tmp/workspace.yaml")
+    expect(Paths.defaultImportLockPath()).toBe("/tmp/import.lock.json")
+    expect(Paths.defaultPublishPlanPath()).toBe("/tmp/publish.plan.json")
     expect(Paths.defaultBackupDir()).toBe("/tmp/custom-backups")
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime")
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json")
