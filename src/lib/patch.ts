@@ -6,10 +6,10 @@
  *
  * Key data structures:
  * - BookmarkIndex (HashMap<string, BookmarkEntry>) — URL-keyed, used for diffing
- * - BookmarkTrie (Trie<BookmarkLeaf>) — path-keyed, used for applying patches
+ * - BookmarkTrie (BookmarkTree) — structural working copy, used for applying patches
  */
 
-import { Data, DateTime, Effect, HashMap, Option, Trie, pipe } from "effect"
+import { Data, DateTime, Effect, HashMap, Option, pipe } from "effect"
 import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
 
 // -- Patch types (Data.TaggedEnum) --
@@ -33,9 +33,9 @@ export interface BookmarkEntry {
 
 export type BookmarkIndex = HashMap.HashMap<string, BookmarkEntry>
 
-// -- BookmarkTrie (for path-keyed patch application) --
+// -- BookmarkTrie (for structural patch application) --
 
-export type BookmarkTrie = Trie.Trie<BookmarkLeaf>
+export type BookmarkTrie = BookmarkTree
 
 // -- Section keys for tree traversal --
 
@@ -77,92 +77,32 @@ export const flatten = (tree: BookmarkTree): FlattenResult => {
   return { index: HashMap.fromIterable(entries), warnings }
 }
 
-// -- toTrie: BookmarkTree → BookmarkTrie (path-keyed) --
+const cloneNode = (node: BookmarkNode): BookmarkNode =>
+  BookmarkLeaf.is(node)
+    ? BookmarkLeaf.make({ name: node.name, url: node.url })
+    : BookmarkFolder.make({
+        name: node.name,
+        children: cloneSection(node.children as BookmarkSection) ?? [],
+      })
 
-/** Convert a BookmarkTree to a path-keyed Trie. Key = "section/folder/.../leafName". */
-export const toTrie = (tree: BookmarkTree): BookmarkTrie => {
-  let trie: BookmarkTrie = Trie.empty()
+const cloneSection = (nodes: BookmarkSection | undefined): BookmarkSection | undefined =>
+  nodes?.map((node) => cloneNode(node))
 
-  const visit = (nodes: BookmarkSection | undefined, path: string): void => {
-    if (!nodes) return
-    for (const node of nodes) {
-      if (BookmarkLeaf.is(node)) {
-        const fullPath = `${path}/${node.name}`
-        trie = Trie.insert(trie, fullPath, node)
-      } else if (BookmarkFolder.is(node)) {
-        visit(node.children as BookmarkSection, `${path}/${node.name}`)
-      }
-    }
-  }
+// -- toTrie: BookmarkTree → BookmarkTrie --
 
-  for (const key of sectionKeys) {
-    visit(tree[key], key)
-  }
-
-  return trie
-}
+/** Clone a BookmarkTree into a structural working copy. */
+export const toTrie = (tree: BookmarkTree): BookmarkTrie =>
+  BookmarkTree.make({
+    favorites_bar: cloneSection(tree.favorites_bar),
+    other: cloneSection(tree.other),
+    reading_list: cloneSection(tree.reading_list),
+    mobile: cloneSection(tree.mobile),
+  })
 
 // -- fromTrie: BookmarkTrie → BookmarkTree --
 
-/** Reconstruct a BookmarkTree from a path-keyed Trie. */
-export const fromTrie = (trie: BookmarkTrie): BookmarkTree => {
-  // Collect entries grouped by section
-  const sections: Record<string, Array<{ readonly segments: readonly string[]; readonly leaf: BookmarkLeaf }>> = {}
-
-  Trie.forEach(trie, (leaf, key) => {
-    // key format: "sectionKey/folder1/.../leafName"
-    const parts = key.split("/")
-    const sectionKey = parts[0]!
-    const segments = parts.slice(1)
-    if (!sections[sectionKey]) sections[sectionKey] = []
-    sections[sectionKey]!.push({ segments, leaf })
-  })
-
-  const buildNodes = (
-    items: Array<{ readonly segments: readonly string[]; readonly leaf: BookmarkLeaf }>,
-  ): BookmarkSection => {
-    // Group by first segment
-    const direct: BookmarkLeaf[] = []
-    const grouped: Record<string, Array<{ readonly segments: readonly string[]; readonly leaf: BookmarkLeaf }>> = {}
-
-    for (const item of items) {
-      if (item.segments.length === 1) {
-        direct.push(item.leaf)
-      } else {
-        const folderName = item.segments[0]!
-        if (!grouped[folderName]) grouped[folderName] = []
-        grouped[folderName]!.push({ segments: item.segments.slice(1), leaf: item.leaf })
-      }
-    }
-
-    const result: Array<BookmarkNode> = []
-
-    // Add folders first (preserving order by first encounter)
-    for (const [folderName, children] of Object.entries(grouped)) {
-      result.push(BookmarkFolder.make({ name: folderName, children: buildNodes(children) }))
-    }
-
-    // Then leaves
-    for (const leaf of direct) {
-      result.push(leaf)
-    }
-
-    return result
-  }
-
-  const makeSection = (key: string): BookmarkSection | undefined => {
-    const items = sections[key]
-    if (!items || items.length === 0) return undefined
-    return buildNodes(items)
-  }
-
-  return BookmarkTree.make({
-    favorites_bar: makeSection("favorites_bar"),
-    other: makeSection("other"),
-    reading_list: makeSection("reading_list"),
-    mobile: makeSection("mobile"),
-  })
-}
+/** Clone the working tree back into a BookmarkTree value. */
+export const fromTrie = (trie: BookmarkTrie): BookmarkTree => toTrie(trie)
 
 // -- generatePatches --
 

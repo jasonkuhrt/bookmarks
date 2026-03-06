@@ -6,7 +6,7 @@
  * Produces graveyard entries for conflict losers.
  */
 
-import { Array as Arr, DateTime, Duration, Effect, Order, Schema, Trie, pipe } from "effect"
+import { Array as Arr, DateTime, Duration, Effect, Order, Schema } from "effect"
 import { execFile } from "node:child_process"
 import * as Fs from "node:fs/promises"
 import * as Path from "node:path"
@@ -15,7 +15,7 @@ import * as Paths from "./paths.js"
 import * as Graveyard from "./graveyard.js"
 import * as Patch from "./patch.js"
 import * as Targets from "./targets.js"
-import { BookmarkLeaf, BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
+import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
 import * as YamlModule from "./yaml.js"
 
 export interface SyncResult {
@@ -242,7 +242,7 @@ export const applyPatches = (
   patches: readonly Patch.BookmarkPatch[],
 ): Effect.Effect<BookmarkTree, Error> =>
   Effect.gen(function* () {
-    let trie = Patch.toTrie(tree)
+    let nextTree = Patch.toTrie(tree)
 
     // Sort patches: Remove -> Move -> Rename -> Add
     const opPriority: Record<Patch.BookmarkPatch["_tag"], number> = { Remove: 0, Move: 1, Rename: 2, Add: 3 }
@@ -250,50 +250,169 @@ export const applyPatches = (
     const sorted = Arr.sort(patches, byOpOrder)
 
     for (const patch of sorted) {
-      trie = applyOne(trie, patch)
+      nextTree = applyOne(nextTree, patch)
     }
 
-    return Patch.fromTrie(trie)
+    return Patch.fromTrie(nextTree)
   })
 
-/** Apply a single patch to the Trie via exhaustive Patch.$match. */
-const applyOne = (trie: Trie.Trie<BookmarkLeaf>, patch: Patch.BookmarkPatch): Trie.Trie<BookmarkLeaf> =>
+const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
+
+type SectionKey = (typeof sectionKeys)[number]
+
+const cloneNode = (node: BookmarkNode): BookmarkNode =>
+  BookmarkLeaf.is(node)
+    ? BookmarkLeaf.make({ name: node.name, url: node.url })
+    : BookmarkFolder.make({
+        name: node.name,
+        children: cloneSection(node.children as BookmarkSection) ?? [],
+      })
+
+const cloneSection = (nodes: BookmarkSection | undefined): BookmarkSection | undefined =>
+  nodes?.map((node) => cloneNode(node))
+
+const normalizeSection = (nodes: BookmarkSection | undefined): BookmarkSection | undefined =>
+  nodes && nodes.length > 0 ? nodes : undefined
+
+const setSection = (tree: BookmarkTree, sectionKey: SectionKey, nodes: BookmarkSection | undefined): void => {
+  tree[sectionKey] = nodes
+}
+
+const ensureSection = (tree: BookmarkTree, sectionKey: SectionKey): BookmarkSection => {
+  const existing = tree[sectionKey]
+  if (existing) return existing
+
+  const created: BookmarkSection = []
+  setSection(tree, sectionKey, created)
+  return created
+}
+
+const ensureFolderPath = (
+  nodes: BookmarkSection,
+  folderPath: readonly string[],
+): BookmarkSection => {
+  let current = nodes
+
+  for (const folderName of folderPath) {
+    const existing = current.find(
+      (node): node is BookmarkFolder => BookmarkFolder.is(node) && node.name === folderName,
+    )
+
+    if (existing) {
+      current = existing.children as BookmarkSection
+      continue
+    }
+
+    const created = BookmarkFolder.make({ name: folderName, children: [] })
+    current.push(created)
+    current = created.children as BookmarkSection
+  }
+
+  return current
+}
+
+const parseBookmarkPath = (
+  path: string,
+): { readonly sectionKey: SectionKey; readonly folderPath: readonly string[] } | undefined => {
+  const [rawSectionKey, ...folderPath] = path.split("/")
+  const sectionKey = sectionKeys.find((key) => key === rawSectionKey)
+  return sectionKey
+    ? { sectionKey, folderPath }
+    : undefined
+}
+
+const cleanupEmptyRootSections = (tree: BookmarkTree): void => {
+  for (const sectionKey of sectionKeys) {
+    if ((tree[sectionKey]?.length ?? 0) === 0) {
+      setSection(tree, sectionKey, undefined)
+    }
+  }
+}
+
+const findLeafLocationInSection = (
+  nodes: BookmarkSection,
+  url: string,
+): { readonly children: BookmarkSection; readonly index: number } | undefined => {
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index]!
+
+    if (BookmarkLeaf.is(node) && node.url === url) {
+      return { children: nodes, index }
+    }
+
+    if (BookmarkFolder.is(node)) {
+      const found = findLeafLocationInSection(node.children as BookmarkSection, url)
+      if (found) return found
+    }
+  }
+
+  return undefined
+}
+
+const findLeafLocation = (
+  tree: BookmarkTree,
+  url: string,
+): { readonly children: BookmarkSection; readonly index: number } | undefined => {
+  for (const sectionKey of sectionKeys) {
+    const section = normalizeSection(tree[sectionKey])
+    if (!section) continue
+
+    const found = findLeafLocationInSection(section, url)
+    if (found) return found
+  }
+
+  return undefined
+}
+
+const removeLeaf = (tree: BookmarkTree, url: string): BookmarkLeaf | undefined => {
+  const location = findLeafLocation(tree, url)
+  if (!location) return undefined
+
+  const [removed] = location.children.splice(location.index, 1)
+  cleanupEmptyRootSections(tree)
+
+  return removed && BookmarkLeaf.is(removed)
+    ? BookmarkLeaf.make({ name: removed.name, url: removed.url })
+    : undefined
+}
+
+/** Apply a single patch to the structural working tree via exhaustive Patch.$match. */
+const applyOne = (tree: BookmarkTree, patch: Patch.BookmarkPatch): BookmarkTree =>
   Patch.$match(patch, {
     Add: ({ url, name, path }) => {
-      const fullPath = `${path}/${name}`
-      return Trie.insert(trie, fullPath, BookmarkLeaf.make({ name, url }))
+      const parsed = parseBookmarkPath(path)
+      if (!parsed) return tree
+
+      const parent = ensureFolderPath(ensureSection(tree, parsed.sectionKey), parsed.folderPath)
+      parent.push(BookmarkLeaf.make({ name, url }))
+
+      return tree
     },
 
-    Remove: ({ url, path }) => {
-      const entries = Array.from(Trie.entriesWithPrefix(trie, path))
-      const match = entries.find(([_, leaf]) => leaf.url === url)
-      return match ? Trie.remove(trie, match[0]) : trie
+    Remove: ({ url }) => {
+      removeLeaf(tree, url)
+      return tree
     },
 
     Rename: ({ url, newName }) => {
-      const allEntries = Array.from(trie)
-      const match = allEntries.find(([_, leaf]) => leaf.url === url)
-      if (!match) return trie
-      const [oldKey] = match
-      const pathPrefix = oldKey.substring(0, oldKey.lastIndexOf("/"))
-      const newKey = `${pathPrefix}/${newName}`
-      return pipe(
-        Trie.remove(trie, oldKey),
-        Trie.insert(newKey, BookmarkLeaf.make({ name: newName, url })),
-      )
+      const location = findLeafLocation(tree, url)
+      if (!location) return tree
+
+      location.children[location.index] = BookmarkLeaf.make({ name: newName, url })
+      return tree
     },
 
-    Move: ({ url, fromPath, toPath }) => {
-      const entries = Array.from(Trie.entriesWithPrefix(trie, fromPath))
-      const match = entries.find(([_, leaf]) => leaf.url === url)
-      if (!match) return trie
-      const [oldKey, leaf] = match
-      const leafName = oldKey.substring(oldKey.lastIndexOf("/") + 1)
-      const newKey = `${toPath}/${leafName}`
-      return pipe(
-        Trie.remove(trie, oldKey),
-        Trie.insert(newKey, leaf),
-      )
+    Move: ({ url, toPath }) => {
+      const removed = removeLeaf(tree, url)
+      if (!removed) return tree
+
+      const parsed = parseBookmarkPath(toPath)
+      if (!parsed) return tree
+
+      const parent = ensureFolderPath(ensureSection(tree, parsed.sectionKey), parsed.folderPath)
+      parent.push(removed)
+
+      return tree
     },
   })
 
@@ -337,56 +456,60 @@ const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =
         return yield* YamlModule.load(config.yamlPath)
       })
 
-const flattenOrdered = (
-  tree: BookmarkTree,
-): { readonly entries: readonly Patch.BookmarkEntry[]; readonly warnings: readonly string[] } => {
-  const entries: Patch.BookmarkEntry[] = []
-  const warnings: string[] = []
-  const seen = new Set<string>()
-
-  const visit = (nodes: readonly (BookmarkLeaf | { readonly name: string; readonly children: readonly unknown[] })[] | undefined, path: string): void => {
-    if (!nodes) return
-    for (const node of nodes) {
-      if (BookmarkLeaf.is(node)) {
-        if (seen.has(node.url)) {
-          warnings.push(`Duplicate URL "${node.url}" at path "${path}" — keeping first occurrence`)
-        } else {
-          seen.add(node.url)
-          entries.push({ url: node.url, name: node.name, path })
-        }
-      } else {
-        visit(
-          node.children as readonly (BookmarkLeaf | { readonly name: string; readonly children: readonly unknown[] })[],
-          path === "" ? node.name : `${path}/${node.name}`,
-        )
-      }
-    }
+const nodesEqual = (left: BookmarkNode, right: BookmarkNode): boolean => {
+  if (BookmarkLeaf.is(left) && BookmarkLeaf.is(right)) {
+    return left.name === right.name && left.url === right.url
   }
 
-  for (const sectionKey of ["favorites_bar", "other", "reading_list", "mobile"] as const) {
-    visit(tree[sectionKey] as readonly (BookmarkLeaf | { readonly name: string; readonly children: readonly unknown[] })[] | undefined, sectionKey)
-  }
-
-  return { entries, warnings }
-}
-
-const sameEntry = (left: Patch.BookmarkEntry, right: Patch.BookmarkEntry): boolean =>
-  left.url === right.url &&
-  left.name === right.name &&
-  left.path === right.path
-
-const treeFromEntries = (entries: readonly Patch.BookmarkEntry[]): BookmarkTree => {
-  let trie = Trie.empty<BookmarkLeaf>()
-
-  for (const entry of entries) {
-    trie = Trie.insert(
-      trie,
-      `${entry.path}/${entry.name}`,
-      BookmarkLeaf.make({ name: entry.name, url: entry.url }),
+  if (BookmarkFolder.is(left) && BookmarkFolder.is(right)) {
+    return left.name === right.name && sectionsEqual(
+      left.children as BookmarkSection,
+      right.children as BookmarkSection,
     )
   }
 
-  return Patch.fromTrie(trie)
+  return false
+}
+
+const sectionsEqual = (
+  left: BookmarkSection | undefined,
+  right: BookmarkSection | undefined,
+): boolean => {
+  const normalizedLeft = normalizeSection(left) ?? []
+  const normalizedRight = normalizeSection(right) ?? []
+
+  if (normalizedLeft.length !== normalizedRight.length) return false
+
+  for (let index = 0; index < normalizedLeft.length; index++) {
+    if (!nodesEqual(normalizedLeft[index]!, normalizedRight[index]!)) return false
+  }
+
+  return true
+}
+
+const longestCommonPrefix = (
+  sections: readonly (BookmarkSection | undefined)[],
+): BookmarkSection | undefined => {
+  const normalizedSections = sections.map((section) => normalizeSection(section) ?? [])
+  const prefixLength = Math.min(...normalizedSections.map((section) => section.length))
+  const prefix: BookmarkNode[] = []
+
+  for (let index = 0; index < prefixLength; index++) {
+    const candidate = normalizedSections[0]![index]!
+    if (!normalizedSections.every((section) => nodesEqual(section[index]!, candidate))) break
+    prefix.push(cloneNode(candidate))
+  }
+
+  return prefix.length > 0 ? prefix : undefined
+}
+
+const sectionSuffix = (
+  section: BookmarkSection | undefined,
+  prefixLength: number,
+): BookmarkSection | undefined => {
+  const normalized = normalizeSection(section) ?? []
+  const suffix = normalized.slice(prefixLength).map((node) => cloneNode(node))
+  return suffix.length > 0 ? suffix : undefined
 }
 
 const isTreeEmpty = (tree: BookmarkTree): boolean =>
@@ -395,6 +518,9 @@ const isTreeEmpty = (tree: BookmarkTree): boolean =>
   (tree.reading_list?.length ?? 0) === 0 &&
   (tree.mobile?.length ?? 0) === 0
 
+const treeEquals = (left: BookmarkTree, right: BookmarkTree): boolean =>
+  sectionKeys.every((sectionKey) => sectionsEqual(left[sectionKey], right[sectionKey]))
+
 export const decomposeResolvedTrees = (
   targets: BookmarksConfig["targets"],
   resolvedTrees: Readonly<Record<string, BookmarkTree>>,
@@ -402,41 +528,42 @@ export const decomposeResolvedTrees = (
   const profileKeys = Object.keys(resolvedTrees)
   if (profileKeys.length === 0) return emptyConfig(targets)
 
-  const orderedEntriesByKey = Object.fromEntries(
-    profileKeys.map((profileKey) => [profileKey, flattenOrdered(resolvedTrees[profileKey]!).entries]),
-  ) as Record<string, readonly Patch.BookmarkEntry[]>
-
-  const entryIndexByKey = Object.fromEntries(
-    profileKeys.map((profileKey) => [
-      profileKey,
-      new Map(orderedEntriesByKey[profileKey].map((entry) => [entry.url, entry])),
-    ]),
-  ) as Record<string, Map<string, Patch.BookmarkEntry>>
-
-  const firstProfileKey = profileKeys[0]!
-  const baseEntries = orderedEntriesByKey[firstProfileKey].filter((entry) =>
-    profileKeys.every((profileKey) => {
-      const other = entryIndexByKey[profileKey].get(entry.url)
-      return other !== undefined && sameEntry(entry, other)
-    })
-  )
-  const baseEntryIndex = new Map(baseEntries.map((entry) => [entry.url, entry]))
+  const baseSections = Object.fromEntries(
+    sectionKeys.map((sectionKey) => {
+      const prefix = longestCommonPrefix(
+        profileKeys.map((profileKey) => resolvedTrees[profileKey]![sectionKey]),
+      )
+      return [sectionKey, prefix]
+    }),
+  ) as Record<SectionKey, BookmarkSection | undefined>
 
   const profiles: Record<string, BookmarkTree> = {}
 
   for (const profileKey of profileKeys) {
-    const overlayEntries = orderedEntriesByKey[profileKey].filter((entry) => {
-      const commonEntry = baseEntryIndex.get(entry.url)
-      return commonEntry === undefined || !sameEntry(commonEntry, entry)
+    const overlayTree = BookmarkTree.make({
+      favorites_bar: sectionSuffix(
+        resolvedTrees[profileKey]!.favorites_bar,
+        baseSections.favorites_bar?.length ?? 0,
+      ),
+      other: sectionSuffix(
+        resolvedTrees[profileKey]!.other,
+        baseSections.other?.length ?? 0,
+      ),
+      reading_list: sectionSuffix(
+        resolvedTrees[profileKey]!.reading_list,
+        baseSections.reading_list?.length ?? 0,
+      ),
+      mobile: sectionSuffix(
+        resolvedTrees[profileKey]!.mobile,
+        baseSections.mobile?.length ?? 0,
+      ),
     })
-
-    const overlayTree = treeFromEntries(overlayEntries)
     if (!isTreeEmpty(overlayTree)) profiles[profileKey] = overlayTree
   }
 
   return BookmarksConfig.make({
     targets,
-    base: treeFromEntries(baseEntries),
+    base: BookmarkTree.make(baseSections),
     profiles: Object.keys(profiles).length > 0 ? profiles : undefined,
   })
 }
@@ -461,6 +588,25 @@ const resolveProfileTrees = (
     return trees
   })
 
+const projectTree = (
+  fromTree: BookmarkTree,
+  toTree: BookmarkTree,
+  source: string,
+): Effect.Effect<{
+  readonly exact: boolean
+  readonly patches: readonly Patch.BookmarkPatch[]
+  readonly projectedTree: BookmarkTree
+}, Error> =>
+  Effect.gen(function* () {
+    const patches = yield* Patch.generatePatches(fromTree, toTree, source)
+    const projectedTree = yield* applyPatches(fromTree, patches)
+    return {
+      exact: treeEquals(projectedTree, toTree),
+      patches,
+      projectedTree,
+    }
+  })
+
 const syncTarget = (
   target: Targets.TargetDescriptor,
   baselineTree: BookmarkTree,
@@ -473,7 +619,28 @@ const syncTarget = (
     const yamlPatches = yield* Patch.generatePatches(baselineTree, yamlTree, "yaml")
     const browserPatches = yield* Patch.generatePatches(baselineTree, browserTree, target.browser)
     const resolution = yield* resolveConflicts(yamlPatches, browserPatches)
-    const mergedTree = yield* applyPatches(baselineTree, resolution.apply)
+
+    const yamlProjection = yield* projectTree(baselineTree, yamlTree, "yaml")
+    const browserProjection = yield* projectTree(baselineTree, browserTree, target.browser)
+    const mergedLeafTree = yield* applyPatches(baselineTree, resolution.apply)
+
+    const structuralBase = !yamlProjection.exact && !browserProjection.exact
+      ? treeEquals(yamlTree, browserTree)
+        ? yamlTree
+        : yield* Effect.fail(new Error(
+            `Cannot safely merge divergent structural bookmark changes for ${Targets.displayNameOf(target)}. Run pull or align YAML/browser ordering and empty folders before syncing.`,
+          ))
+      : !yamlProjection.exact
+        ? yamlTree
+        : !browserProjection.exact
+          ? browserTree
+          : mergedLeafTree
+
+    const mergedProjection = yield* projectTree(structuralBase, mergedLeafTree, "merged")
+    const mergedTree = mergedProjection.exact
+      ? mergedProjection.projectedTree
+      : structuralBase
+
     const withGraveyard = resolution.graveyard.length > 0
       ? yield* Graveyard.addGraveyardEntries(
           mergedTree,
@@ -483,10 +650,16 @@ const syncTarget = (
         )
       : mergedTree
     const finalTree = yield* Graveyard.gc(withGraveyard, maxAge)
-    const browserApplyPatches = yield* Patch.generatePatches(browserTree, finalTree, target.browser)
+    const finalProjection = yield* projectTree(browserTree, finalTree, target.browser)
+
+    if (!finalProjection.exact) {
+      return yield* Effect.fail(new Error(
+        `Cannot safely apply structural bookmark changes to ${Targets.displayNameOf(target)}. Pull preserves ordering and empty folders, but pushing those structural edits back to the browser is not yet exact.`,
+      ))
+    }
 
     if (!dryRun) {
-      yield* Targets.applyPatches(target, browserApplyPatches)
+      yield* Targets.applyPatches(target, finalProjection.patches)
     }
 
     return {
@@ -494,7 +667,7 @@ const syncTarget = (
       tree: finalTree,
       result: {
         target,
-        applied: browserApplyPatches,
+        applied: finalProjection.patches,
         graveyarded: resolution.graveyard,
       },
     }
@@ -525,15 +698,21 @@ const pushTarget = (
 ): Effect.Effect<TargetResult, Error> =>
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target)
-    const browserApplyPatches = yield* Patch.generatePatches(browserTree, yamlTree, "yaml")
+    const finalProjection = yield* projectTree(browserTree, yamlTree, "yaml")
+
+    if (!finalProjection.exact) {
+      return yield* Effect.fail(new Error(
+        `Cannot safely push structural bookmark changes to ${Targets.displayNameOf(target)}. Ordering and empty folders would not round-trip exactly yet.`,
+      ))
+    }
 
     if (!dryRun) {
-      yield* Targets.applyPatches(target, browserApplyPatches)
+      yield* Targets.applyPatches(target, finalProjection.patches)
     }
 
     return {
       target,
-      applied: browserApplyPatches,
+      applied: finalProjection.patches,
       graveyarded: [],
     }
   })

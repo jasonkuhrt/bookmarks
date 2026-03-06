@@ -112,6 +112,22 @@ describe("toTrie / fromTrie", () => {
     expect(aiFolder.children.length).toBe(2)
   })
 
+  test("round-trip preserves sibling ordering and empty folders", () => {
+    const tree = new BookmarkTree({
+      favorites_bar: [
+        leaf("First", "https://first.example"),
+        folder("Empty", []),
+        folder("Nested", [leaf("Inside", "https://inside.example")]),
+        leaf("Last", "https://last.example"),
+      ],
+      other: [folder("Other Empty", [])],
+    })
+
+    const result = Patch.fromTrie(Patch.toTrie(tree))
+
+    expect(result).toEqual(tree)
+  })
+
   test("round-trip with empty tree", () => {
     const tree = emptyTree()
     const result = Patch.fromTrie(Patch.toTrie(tree))

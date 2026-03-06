@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { copyFile, unlink } from "node:fs/promises"
+import { copyFile, mkdtemp, rm, unlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
 import * as Patch from "./patch.js"
@@ -106,6 +107,111 @@ describe("readBookmarks", () => {
     expect(folder).toBeDefined()
     expect(folder!.name).toBeTruthy()
     expect(Array.isArray(folder!.children)).toBe(true)
+  })
+
+  test("preserves sibling ordering and empty folders in a hermetic fixture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-"))
+    const path = join(dir, "Bookmarks")
+
+    try {
+      await Bun.write(path, JSON.stringify({
+        checksum: "",
+        version: 1,
+        roots: {
+          bookmark_bar: {
+            type: "folder",
+            name: "Bookmarks Bar",
+            id: "1",
+            guid: "root-bookmark-bar",
+            date_added: "0",
+            date_modified: "0",
+            children: [
+              {
+                type: "url",
+                name: "First",
+                url: "https://first.example",
+                id: "2",
+                guid: "first",
+                date_added: "0",
+                date_last_used: "0",
+              },
+              {
+                type: "folder",
+                name: "Empty",
+                children: [],
+                id: "3",
+                guid: "empty",
+                date_added: "0",
+                date_modified: "0",
+                date_last_used: "0",
+              },
+              {
+                type: "folder",
+                name: "Nested",
+                children: [
+                  {
+                    type: "url",
+                    name: "Inside",
+                    url: "https://inside.example",
+                    id: "5",
+                    guid: "inside",
+                    date_added: "0",
+                    date_last_used: "0",
+                  },
+                ],
+                id: "4",
+                guid: "nested",
+                date_added: "0",
+                date_modified: "0",
+                date_last_used: "0",
+              },
+              {
+                type: "url",
+                name: "Last",
+                url: "https://last.example",
+                id: "6",
+                guid: "last",
+                date_added: "0",
+                date_last_used: "0",
+              },
+            ],
+          },
+          other: {
+            type: "folder",
+            name: "Other Bookmarks",
+            id: "7",
+            guid: "root-other",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+          synced: {
+            type: "folder",
+            name: "Mobile Bookmarks",
+            id: "8",
+            guid: "root-synced",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+        },
+      }, null, 2))
+
+      const tree = await run(Chrome.readBookmarks(path))
+
+      expect(tree.favorites_bar?.map((node) => node.name)).toEqual([
+        "First",
+        "Empty",
+        "Nested",
+        "Last",
+      ])
+
+      const emptyFolder = tree.favorites_bar?.[1]
+      expect(emptyFolder).toBeInstanceOf(BookmarkFolder)
+      expect((emptyFolder as BookmarkFolder).children).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

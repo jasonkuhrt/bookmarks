@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import { serialize } from "@plist/binary.serialize"
 import { DateTime, Effect } from "effect"
-import { copyFile, unlink } from "node:fs/promises"
+import { copyFile, mkdtemp, rm, unlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Patch from "./patch.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.js"
@@ -66,6 +68,75 @@ describe("readBookmarks", () => {
     const folder = tree.favorites_bar![0]! as BookmarkFolder
     expect(folder.name).toBeTruthy()
     expect(Array.isArray(folder.children)).toBe(true)
+  })
+
+  test("preserves sibling ordering and empty folders in a hermetic fixture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-"))
+    const path = join(dir, "Bookmarks.plist")
+
+    try {
+      await Bun.write(path, serialize({
+        Children: [
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "BookmarksBar",
+            Children: [
+              {
+                WebBookmarkType: "WebBookmarkTypeLeaf",
+                URLString: "https://first.example",
+                URIDictionary: { title: "First" },
+              },
+              {
+                WebBookmarkType: "WebBookmarkTypeList",
+                Title: "Empty",
+                Children: [],
+              },
+              {
+                WebBookmarkType: "WebBookmarkTypeList",
+                Title: "Nested",
+                Children: [
+                  {
+                    WebBookmarkType: "WebBookmarkTypeLeaf",
+                    URLString: "https://inside.example",
+                    URIDictionary: { title: "Inside" },
+                  },
+                ],
+              },
+              {
+                WebBookmarkType: "WebBookmarkTypeLeaf",
+                URLString: "https://last.example",
+                URIDictionary: { title: "Last" },
+              },
+            ],
+          },
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "BookmarksMenu",
+            Children: [],
+          },
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "com.apple.ReadingList",
+            Children: [],
+          },
+        ],
+      }))
+
+      const tree = await run(Safari.readBookmarks(path))
+
+      expect(tree.favorites_bar?.map((node) => node.name)).toEqual([
+        "First",
+        "Empty",
+        "Nested",
+        "Last",
+      ])
+
+      const emptyFolder = tree.favorites_bar?.[1]
+      expect(emptyFolder).toBeInstanceOf(BookmarkFolder)
+      expect((emptyFolder as BookmarkFolder).children).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

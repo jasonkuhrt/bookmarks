@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree, TargetProfile } from "./schema/__.js"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
 import * as Patch from "./patch.js"
 import * as Sync from "./sync.js"
+import * as YamlModule from "./yaml.js"
 
 // -- Test helpers --
 
@@ -17,6 +21,50 @@ const run = <A>(effect: Effect.Effect<A, Error>) =>
 
 const makeDate = (iso: string): DateTime.Utc =>
   DateTime.unsafeMake(iso)
+
+const writeChromeFixture = async (path: string, names: readonly string[]) => {
+  await Bun.write(path, JSON.stringify({
+    checksum: "",
+    version: 1,
+    roots: {
+      bookmark_bar: {
+        type: "folder",
+        name: "Bookmarks Bar",
+        id: "1",
+        guid: "bookmark-bar",
+        date_added: "0",
+        date_modified: "0",
+        children: names.map((name, index) => ({
+          type: "url" as const,
+          name,
+          url: `https://${name.toLowerCase()}.example`,
+          id: String(index + 2),
+          guid: `guid-${index + 2}`,
+          date_added: "0",
+          date_last_used: "0",
+        })),
+      },
+      other: {
+        type: "folder",
+        name: "Other Bookmarks",
+        id: "10",
+        guid: "other",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+      synced: {
+        type: "folder",
+        name: "Mobile Bookmarks",
+        id: "11",
+        guid: "mobile",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+    },
+  }, null, 2))
+}
 
 // -- resolveConflicts --
 
@@ -220,6 +268,38 @@ describe("applyPatches", () => {
     expect(result.favorites_bar).toBeDefined()
     expect(result.favorites_bar!.length).toBe(1)
   })
+
+  test("empty patches preserve sibling ordering and empty folders", async () => {
+    const tree = new BookmarkTree({
+      favorites_bar: [
+        leaf("First", "https://first.example"),
+        folder("Empty", []),
+        folder("Nested", [leaf("Inside", "https://inside.example")]),
+        leaf("Last", "https://last.example"),
+      ],
+      other: [folder("Other Empty", [])],
+    })
+
+    const result = await run(Sync.applyPatches(tree, []))
+
+    expect(result).toEqual(tree)
+  })
+
+  test("remove preserves folders that become empty", async () => {
+    const tree = new BookmarkTree({
+      favorites_bar: [
+        folder("Projects", [leaf("Only", "https://only.example")]),
+      ],
+    })
+
+    const result = await run(Sync.applyPatches(tree, [
+      Patch.Remove({ url: "https://only.example", path: "favorites_bar/Projects", date: makeDate("2025-01-01") }),
+    ]))
+
+    expect(result).toEqual(new BookmarkTree({
+      favorites_bar: [folder("Projects", [])],
+    }))
+  })
 })
 
 describe("decomposeResolvedTrees", () => {
@@ -293,5 +373,81 @@ describe("decomposeResolvedTrees", () => {
     expect(config.base.other).toBeDefined()
     expect(config.base.other!.length).toBe(1)
     expect(config.profiles).toBeUndefined()
+  })
+
+  test("preserves exact resolved ordering when shared bookmarks diverge after the prefix", async () => {
+    const targets = {
+      safari: {
+        default: TargetProfile.make({ path: "/tmp/safari-default.plist" }),
+      },
+      chrome: {
+        work: TargetProfile.make({ path: "/tmp/chrome-work.json" }),
+      },
+    }
+
+    const safariTree = new BookmarkTree({
+      favorites_bar: [
+        leaf("Common A", "https://common-a.example"),
+        leaf("Safari Only", "https://safari-only.example"),
+        folder("Shared Empty", []),
+        leaf("Common B", "https://common-b.example"),
+      ],
+    })
+
+    const chromeTree = new BookmarkTree({
+      favorites_bar: [
+        leaf("Common A", "https://common-a.example"),
+        leaf("Chrome Only", "https://chrome-only.example"),
+        folder("Shared Empty", []),
+        leaf("Common B", "https://common-b.example"),
+      ],
+    })
+
+    const config = Sync.decomposeResolvedTrees(targets, {
+      "safari/default": safariTree,
+      "chrome/work": chromeTree,
+    })
+
+    expect(config.base.favorites_bar?.map((node) => node.name)).toEqual(["Common A"])
+
+    const safariResolved = await run(YamlModule.resolveProfile(config, "safari/default"))
+    const chromeResolved = await run(YamlModule.resolveProfile(config, "chrome/work"))
+
+    expect(safariResolved).toEqual(safariTree)
+    expect(chromeResolved).toEqual(chromeTree)
+  })
+})
+
+describe("push", () => {
+  test("refuses structural-only YAML changes that cannot be projected exactly", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-"))
+    const chromePath = join(dir, "Bookmarks")
+
+    try {
+      await writeChromeFixture(chromePath, ["First", "Last"])
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({
+          favorites_bar: [
+            leaf("First", "https://first.example"),
+            folder("Empty", []),
+            leaf("Last", "https://last.example"),
+          ],
+        }),
+      })
+
+      await expect(run(Sync.push({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+        dryRun: true,
+      }))).rejects.toThrow("Cannot safely push structural bookmark changes")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
