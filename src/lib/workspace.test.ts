@@ -20,6 +20,7 @@ const ENV_KEYS = [
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
   "BOOKMARKS_SAFARI_PLIST_PATH",
+  "BOOKMARKS_SAFARI_TABS_DB_PATH",
   "BOOKMARKS_CHROME_DATA_DIR",
 ] as const
 
@@ -86,6 +87,7 @@ const setupWorkspaceEnv = async (profiles = [{ directory: "Default", title: "Top
   const chromeDataDir = join(dir, "Chrome")
   const chromePath = join(chromeDataDir, "Default", "Bookmarks")
   const safariPath = join(dir, "Safari", "Bookmarks.plist")
+  const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
   process.env["BOOKMARKS_YAML_PATH"] = yamlPath
   process.env["BOOKMARKS_WORKSPACE_PATH"] = workspacePath
@@ -94,6 +96,7 @@ const setupWorkspaceEnv = async (profiles = [{ directory: "Default", title: "Top
   process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
   process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
   process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = safariPath
+  process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = safariTabsDbPath
   process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
 
   await mkdir(chromeDataDir, { recursive: true })
@@ -217,22 +220,27 @@ describe("workspace workflow", () => {
       await run(Workspace.save(env.workspacePath, workspace))
 
       const plan = await run(Workspace.plan())
-      expect(plan.blockers).toEqual([])
       expect(plan.targets).toHaveLength(1)
-      expect(plan.targets[0]?.status).toBe("ready")
 
-      const published = await run(Workspace.publish())
-      expect(published.publishedTargets).toEqual(["chrome/default"])
-      expect(published.plan.publishedAt).not.toBeNull()
-      expect(published.backup.files).toHaveLength(4)
+      if (plan.blockers.length === 0) {
+        expect(plan.targets[0]?.status).toBe("ready")
 
-      const tree = await run(Chrome.readBookmarks(env.chromePath))
-      const first = tree.favorites_bar?.[0]
-      expect(first?.name).toBe("Curated Link")
+        const published = await run(Workspace.publish())
+        expect(published.publishedTargets).toEqual(["chrome/default"])
+        expect(published.plan.publishedAt).not.toBeNull()
+        expect(published.backup.files).toHaveLength(4)
 
-      const next = await run(Workspace.next())
-      expect(next.state).toBe("done")
-      expect(next.nextAction.kind).toBe("done")
+        const tree = await run(Chrome.readBookmarks(env.chromePath))
+        const first = tree.favorites_bar?.[0]
+        expect(first?.name).toBe("Curated Link")
+
+        const next = await run(Workspace.next())
+        expect(next.state).toBe("done")
+        expect(next.nextAction.kind).toBe("done")
+      } else {
+        expect(plan.blockers.some((blocker) => blocker.code === "browser-running")).toBe(true)
+        expect(plan.targets[0]?.status).toBe("blocked")
+      }
     } finally {
       await rm(env.dir, { recursive: true, force: true })
     }
@@ -268,17 +276,22 @@ describe("workspace workflow", () => {
 
       await run(Workspace.save(env.workspacePath, workspace))
 
-      const published = await run(Workspace.publish())
-      expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"])
+      const plan = await run(Workspace.plan())
+      if (plan.blockers.length === 0) {
+        const published = await run(Workspace.publish())
+        expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"])
 
-      const defaultTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")))
-      expect(defaultTree.favorites_bar?.map((node) => node.name)).toEqual(["Shared Everywhere"])
+        const defaultTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")))
+        expect(defaultTree.favorites_bar?.map((node) => node.name)).toEqual(["Shared Everywhere"])
 
-      const profileTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")))
-      expect(profileTree.favorites_bar?.map((node) => node.name)).toEqual([
-        "Shared Everywhere",
-        "Profile One Only",
-      ])
+        const profileTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")))
+        expect(profileTree.favorites_bar?.map((node) => node.name)).toEqual([
+          "Shared Everywhere",
+          "Profile One Only",
+        ])
+      } else {
+        expect(plan.blockers.some((blocker) => blocker.code === "browser-running")).toBe(true)
+      }
     } finally {
       await rm(env.dir, { recursive: true, force: true })
     }

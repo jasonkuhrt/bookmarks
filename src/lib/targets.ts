@@ -1,3 +1,5 @@
+import { Database } from "bun:sqlite"
+import { parse } from "@plist/binary.parse"
 import { Effect } from "effect"
 import * as Fs from "node:fs/promises"
 import * as Path from "node:path"
@@ -12,6 +14,7 @@ export interface TargetDescriptor {
   readonly profile: string
   readonly path: string
   readonly enabled: boolean
+  readonly bookmarkScope?: string
 }
 
 type ChromeLocalState = {
@@ -19,6 +22,14 @@ type ChromeLocalState = {
     info_cache?: Record<string, unknown>
   }
 }
+
+type SafariProfileRow = {
+  readonly title: string | null
+  readonly external_uuid: string
+  readonly extra_attributes: Uint8Array | ArrayBuffer | null
+}
+
+const DEFAULT_SAFARI_BOOKMARK_SCOPE = "Favorites Bar"
 
 export const keyOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
   `${target.browser}/${target.profile}`
@@ -41,6 +52,31 @@ const normalizeChromeProfileSelector = (directoryName: string): string =>
     .toLowerCase()
     .replaceAll(/[^a-z0-9]+/g, "-")
     .replaceAll(/^-+|-+$/g, "")
+
+const normalizeSafariProfileSelector = (
+  title: string | null,
+  externalUuid: string,
+): string =>
+  externalUuid === "DefaultProfile"
+    ? "default"
+    : normalizeChromeProfileSelector(title ?? externalUuid)
+
+const toArrayBuffer = (value: Uint8Array | ArrayBuffer): ArrayBuffer =>
+  value instanceof ArrayBuffer
+    ? value
+    : Uint8Array.from(value).buffer
+
+const bookmarkScopeOf = (extraAttributes: Uint8Array | ArrayBuffer | null): string => {
+  if (!extraAttributes) return DEFAULT_SAFARI_BOOKMARK_SCOPE
+
+  try {
+    const parsed = parse(toArrayBuffer(extraAttributes)) as Record<string, unknown>
+    const scope = parsed["CustomFavoritesFolderServerID"]
+    return typeof scope === "string" && scope.length > 0 ? scope : DEFAULT_SAFARI_BOOKMARK_SCOPE
+  } catch {
+    return DEFAULT_SAFARI_BOOKMARK_SCOPE
+  }
+}
 
 const readChromeProfileDirectories = async (chromeDataDir: string): Promise<string[]> => {
   const localStatePath = Path.join(chromeDataDir, "Local State")
@@ -87,12 +123,50 @@ export const discoverChromeTargets = (
 
 export const discoverSafariTargets = (
   plistPath = Paths.defaultSafariPlistPath(),
+  tabsDbPath = Paths.defaultSafariTabsDbPath(),
 ): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.tryPromise({
-    try: async () =>
-      await exists(plistPath)
-        ? [{ browser: "safari", profile: "default", path: plistPath, enabled: true } satisfies TargetDescriptor]
-        : [],
+    try: async () => {
+      if (!(await exists(plistPath))) return []
+      if (!(await exists(tabsDbPath))) {
+        return [{
+          browser: "safari",
+          profile: "default",
+          path: plistPath,
+          enabled: true,
+          bookmarkScope: DEFAULT_SAFARI_BOOKMARK_SCOPE,
+        } satisfies TargetDescriptor]
+      }
+
+      const db = new Database(tabsDbPath)
+      try {
+        const rows = db
+          .query<SafariProfileRow, []>(
+            "select title, external_uuid, extra_attributes from bookmarks where parent = 0 and type = 1 and subtype = 2 order by id",
+          )
+          .all()
+
+        if (rows.length === 0) {
+          return [{
+            browser: "safari",
+            profile: "default",
+            path: plistPath,
+            enabled: true,
+            bookmarkScope: DEFAULT_SAFARI_BOOKMARK_SCOPE,
+          } satisfies TargetDescriptor]
+        }
+
+        return rows.map((row) => ({
+          browser: "safari",
+          profile: normalizeSafariProfileSelector(row.title, row.external_uuid),
+          path: plistPath,
+          enabled: true,
+          bookmarkScope: bookmarkScopeOf(row.extra_attributes),
+        } satisfies TargetDescriptor))
+      } finally {
+        db.close()
+      }
+    },
     catch: (e) => new Error(`Failed to discover Safari targets at ${plistPath}: ${e}`),
   })
 
@@ -106,11 +180,19 @@ export const resolveTargetSelectors = (
   selectors: readonly string[],
 ): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.gen(function* () {
-    if (selectors.length === 0) return availableTargets
-
     const byId = new Map(availableTargets.map((target) => [keyOf(target), target]))
     const resolved: TargetDescriptor[] = []
     const seen = new Set<string>()
+    const resolveTarget = (target: TargetDescriptor) => {
+      const id = keyOf(target)
+      if (seen.has(id)) return
+      seen.add(id)
+      resolved.push(target)
+    }
+
+    if (selectors.length === 0) {
+      for (const target of availableTargets) resolveTarget(target)
+    }
 
     for (const selector of selectors) {
       if (selector.includes("/")) {
@@ -121,11 +203,7 @@ export const resolveTargetSelectors = (
           ))
         }
 
-        const id = keyOf(exact)
-        if (!seen.has(id)) {
-          seen.add(id)
-          resolved.push(exact)
-        }
+        resolveTarget(exact)
         continue
       }
 
@@ -137,11 +215,23 @@ export const resolveTargetSelectors = (
       }
 
       for (const match of matches) {
-        const id = keyOf(match)
-        if (seen.has(id)) continue
-        seen.add(id)
-        resolved.push(match)
+        resolveTarget(match)
       }
+    }
+
+    const safariScopeGroups = new Map<string, TargetDescriptor[]>()
+    for (const target of resolved) {
+      if (target.browser !== "safari" || !target.bookmarkScope) continue
+      const group = safariScopeGroups.get(target.bookmarkScope) ?? []
+      group.push(target)
+      safariScopeGroups.set(target.bookmarkScope, group)
+    }
+
+    for (const [bookmarkScope, group] of safariScopeGroups) {
+      if (group.length < 2) continue
+      return yield* Effect.fail(new Error(
+        `Safari profiles share the same bookmarks scope "${bookmarkScope}": ${group.map(keyOf).join(", ")}. Safari bookmarks are shared across these profiles. Choose distinct Favorites folders in Safari Settings > Profiles before selecting them together.`,
+      ))
     }
 
     return resolved
@@ -173,6 +263,9 @@ export const listTargets = (config: BookmarksConfig): readonly TargetDescriptor[
       profile,
       path: target.path,
       enabled: target.enabled ?? true,
+      ...("bookmarkScope" in target && typeof target.bookmarkScope === "string"
+        ? { bookmarkScope: target.bookmarkScope }
+        : {}),
     })),
   )
 

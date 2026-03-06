@@ -146,6 +146,7 @@ const targetToDescriptor = (target: WorkspaceTarget): Targets.TargetDescriptor =
   profile: target.profile,
   path: target.path,
   enabled: target.enabled ?? true,
+  ...(target.bookmarkScope ? { bookmarkScope: target.bookmarkScope } : {}),
 })
 
 const normalizeWorkspaceDocument = (value: unknown): Effect.Effect<unknown, Error> =>
@@ -309,6 +310,7 @@ const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarge
             browser: target.browser,
             profile: target.profile,
             path: target.path,
+            bookmarkScope: target.bookmarkScope,
             enabled: target.enabled,
           } satisfies WorkspaceTarget,
         ]),
@@ -318,8 +320,24 @@ const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarge
 
 const mergeTargetRegistries = (
   ...registries: ReadonlyArray<Readonly<Record<string, WorkspaceTarget>> | undefined>
-): Readonly<Record<string, WorkspaceTarget>> =>
-  Object.assign({}, ...registries.filter((registry): registry is Readonly<Record<string, WorkspaceTarget>> => registry !== undefined))
+): Readonly<Record<string, WorkspaceTarget>> => {
+  const merged: Record<string, WorkspaceTarget> = {}
+
+  for (const registry of registries) {
+    if (!registry) continue
+
+    for (const [targetId, target] of Object.entries(registry)) {
+      const previous = merged[targetId]
+      merged[targetId] = {
+        ...previous,
+        ...target,
+        bookmarkScope: target.bookmarkScope ?? previous?.bookmarkScope,
+      }
+    }
+  }
+
+  return merged
+}
 
 const resolveTargets = (requestedTargetIds: readonly string[]): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
   Effect.gen(function* () {

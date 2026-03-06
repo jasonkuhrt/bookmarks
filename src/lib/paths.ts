@@ -43,6 +43,10 @@ export const defaultSyncQueuePath = (): string =>
 export const defaultSafariPlistPath = (): string =>
   process.env["BOOKMARKS_SAFARI_PLIST_PATH"] ?? join(homedir(), "Library/Safari/Bookmarks.plist")
 
+export const defaultSafariTabsDbPath = (): string =>
+  process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"]
+    ?? join(homedir(), "Library/Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db")
+
 export const defaultChromeDataDir = (): string =>
   process.env["BOOKMARKS_CHROME_DATA_DIR"] ?? join(homedir(), "Library/Application Support/Google/Chrome")
 

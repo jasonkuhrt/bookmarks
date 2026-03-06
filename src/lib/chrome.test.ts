@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
-import { mkdtemp, rm, unlink } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
@@ -269,26 +269,18 @@ describe("readBookmarks", () => {
 // -- applyPatches --
 
 describe("applyPatches", () => {
-  const tmpBookmarks = join(
-    tmpdir(),
-    "bookmarks.chrome.test-copy.json",
-  )
-
   const setupCopy = async () => {
-    await copyChromeBookmarksFixture(tmpBookmarks)
-    return tmpBookmarks
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-patches-"))
+    const path = join(dir, "Bookmarks")
+    await copyChromeBookmarksFixture(path)
+    return { dir, path }
   }
 
-  const cleanup = async () => {
-    try {
-      await unlink(tmpBookmarks)
-    } catch {
-      /* ignore */
-    }
-  }
+  const cleanup = async (dir: string) =>
+    rm(dir, { recursive: true, force: true })
 
   test("Add patch inserts a new leaf", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const testUrl = "https://test-chrome-add.example.com/"
       const testName = "Test Chrome Add Bookmark"
@@ -306,12 +298,12 @@ describe("applyPatches", () => {
       expect(found).toBeDefined()
       expect(found!.name).toBe(testName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Add patch preserves valid checksum", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       await run(
         Chrome.applyPatches(path, [
@@ -329,12 +321,12 @@ describe("applyPatches", () => {
       const calculated = Chrome.calculateChecksum(file.roots)
       expect(calculated).toBe(file.checksum)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Remove patch deletes a leaf", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Chrome.readBookmarks(path))
       // Find a leaf to remove
@@ -371,12 +363,12 @@ describe("applyPatches", () => {
       collectUrls(treeAfter.favorites_bar ?? [])
       expect(allUrls).not.toContain(target!.url)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Rename patch updates a leaf's name", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Chrome.readBookmarks(path))
       const findLeaf = (
@@ -419,12 +411,12 @@ describe("applyPatches", () => {
       expect(found).toBeDefined()
       expect(found!.name).toBe(newName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Move patch relocates a leaf to a different section", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const treeBefore = await run(Chrome.readBookmarks(path))
       const findLeaf = (
@@ -483,12 +475,12 @@ describe("applyPatches", () => {
       const foundInOther = collectOtherUrls(treeAfter.other ?? [])
       expect(foundInOther).toContain(target!.url)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 
   test("Add patch into nested folder path creates folders as needed", async () => {
-    const path = await setupCopy()
+    const { dir, path } = await setupCopy()
     try {
       const testUrl = "https://test-chrome-nested-add.example.com/"
       const testName = "Nested Chrome Add Test"
@@ -520,7 +512,7 @@ describe("applyPatches", () => {
       expect(leaf).toBeDefined()
       expect(leaf!.name).toBe(testName)
     } finally {
-      await cleanup()
+      await cleanup(dir)
     }
   })
 })

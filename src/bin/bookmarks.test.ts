@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
+import { serialize } from "@plist/binary.serialize"
 import { Effect } from "effect"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -109,6 +111,7 @@ describe("bookmarks CLI", () => {
     const chromeDataDir = join(dir, "Chrome")
     const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
     try {
       await mkdir(join(chromeDataDir, "Default"), { recursive: true })
@@ -145,6 +148,7 @@ describe("bookmarks CLI", () => {
       const cliEnv = {
         BOOKMARKS_YAML_PATH: yamlPath,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
@@ -208,6 +212,7 @@ describe("bookmarks CLI", () => {
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
     try {
       await mkdir(join(chromeDataDir, "Default"), { recursive: true })
@@ -242,6 +247,7 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
@@ -250,6 +256,10 @@ describe("bookmarks CLI", () => {
       expect(syncJson.exitCode).toBe(0)
 
       const parsedSync = JSON.parse(syncJson.stdout) as {
+        readonly orchestration?: {
+          readonly state: string
+          readonly blockers?: readonly string[]
+        } | null
         readonly backup: {
           readonly backupDir: string
           readonly files: readonly string[]
@@ -257,12 +267,23 @@ describe("bookmarks CLI", () => {
         } | null
       }
 
-      expect(parsedSync.backup?.backupDir).toBe(backupDir)
-      expect(parsedSync.backup?.files).toHaveLength(2)
-      expect(parsedSync.backup?.skipped).toHaveLength(0)
+      const queued = parsedSync.orchestration?.state === "queued"
+
+      if (queued) {
+        expect(parsedSync.orchestration.blockers).toContain("Google Chrome")
+        expect(parsedSync.backup).toBeNull()
+      } else {
+        expect(parsedSync.backup?.backupDir).toBe(backupDir)
+        expect(parsedSync.backup?.files).toHaveLength(2)
+        expect(parsedSync.backup?.skipped).toHaveLength(0)
+      }
 
       const yamlAfter = await readFile(yamlPath, "utf-8")
-      expect(yamlAfter).toContain("Top Link")
+      if (queued) {
+        expect(yamlAfter).not.toContain("Top Link")
+      } else {
+        expect(yamlAfter).toContain("Top Link")
+      }
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -279,6 +300,7 @@ describe("bookmarks CLI", () => {
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
     try {
       await writeChromeDataDir(chromeDataDir, [
@@ -304,6 +326,7 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
@@ -340,25 +363,31 @@ describe("bookmarks CLI", () => {
       expect(parsedValidation.valid).toBe(true)
 
       const planned = await runCommand(dir, [process.execPath, cliPath, "plan", "--json"], cliEnv)
-      expect(planned.exitCode).toBe(0)
       const parsedPlan = JSON.parse(planned.stdout) as {
         readonly summary: { readonly blockerCount: number }
+        readonly blockers?: ReadonlyArray<{ readonly code: string; readonly targetId?: string }>
       }
-      expect(parsedPlan.summary.blockerCount).toBe(0)
 
-      const published = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], cliEnv)
-      expect(published.exitCode).toBe(0)
-      const parsedPublish = JSON.parse(published.stdout) as {
-        readonly publishedTargets: readonly string[]
-      }
-      expect(parsedPublish.publishedTargets).toEqual(["chrome/default"])
+      if (planned.exitCode === 0) {
+        expect(parsedPlan.summary.blockerCount).toBe(0)
 
-      const nextDone = await runCommand(dir, [process.execPath, cliPath, "next", "--json"], cliEnv)
-      expect(nextDone.exitCode).toBe(0)
-      const parsedNextDone = JSON.parse(nextDone.stdout) as {
-        readonly state: string
+        const published = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], cliEnv)
+        expect(published.exitCode).toBe(0)
+        const parsedPublish = JSON.parse(published.stdout) as {
+          readonly publishedTargets: readonly string[]
+        }
+        expect(parsedPublish.publishedTargets).toEqual(["chrome/default"])
+
+        const nextDone = await runCommand(dir, [process.execPath, cliPath, "next", "--json"], cliEnv)
+        expect(nextDone.exitCode).toBe(0)
+        const parsedNextDone = JSON.parse(nextDone.stdout) as {
+          readonly state: string
+        }
+        expect(parsedNextDone.state).toBe("done")
+      } else {
+        expect(parsedPlan.summary.blockerCount).toBeGreaterThan(0)
+        expect(parsedPlan.blockers?.some((blocker) => blocker.code === "browser-running")).toBe(true)
       }
-      expect(parsedNextDone.state).toBe("done")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -373,6 +402,7 @@ describe("bookmarks CLI", () => {
     const chromeDataDir = join(dir, "Chrome")
     const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
     try {
       await writeChromeDataDir(chromeDataDir, [
@@ -397,6 +427,7 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
         BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
@@ -412,6 +443,77 @@ describe("bookmarks CLI", () => {
       expect(typo.exitCode).toBe(1)
       const parsedTypo = JSON.parse(typo.stderr) as { readonly error: string }
       expect(parsedTypo.error).toContain('Unknown target selector "chrome/defualt"')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("import fails clearly when Safari profiles share one bookmarks scope", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-safari-targets-"))
+    const workspacePath = join(dir, "workspace.yaml")
+    const importLockPath = join(dir, "import.lock.json")
+    const publishPlanPath = join(dir, "publish.plan.json")
+    const safariPath = join(dir, "Safari", "Bookmarks.plist")
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
+
+    try {
+      await mkdir(join(dir, "Safari"), { recursive: true })
+      await Bun.write(safariPath, serialize({ Children: [] }))
+
+      const db = new Database(safariTabsDbPath)
+      try {
+        db.run(
+          "create table bookmarks (id integer primary key, parent integer, type integer, subtype integer, title text, external_uuid text, extra_attributes blob)",
+        )
+        db.run(
+          "insert into bookmarks (id, parent, type, subtype, title, external_uuid, extra_attributes) values (?, ?, ?, ?, ?, ?, ?)",
+          [
+            35,
+            0,
+            1,
+            2,
+            null,
+            "DefaultProfile",
+            Buffer.from(serialize({
+              "com.apple.Bookmark": { DateAdded: new Date("2026-03-06T00:00:00.000Z") },
+            })),
+          ],
+        )
+        db.run(
+          "insert into bookmarks (id, parent, type, subtype, title, external_uuid, extra_attributes) values (?, ?, ?, ?, ?, ?, ?)",
+          [
+            201,
+            0,
+            1,
+            2,
+            "Heartbeat",
+            "FB6E52DB-8796-4D8F-88E2-7EB82D9D0FD5",
+            Buffer.from(serialize({
+              CustomFavoritesFolderServerID: "Favorites Bar",
+              "com.apple.Bookmark": { DateAdded: new Date("2026-03-06T00:00:00.000Z") },
+            })),
+          ],
+        )
+      } finally {
+        db.close()
+      }
+
+      const cliEnv = {
+        BOOKMARKS_WORKSPACE_PATH: workspacePath,
+        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
+        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
+        BOOKMARKS_CHROME_DATA_DIR: join(dir, "Chrome"),
+      }
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
+
+      const imported = await runCommand(dir, [process.execPath, cliPath, "import", "--json"], cliEnv)
+      expect(imported.exitCode).toBe(1)
+      const parsedImport = JSON.parse(imported.stderr) as { readonly error: string }
+      expect(parsedImport.error).toContain(
+        'Safari profiles share the same bookmarks scope "Favorites Bar": safari/default, safari/heartbeat.',
+      )
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

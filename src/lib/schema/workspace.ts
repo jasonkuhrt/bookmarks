@@ -98,6 +98,7 @@ export interface WorkspaceTarget {
   browser: string
   profile: string
   path: string
+  bookmarkScope?: string | undefined
   enabled?: boolean | undefined
 }
 
@@ -105,6 +106,7 @@ export const WorkspaceTarget: Schema.Schema<WorkspaceTarget> = Schema.mutable(Sc
   browser: Schema.String,
   profile: Schema.String,
   path: Schema.String,
+  bookmarkScope: Schema.optional(Schema.String),
   enabled: Schema.optional(Schema.Boolean),
 }))
 

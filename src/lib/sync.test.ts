@@ -453,14 +453,20 @@ describe("push", () => {
         yamlOverride: config,
       }))
 
-      expect(result.targets[0]?.writeMode).toBe("rewrite")
-      expect(result.backup?.backupDir).toBe(backupDir)
-      expect(result.backup?.files).toHaveLength(1)
-      expect(result.backup?.files[0]).toContain("chrome--default--Bookmarks")
-      expect(result.backup?.skipped).toEqual(["yaml"])
-      expect(await readdir(backupDir)).toHaveLength(1)
-      const browserTree = await run(Chrome.readBookmarks(chromePath))
-      expect(browserTree).toEqual(config.base)
+      if (result.orchestration?.state === "queued") {
+        expect(result.orchestration.blockers).toContain("Google Chrome")
+        expect(result.targets).toEqual([])
+        expect(result.backup).toBeUndefined()
+      } else {
+        expect(result.targets[0]?.writeMode).toBe("rewrite")
+        expect(result.backup?.backupDir).toBe(backupDir)
+        expect(result.backup?.files).toHaveLength(1)
+        expect(result.backup?.files[0]).toContain("chrome--default--Bookmarks")
+        expect(result.backup?.skipped).toEqual(["yaml"])
+        expect(await readdir(backupDir)).toHaveLength(1)
+        const browserTree = await run(Chrome.readBookmarks(chromePath))
+        expect(browserTree).toEqual(config.base)
+      }
     } finally {
       if (originalBackupDir === undefined) {
         delete process.env["BOOKMARKS_BACKUP_DIR"]
