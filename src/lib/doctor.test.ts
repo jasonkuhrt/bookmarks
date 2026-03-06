@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Doctor from "./doctor.js"
-import { BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
+import { BookmarkTree, BookmarksConfig, ChromeBookmarks, ChromeProfileBookmarks } from "./schema/__.js"
 import { copyChromeBookmarksFixture } from "./test-fixtures.js"
 import * as YamlModule from "./yaml.js"
 
@@ -129,17 +129,28 @@ describe("runDiagnostics", () => {
   test("reports the actual configured targets and browser processes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-"))
     const yamlPath = join(dir, "bookmarks.yaml")
-    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Work", "Bookmarks")
+    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"]
 
     try {
+      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
+      await mkdir(join(chromeDataDir, "Work"), { recursive: true })
       await copyChromeBookmarksFixture(chromePath)
-      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
-        targets: {
-          chrome: {
-            work: TargetProfile.make({ path: chromePath }),
+      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+        profile: {
+          info_cache: {
+            Work: {},
           },
         },
-        base: BookmarkTree.make({}),
+      }))
+      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
+        all: BookmarkTree.make({}),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            work: ChromeProfileBookmarks.make({}),
+          },
+        }),
       })))
 
       const result = await run(Doctor.runDiagnostics(yamlPath))
@@ -147,12 +158,16 @@ describe("runDiagnostics", () => {
 
       expect(typeof result.allPassed).toBe("boolean")
       expect(names).toContain("YAML source of truth")
+      expect(names).toContain("Configured Chrome profiles")
       expect(names).toContain("Enabled targets")
-      expect(names).toContain("Configured target chrome/work exists")
+      expect(names).toContain("Discovered target chrome/work exists")
       expect(names).toContain("Google Chrome not running")
-      expect(names).not.toContain("Safari plist exists")
-      expect(names).not.toContain("Chrome default profile exists")
     } finally {
+      if (originalChromeDataDir === undefined) {
+        delete process.env["BOOKMARKS_CHROME_DATA_DIR"]
+      } else {
+        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })
@@ -178,17 +193,28 @@ describe("runDiagnostics", () => {
   test("each check has required fields", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-shape-"))
     const yamlPath = join(dir, "bookmarks.yaml")
-    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
+    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"]
 
     try {
+      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true })
       await copyChromeBookmarksFixture(chromePath)
-      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+        profile: {
+          info_cache: {
+            Default: {},
           },
         },
-        base: BookmarkTree.make({}),
+      }))
+      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
+        all: BookmarkTree.make({}),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            default: ChromeProfileBookmarks.make({}),
+          },
+        }),
       })))
 
       const result = await run(Doctor.runDiagnostics(yamlPath))
@@ -201,6 +227,11 @@ describe("runDiagnostics", () => {
         }
       }
     } finally {
+      if (originalChromeDataDir === undefined) {
+        delete process.env["BOOKMARKS_CHROME_DATA_DIR"]
+      } else {
+        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir
+      }
       await rm(dir, { recursive: true, force: true })
     }
   })

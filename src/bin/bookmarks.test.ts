@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { copyChromeBookmarksFixture } from "../lib/test-fixtures.js"
-import { BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "../lib/schema/__.js"
+import { BookmarkLeaf, BookmarksConfig, BookmarkTree, ChromeBookmarks, ChromeProfileBookmarks } from "../lib/schema/__.js"
 import * as Workspace from "../lib/workspace.js"
 import * as YamlModule from "../lib/yaml.js"
 
@@ -125,15 +125,15 @@ describe("bookmarks CLI", () => {
       }))
 
       const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
-          },
-        },
-        base: new BookmarkTree({
-          favorites_bar: [
+        all: new BookmarkTree({
+          bar: [
             new BookmarkLeaf({ name: "Docs", url: "https://docs.example" }),
           ],
+        }),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            default: ChromeProfileBookmarks.make({}),
+          },
         }),
       })
 
@@ -226,12 +226,12 @@ describe("bookmarks CLI", () => {
       }))
 
       const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+        all: new BookmarkTree({}),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            default: ChromeProfileBookmarks.make({}),
           },
-        },
-        base: new BookmarkTree({}),
+        }),
       })
 
       await run(YamlModule.save(yamlPath, config))
@@ -296,7 +296,6 @@ describe("bookmarks CLI", () => {
     const importLockPath = join(dir, "import.lock.json")
     const publishPlanPath = join(dir, "publish.plan.json")
     const chromeDataDir = join(dir, "Chrome")
-    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
@@ -308,12 +307,12 @@ describe("bookmarks CLI", () => {
       ])
 
       const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+        all: new BookmarkTree({}),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            default: ChromeProfileBookmarks.make({}),
           },
-        },
-        base: new BookmarkTree({}),
+        }),
       })
 
       await run(YamlModule.save(yamlPath, config))
@@ -346,14 +345,14 @@ describe("bookmarks CLI", () => {
       expect(parsedNextNeedsReview.state).toBe("needs_review")
 
       const workspace = await run(Workspace.load(workspacePath))
-      const importedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
+      const importedNode = workspace.inbox["chrome/default"]?.bar?.[0]
       expect(importedNode?.kind).toBe("bookmark")
       if (!importedNode || importedNode.kind !== "bookmark") {
-        throw new Error("Expected imported bookmark in favorites_bar")
+        throw new Error("Expected imported bookmark in bar")
       }
       workspace.inbox = {}
       workspace.publish.profiles["chrome/default"] = {
-        favorites_bar: [{ ...importedNode, title: "CLI Curated Link" }],
+        bar: [{ ...importedNode, title: "CLI Curated Link" }],
       }
       await run(Workspace.save(workspacePath, workspace))
 
@@ -400,7 +399,6 @@ describe("bookmarks CLI", () => {
     const importLockPath = join(dir, "import.lock.json")
     const publishPlanPath = join(dir, "publish.plan.json")
     const chromeDataDir = join(dir, "Chrome")
-    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const safariPath = join(dir, "Safari", "Bookmarks.plist")
     const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db")
 
@@ -411,12 +409,12 @@ describe("bookmarks CLI", () => {
       ])
 
       const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+        all: new BookmarkTree({}),
+        chrome: ChromeBookmarks.make({
+          profiles: {
+            default: ChromeProfileBookmarks.make({}),
           },
-        },
-        base: new BookmarkTree({}),
+        }),
       })
 
       await run(YamlModule.save(yamlPath, config))
@@ -448,7 +446,7 @@ describe("bookmarks CLI", () => {
     }
   })
 
-  test("import fails clearly when Safari profiles share one bookmarks scope", async () => {
+  test("import succeeds when Safari profiles share one favorites scope because Safari bookmarks are shared", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-safari-targets-"))
     const workspacePath = join(dir, "workspace.yaml")
     const importLockPath = join(dir, "import.lock.json")
@@ -509,11 +507,9 @@ describe("bookmarks CLI", () => {
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
 
       const imported = await runCommand(dir, [process.execPath, cliPath, "import", "--json"], cliEnv)
-      expect(imported.exitCode).toBe(1)
-      const parsedImport = JSON.parse(imported.stderr) as { readonly error: string }
-      expect(parsedImport.error).toContain(
-        'Safari profiles share the same bookmarks scope "Favorites Bar": safari/default, safari/heartbeat.',
-      )
+      expect(imported.exitCode).toBe(0)
+      const parsedImport = JSON.parse(imported.stdout) as { readonly targets: readonly string[] }
+      expect(parsedImport.targets).toEqual(["safari"])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

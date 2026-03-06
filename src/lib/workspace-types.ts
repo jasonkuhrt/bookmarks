@@ -19,7 +19,7 @@ export interface ImportedTargetSnapshot {
 
 export interface ImportLockTarget {
   readonly browser: string
-  readonly profile: string
+  readonly profile?: string
   readonly path: string
   readonly importedAt: string
   readonly occurrences: readonly ImportedOccurrence[]
@@ -49,7 +49,7 @@ export interface WorkspacePlanBlocker {
 export interface WorkspacePlanTarget {
   readonly targetId: string
   readonly browser: string
-  readonly profile: string
+  readonly profile?: string
   readonly path: string
   readonly enabled: boolean
   readonly writeMode: "rewrite"

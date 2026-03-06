@@ -4,48 +4,24 @@
     "BookmarksConfig": {
       "type": "object",
       "required": [
-        "targets",
-        "base"
+        "version",
+        "all"
       ],
       "properties": {
-        "targets": {
-          "type": "object",
-          "required": [],
-          "properties": {},
-          "additionalProperties": {
-            "type": "object",
-            "required": [],
-            "properties": {},
-            "additionalProperties": {
-              "$ref": "#/$defs/TargetProfile"
-            }
-          }
+        "version": {
+          "type": "number",
+          "enum": [
+            2
+          ]
         },
-        "base": {
+        "all": {
           "$ref": "#/$defs/BookmarkTree"
         },
-        "profiles": {
-          "type": "object",
-          "required": [],
-          "properties": {},
-          "additionalProperties": {
-            "$ref": "#/$defs/BookmarkTree"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "TargetProfile": {
-      "type": "object",
-      "required": [
-        "path"
-      ],
-      "properties": {
-        "path": {
-          "type": "string"
+        "safari": {
+          "$ref": "#/$defs/SafariBookmarks"
         },
-        "enabled": {
-          "type": "boolean"
+        "chrome": {
+          "$ref": "#/$defs/ChromeBookmarks"
         }
       },
       "additionalProperties": false
@@ -54,13 +30,13 @@
       "type": "object",
       "required": [],
       "properties": {
-        "favorites_bar": {
+        "bar": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/BookmarkNode"
           }
         },
-        "other": {
+        "menu": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/BookmarkNode"
@@ -136,6 +112,98 @@
           "enum": [
             "BookmarkFolder"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SafariBookmarks": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bar": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "menu": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "reading_list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChromeBookmarks": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bar": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "menu": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "mobile": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "profiles": {
+          "type": "object",
+          "required": [],
+          "properties": {},
+          "additionalProperties": {
+            "$ref": "#/$defs/ChromeProfileBookmarks"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChromeProfileBookmarks": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bar": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "menu": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
+        },
+        "mobile": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookmarkNode"
+          }
         }
       },
       "additionalProperties": false

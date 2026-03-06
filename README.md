@@ -73,19 +73,23 @@ Minimal example:
 
 ```yaml
 # yaml-language-server: $schema=./bookmarks.schema.json
-targets:
-  chrome:
-    default:
-      path: /Users/you/Library/Application Support/Google/Chrome/Default/Bookmarks
-base:
-  favorites_bar:
+version: 2
+all:
+  bar:
     - name: Docs
       url: https://docs.example
+
+chrome:
+  enabled: true
+  profiles:
+    default:
+      enabled: true
 ```
 
 Target selection rules:
 
-- omit selectors to operate on all discovered profiles
+- omit selectors to operate on all discovered bookmark targets
+- Safari is one shared bookmark target, so `safari` is valid and `safari/<profile>` is not
 - pass a bare browser selector like `chrome` to operate on every discovered Chrome profile
 - pass an exact selector like `chrome/profile-1` to scope literally
 - exact typos fail clearly instead of silently falling back

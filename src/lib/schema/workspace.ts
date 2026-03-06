@@ -81,32 +81,30 @@ export const WorkspaceFolderNode: Schema.Schema<WorkspaceFolderNode> = Schema.mu
 }))
 
 export interface WorkspaceTree {
-  favorites_bar?: WorkspaceNode[] | undefined
-  other?: WorkspaceNode[] | undefined
+  bar?: WorkspaceNode[] | undefined
+  menu?: WorkspaceNode[] | undefined
   reading_list?: WorkspaceNode[] | undefined
   mobile?: WorkspaceNode[] | undefined
 }
 
 export const WorkspaceTree: Schema.Schema<WorkspaceTree> = Schema.mutable(Schema.Struct({
-  favorites_bar: Schema.optional(WorkspaceSection),
-  other: Schema.optional(WorkspaceSection),
+  bar: Schema.optional(WorkspaceSection),
+  menu: Schema.optional(WorkspaceSection),
   reading_list: Schema.optional(WorkspaceSection),
   mobile: Schema.optional(WorkspaceSection),
 }))
 
 export interface WorkspaceTarget {
   browser: string
-  profile: string
+  profile?: string | undefined
   path: string
-  bookmarkScope?: string | undefined
   enabled?: boolean | undefined
 }
 
 export const WorkspaceTarget: Schema.Schema<WorkspaceTarget> = Schema.mutable(Schema.Struct({
   browser: Schema.String,
-  profile: Schema.String,
+  profile: Schema.optional(Schema.String),
   path: Schema.String,
-  bookmarkScope: Schema.optional(Schema.String),
   enabled: Schema.optional(Schema.Boolean),
 }))
 

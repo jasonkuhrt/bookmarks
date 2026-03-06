@@ -40,7 +40,7 @@ export type BookmarkTrie = BookmarkTree
 
 // -- Section keys for tree traversal --
 
-const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
+const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const
 
 // -- flatten: BookmarkTree → BookmarkIndex (URL-keyed) --
 
@@ -94,8 +94,8 @@ const cloneSection = (nodes: BookmarkSection | undefined): BookmarkSection | und
 /** Clone a BookmarkTree into a structural working copy. */
 export const toTrie = (tree: BookmarkTree): BookmarkTrie =>
   BookmarkTree.make({
-    favorites_bar: cloneSection(tree.favorites_bar),
-    other: cloneSection(tree.other),
+    bar: cloneSection(tree.bar),
+    menu: cloneSection(tree.menu),
     reading_list: cloneSection(tree.reading_list),
     mobile: cloneSection(tree.mobile),
   })

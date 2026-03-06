@@ -35,6 +35,7 @@ import * as Doctor from "../lib/doctor.js"
 import * as ManagedPaths from "../lib/managed-paths.js"
 import * as Paths from "../lib/paths.js"
 import * as SyncModule from "../lib/sync.js"
+import * as Targets from "../lib/targets.js"
 import { UnsupportedBookmarks } from "../lib/unsupported.js"
 import * as Workspace from "../lib/workspace.js"
 import type { WorkspaceNextResult, WorkspacePlan } from "../lib/workspace-types.js"
@@ -225,7 +226,7 @@ const printDryRunPreview = (
 
       if (!showBrowser && !showYaml) continue
 
-      yield* Console.log(`  ${targetStatus.target.browser}/${targetStatus.target.profile}`)
+      yield* Console.log(`  ${Targets.displayNameOf(targetStatus.target)}`)
       if (showBrowser) {
         yield* Console.log(`    to browser: ${targetStatus.yamlPatches.length}`)
         yield* printPatchPreview("to browser", targetStatus.yamlPatches)
@@ -298,7 +299,7 @@ const printSyncSummary = (
     }
     for (const targetResult of result.targets) {
       yield* Console.log(
-        `  ${targetResult.target.browser}/${targetResult.target.profile}: ` +
+        `  ${Targets.displayNameOf(targetResult.target)}: ` +
           `${targetResult.applied.length} applied, ${targetResult.graveyarded.length} graveyarded` +
           (targetResult.writeMode === "rewrite" ? ", exact structural rewrite" : ""),
       )
@@ -318,7 +319,7 @@ const printStatus = (status: SyncModule.StatusResult) =>
     }
 
     for (const targetStatus of status.targets) {
-      yield* Console.log(`${targetStatus.target.browser}/${targetStatus.target.profile}`)
+      yield* Console.log(`${Targets.displayNameOf(targetStatus.target)}`)
       yield* Console.log(`  path: ${targetStatus.target.path}`)
       yield* Console.log(`  pending -> browser: ${targetStatus.yamlPatches.length}`)
       yield* printPatchPreview("to browser", targetStatus.yamlPatches)

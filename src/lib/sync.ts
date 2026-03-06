@@ -6,7 +6,7 @@
  * Produces graveyard entries for conflict losers.
  */
 
-import { Array as Arr, DateTime, Duration, Effect, Order, Schema } from "effect"
+import { Array as Arr, DateTime, Duration, Effect, Order } from "effect"
 import { execFile } from "node:child_process"
 import * as Fs from "node:fs/promises"
 import * as Path from "node:path"
@@ -18,7 +18,17 @@ import * as Orchestration from "./orchestration.js"
 import * as Patch from "./patch.js"
 import * as Permissions from "./permissions.js"
 import * as Targets from "./targets.js"
-import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree, BookmarksConfig, TargetProfile } from "./schema/__.js"
+import {
+  BookmarkFolder,
+  BookmarkLeaf,
+  BookmarkNode,
+  BookmarkSection,
+  BookmarkTree,
+  BookmarksConfig,
+  ChromeBookmarks,
+  ChromeProfileBookmarks,
+  SafariBookmarks,
+} from "./schema/__.js"
 import { ensureMutationSupported } from "./unsupported.js"
 import * as YamlModule from "./yaml.js"
 
@@ -92,15 +102,13 @@ export const readGitBaselineConfig = (yamlPath: string): Effect.Effect<Bookmarks
       try: () => Yaml.parse(raw) as unknown,
       catch: (e) => new Error(`Failed to parse committed bookmarks.yaml: ${e}`),
     })
-    const config = yield* Schema.decodeUnknown(BookmarksConfig)(parsed).pipe(
-      Effect.mapError((e) => new Error(`Failed to parse committed bookmarks.yaml: ${e.message}`)),
-    )
+    const config = yield* YamlModule.decodeDocument(parsed, "committed bookmarks.yaml")
     return config
   })
 
 export const readGitBaseline = (yamlPath: string): Effect.Effect<BookmarkTree, Error> =>
   readGitBaselineConfig(yamlPath).pipe(
-    Effect.map((config) => config?.base ?? BookmarkTree.make({})),
+    Effect.map((config) => config?.all ?? BookmarkTree.make({})),
   )
 
 /** Resolve the git repo root for a given file path. */
@@ -263,11 +271,48 @@ export const applyPatches = (
   return Effect.succeed(Patch.fromTrie(nextTree))
 }
 
-const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
+const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const
 
 type SectionKey = (typeof sectionKeys)[number]
 type MutableBookmarkSection = BookmarkNode[]
 type MutableBookmarkTree = Record<SectionKey, MutableBookmarkSection | undefined>
+
+const supportedSectionsByBrowser: Record<string, readonly SectionKey[]> = {
+  safari: ["bar", "menu", "reading_list"],
+  chrome: ["bar", "menu", "mobile"],
+}
+
+const emptyTree = (): BookmarkTree =>
+  BookmarkTree.make({})
+
+const sectionKeysForBrowser = (browser: string): readonly SectionKey[] =>
+  supportedSectionsByBrowser[browser] ?? sectionKeys
+
+const resolvedTargetOf = (
+  target: Pick<Targets.TargetDescriptor, "browser" | "profile">,
+): { readonly browser: string; readonly profile?: string } =>
+  target.profile
+    ? { browser: target.browser, profile: target.profile }
+    : { browser: target.browser }
+
+const browserOfTargetId = (targetId: string): string =>
+  targetId === "safari"
+    ? "safari"
+    : targetId.split("/", 1)[0]!
+
+const profileOfTargetId = (targetId: string): string | undefined => {
+  const slashIndex = targetId.indexOf("/")
+  return slashIndex === -1 ? undefined : targetId.slice(slashIndex + 1)
+}
+
+const resolvedTargetOfId = (
+  targetId: string,
+): { readonly browser: string; readonly profile?: string } => {
+  const profile = profileOfTargetId(targetId)
+  return profile
+    ? { browser: browserOfTargetId(targetId), profile }
+    : { browser: browserOfTargetId(targetId) }
+}
 
 const asMutableTree = (tree: BookmarkTree): MutableBookmarkTree =>
   tree as unknown as MutableBookmarkTree
@@ -444,84 +489,70 @@ export interface BackupConfig {
   readonly yamlOverride?: BookmarksConfig
 }
 
-const toConfigTargets = (
-  targets: readonly Targets.TargetDescriptor[],
-): BookmarksConfig["targets"] => {
-  const configTargets: Record<string, Record<string, TargetProfile>> = {}
-  for (const target of targets) {
-    const profiles = configTargets[target.browser] ?? {}
-    profiles[target.profile] = TargetProfile.make({
-      path: target.path,
-      enabled: target.enabled,
-    })
-    configTargets[target.browser] = profiles
-  }
-  return configTargets
-}
-
-const mergeTargets = (
-  discoveredTargets: BookmarksConfig["targets"],
-  configuredTargets: BookmarksConfig["targets"],
-): BookmarksConfig["targets"] => {
-  const merged: Record<string, Record<string, TargetProfile>> = structuredClone(discoveredTargets)
-
-  for (const [browser, profiles] of Object.entries(configuredTargets)) {
-    const nextProfiles = merged[browser] ?? {}
-    for (const [profile, target] of Object.entries(profiles)) {
-      nextProfiles[profile] = target
-    }
-    merged[browser] = nextProfiles
-  }
-
-  return merged
-}
-
-const discoverDefaultTargets = (): Effect.Effect<BookmarksConfig["targets"], Error> =>
-  Targets.discoverTargets().pipe(
-    Effect.map(toConfigTargets),
-  )
-
-const emptyConfig = (
-  targets: BookmarksConfig["targets"] = {},
-): BookmarksConfig =>
+const emptyConfig = (): BookmarksConfig =>
   BookmarksConfig.make({
-    targets,
-    base: BookmarkTree.make({}),
+    all: BookmarkTree.make({}),
   })
 
 const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =>
   config.yamlOverride
     ? Effect.succeed(config.yamlOverride)
     : Effect.gen(function* () {
-        const discoveredTargets = yield* discoverDefaultTargets()
         const exists = yield* Effect.tryPromise({
           try: () => Fs.access(config.yamlPath).then(() => true, () => false),
           catch: (e) => new Error(`Failed to inspect ${config.yamlPath}: ${e}`),
         })
-        if (!exists) return emptyConfig(discoveredTargets)
+        if (!exists) return emptyConfig()
 
-        const loaded = yield* YamlModule.load(config.yamlPath)
-        return BookmarksConfig.make({
-          ...loaded,
-          targets: mergeTargets(discoveredTargets, loaded.targets),
-        })
+        return yield* YamlModule.load(config.yamlPath)
       })
+
+const validateConfiguredChromeProfiles = (
+  config: BookmarksConfig,
+  discoveredTargets: readonly Targets.TargetDescriptor[],
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const discoveredChromeProfiles = new Set(
+      discoveredTargets
+        .filter((target) => target.browser === "chrome" && target.profile)
+        .map((target) => `chrome/${target.profile!}`),
+    )
+
+    for (const configuredProfile of YamlModule.configuredChromeProfiles(config)) {
+      if (discoveredChromeProfiles.has(`chrome/${configuredProfile}`)) continue
+      return yield* Effect.fail(new Error(
+        `Configured Chrome profile "${configuredProfile}" was not discovered on this machine.`,
+      ))
+    }
+  })
+
+interface TargetResolution {
+  readonly discoveredTargets: readonly Targets.TargetDescriptor[]
+  readonly selectedTargets: readonly Targets.TargetDescriptor[]
+}
 
 const resolveSelectedTargets = (
   config: BookmarksConfig,
   requestedTargets: readonly string[] = [],
-): Effect.Effect<readonly Targets.TargetDescriptor[], Error> =>
+): Effect.Effect<TargetResolution, Error> =>
   Effect.gen(function* () {
-    const resolvedTargets = yield* Targets.resolveTargetSelectors(Targets.listTargets(config), requestedTargets)
+    const discoveredTargets = yield* Targets.discoverTargets()
+    yield* validateConfiguredChromeProfiles(config, discoveredTargets)
+    const resolvedTargets = yield* Targets.resolveTargetSelectors(discoveredTargets, requestedTargets)
     const explicitlyRequestedDisabled = resolvedTargets.filter((target) =>
-      requestedTargets.length > 0 && !target.enabled
+      requestedTargets.length > 0 && !YamlModule.isTargetEnabled(config, resolvedTargetOf(target))
     )
     if (explicitlyRequestedDisabled.length > 0) {
       return yield* Effect.fail(new Error(
         `Requested target(s) are disabled: ${explicitlyRequestedDisabled.map(Targets.keyOf).join(", ")}.`,
       ))
     }
-    return resolvedTargets.filter((target) => target.enabled)
+    return {
+      discoveredTargets,
+      selectedTargets: resolvedTargets.filter((target) =>
+        YamlModule.isTargetEnabled(config, resolvedTargetOf(target))
+      ),
+    }
   })
 
 const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =>
@@ -552,8 +583,8 @@ const ensurePermanentMutationSafety = (
     }
 
     for (const target of targets) {
-      const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
-      yield* ensureMutationSupported(yamlTree, `yaml profile ${Targets.displayNameOf(target)}`)
+      const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target))
+      yield* ensureMutationSupported(yamlTree, `yaml target ${Targets.displayNameOf(target)}`)
       const browserTree = yield* Targets.readTree(target)
       yield* ensureMutationSupported(browserTree, `${Targets.displayNameOf(target)} target`)
     }
@@ -596,7 +627,7 @@ const runManagedOperation = (
     (operation) =>
       Effect.gen(function* () {
         const yamlConfig = yield* loadConfig(config)
-        const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+        const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
         yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets)
         yield* ensureTemporaryMutationSafety(selectedTargets)
         const mutationBackup = yield* createMutationBackup(config, yamlConfig)
@@ -627,6 +658,7 @@ const runManagedOperation = (
         }
       }),
   ).pipe(
+    Effect.mapError((e) => e instanceof Error ? e : new Error(String(e))),
     Effect.map((outcome) =>
       outcome._tag === "completed"
         ? outcome.value
@@ -691,59 +723,145 @@ const sectionSuffix = (
 }
 
 const isTreeEmpty = (tree: BookmarkTree): boolean =>
-  (tree.favorites_bar?.length ?? 0) === 0 &&
-  (tree.other?.length ?? 0) === 0 &&
+  (tree.bar?.length ?? 0) === 0 &&
+  (tree.menu?.length ?? 0) === 0 &&
   (tree.reading_list?.length ?? 0) === 0 &&
   (tree.mobile?.length ?? 0) === 0
 
 const treeEquals = (left: BookmarkTree, right: BookmarkTree): boolean =>
   sectionKeys.every((sectionKey) => sectionsEqual(left[sectionKey], right[sectionKey]))
 
+const treeFromSections = (sections: Partial<Record<SectionKey, BookmarkSection | undefined>>): BookmarkTree =>
+  BookmarkTree.make({
+    bar: sections.bar,
+    menu: sections.menu,
+    reading_list: sections.reading_list,
+    mobile: sections.mobile,
+  })
+
+const supportedTargetIdsForSection = (
+  targetIds: readonly string[],
+  sectionKey: SectionKey,
+): readonly string[] =>
+  targetIds.filter((targetId) => sectionKeysForBrowser(browserOfTargetId(targetId)).includes(sectionKey))
+
 export const decomposeResolvedTrees = (
-  targets: BookmarksConfig["targets"],
+  currentConfig: BookmarksConfig,
   resolvedTrees: Readonly<Record<string, BookmarkTree>>,
 ): BookmarksConfig => {
-  const profileKeys = Object.keys(resolvedTrees)
-  if (profileKeys.length === 0) return emptyConfig(targets)
+  const targetIds = Object.keys(resolvedTrees)
+  if (targetIds.length === 0) return emptyConfig()
 
-  const baseSections = Object.fromEntries(
+  const allSections = Object.fromEntries(
     sectionKeys.map((sectionKey) => {
-      const prefix = longestCommonPrefix(
-        profileKeys.map((profileKey) => resolvedTrees[profileKey]![sectionKey]),
-      )
+      const supportedTargetIds = supportedTargetIdsForSection(targetIds, sectionKey)
+      const prefix = supportedTargetIds.length === 0
+        ? undefined
+        : longestCommonPrefix(supportedTargetIds.map((targetId) => resolvedTrees[targetId]![sectionKey]))
       return [sectionKey, prefix]
     }),
   ) as Record<SectionKey, BookmarkSection | undefined>
 
-  const profiles: Record<string, BookmarkTree> = {}
+  const afterAll = Object.fromEntries(
+    targetIds.map((targetId) => [
+      targetId,
+      treeFromSections(Object.fromEntries(
+        sectionKeys.map((sectionKey) => {
+          const supported = sectionKeysForBrowser(browserOfTargetId(targetId)).includes(sectionKey)
+          return [
+            sectionKey,
+            supported
+              ? sectionSuffix(
+                resolvedTrees[targetId]![sectionKey],
+                allSections[sectionKey]?.length ?? 0,
+              )
+              : undefined,
+          ]
+        }),
+      ) as Partial<Record<SectionKey, BookmarkSection | undefined>>),
+    ]),
+  ) as Record<string, BookmarkTree>
 
-  for (const profileKey of profileKeys) {
-    const overlayTree = BookmarkTree.make({
-      favorites_bar: sectionSuffix(
-        resolvedTrees[profileKey]!.favorites_bar,
-        baseSections.favorites_bar?.length ?? 0,
-      ),
-      other: sectionSuffix(
-        resolvedTrees[profileKey]!.other,
-        baseSections.other?.length ?? 0,
-      ),
-      reading_list: sectionSuffix(
-        resolvedTrees[profileKey]!.reading_list,
-        baseSections.reading_list?.length ?? 0,
-      ),
-      mobile: sectionSuffix(
-        resolvedTrees[profileKey]!.mobile,
-        baseSections.mobile?.length ?? 0,
-      ),
+  const chromeTargetIds = targetIds.filter((targetId) => browserOfTargetId(targetId) === "chrome")
+  const chromeSections = Object.fromEntries(
+    sectionKeys.map((sectionKey) => {
+      const supported = sectionKeysForBrowser("chrome").includes(sectionKey)
+      const prefix = !supported || chromeTargetIds.length === 0
+        ? undefined
+        : longestCommonPrefix(chromeTargetIds.map((targetId) => afterAll[targetId]![sectionKey]))
+      return [sectionKey, prefix]
+    }),
+  ) as Record<SectionKey, BookmarkSection | undefined>
+
+  const safariOverlay = afterAll["safari"]
+    ? treeFromSections({
+      bar: afterAll["safari"].bar,
+      menu: afterAll["safari"].menu,
+      reading_list: afterAll["safari"].reading_list,
     })
-    if (!isTreeEmpty(overlayTree)) profiles[profileKey] = overlayTree
-  }
+    : emptyTree()
 
-  return BookmarksConfig.make({
-    targets,
-    base: BookmarkTree.make(baseSections),
-    profiles: Object.keys(profiles).length > 0 ? profiles : undefined,
+  const chromeOverlay = treeFromSections({
+    bar: chromeSections.bar,
+    menu: chromeSections.menu,
+    mobile: chromeSections.mobile,
   })
+
+  const profileNames = new Set([
+    ...chromeTargetIds.map((targetId) => profileOfTargetId(targetId)!).filter(Boolean),
+    ...Object.keys(currentConfig.chrome?.profiles ?? {}),
+  ])
+
+  const chromeProfiles = Object.fromEntries(
+    [...profileNames]
+      .sort()
+      .flatMap((profile): readonly [string, ChromeProfileBookmarks][] => {
+        const targetId = `chrome/${profile}`
+        const overlayTree = targetId in afterAll
+          ? treeFromSections({
+            bar: sectionSuffix(afterAll[targetId]!.bar, chromeSections.bar?.length ?? 0),
+            menu: sectionSuffix(afterAll[targetId]!.menu, chromeSections.menu?.length ?? 0),
+            mobile: sectionSuffix(afterAll[targetId]!.mobile, chromeSections.mobile?.length ?? 0),
+          })
+          : emptyTree()
+        const existingProfile = currentConfig.chrome?.profiles?.[profile]
+        if (!existingProfile && isTreeEmpty(overlayTree)) return []
+        return [[profile, ChromeProfileBookmarks.make({
+          ...(existingProfile?.enabled !== undefined ? { enabled: existingProfile.enabled } : {}),
+          bar: overlayTree.bar,
+          menu: overlayTree.menu,
+          mobile: overlayTree.mobile,
+        })]]
+      }),
+  )
+
+  const nextConfig = BookmarksConfig.make({
+    version: 2,
+    all: treeFromSections(allSections),
+    ...(currentConfig.safari || !isTreeEmpty(safariOverlay)
+      ? {
+          safari: SafariBookmarks.make({
+            ...(currentConfig.safari?.enabled !== undefined ? { enabled: currentConfig.safari.enabled } : {}),
+            bar: safariOverlay.bar,
+            menu: safariOverlay.menu,
+            reading_list: safariOverlay.reading_list,
+          }),
+        }
+      : {}),
+    ...(currentConfig.chrome || !isTreeEmpty(chromeOverlay) || Object.keys(chromeProfiles).length > 0
+      ? {
+          chrome: ChromeBookmarks.make({
+            ...(currentConfig.chrome?.enabled !== undefined ? { enabled: currentConfig.chrome.enabled } : {}),
+            bar: chromeOverlay.bar,
+            menu: chromeOverlay.menu,
+            mobile: chromeOverlay.mobile,
+            ...(Object.keys(chromeProfiles).length > 0 ? { profiles: chromeProfiles } : {}),
+          }),
+        }
+      : {}),
+  })
+
+  return nextConfig
 }
 
 const saveConfig = (yamlPath: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
@@ -754,14 +872,14 @@ const saveConfig = (yamlPath: string, config: BookmarksConfig): Effect.Effect<vo
     yield* gitAutoCommit(yamlPath)
   })
 
-const resolveProfileTrees = (
+const resolveTargetTrees = (
   config: BookmarksConfig,
-  profileKeys: readonly string[],
+  targetIds: readonly string[],
 ): Effect.Effect<Record<string, BookmarkTree>, Error> =>
   Effect.gen(function* () {
     const trees: Record<string, BookmarkTree> = {}
-    for (const profileKey of profileKeys) {
-      trees[profileKey] = yield* YamlModule.resolveProfile(config, profileKey)
+    for (const targetId of targetIds) {
+      trees[targetId] = yield* YamlModule.resolveTarget(config, resolvedTargetOfId(targetId))
     }
     return trees
   })
@@ -920,19 +1038,19 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const baselineConfig = (yield* readGitBaselineConfig(config.yamlPath))
-      ?? emptyConfig(yamlConfig.targets)
+      ?? emptyConfig()
     const maxAge = config.graveyardMaxAge ?? Duration.days(90)
     const targetResults: TargetResult[] = []
-    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
-    const resolvedTrees = yield* resolveProfileTrees(
+    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+    const resolvedTrees = yield* resolveTargetTrees(
       yamlConfig,
-      Targets.listConfiguredProfileKeys(yamlConfig),
+      discoveredTargets.map(Targets.keyOf),
     )
 
     for (const target of selectedTargets) {
       yield* Effect.log(`Syncing ${Targets.displayNameOf(target)}...`)
-      const baselineTree = yield* YamlModule.resolveProfile(baselineConfig, Targets.keyOf(target))
-      const yamlTree = resolvedTrees[Targets.keyOf(target)] ?? BookmarkTree.make({})
+      const baselineTree = yield* YamlModule.resolveTarget(baselineConfig, resolvedTargetOf(target))
+      const yamlTree = resolvedTrees[Targets.keyOf(target)] ?? emptyTree()
       const targetSync = yield* syncTarget(
         target,
         baselineTree,
@@ -944,7 +1062,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       targetResults.push(targetSync.result)
     }
 
-    const nextConfig = decomposeResolvedTrees(yamlConfig.targets, resolvedTrees)
+    const nextConfig = decomposeResolvedTrees(yamlConfig, resolvedTrees)
     if (!config.dryRun) {
       yield* saveConfig(config.yamlPath, nextConfig)
     }
@@ -960,21 +1078,20 @@ const runPull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
-    const profileKeys = Targets.listConfiguredProfileKeys(yamlConfig)
-    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
-    const resolvedTrees = yield* resolveProfileTrees(yamlConfig, profileKeys)
+    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+    const resolvedTrees = yield* resolveTargetTrees(yamlConfig, discoveredTargets.map(Targets.keyOf))
 
     for (const target of selectedTargets) {
       yield* Effect.log(`Pulling ${Targets.displayNameOf(target)}...`)
       const targetPull = yield* pullTarget(
         target,
-        resolvedTrees[Targets.keyOf(target)] ?? BookmarkTree.make({}),
+        resolvedTrees[Targets.keyOf(target)] ?? emptyTree(),
       )
       resolvedTrees[Targets.keyOf(target)] = targetPull.tree
       targetResults.push(targetPull.result)
     }
 
-    const nextConfig = decomposeResolvedTrees(yamlConfig.targets, resolvedTrees)
+    const nextConfig = decomposeResolvedTrees(yamlConfig, resolvedTrees)
     if (!config.dryRun) {
       yield* saveConfig(config.yamlPath, nextConfig)
     }
@@ -990,11 +1107,11 @@ const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
-    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+    const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
 
     for (const target of selectedTargets) {
       yield* Effect.log(`Pushing ${Targets.displayNameOf(target)}...`)
-      const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
+      const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target))
       targetResults.push(
         yield* pushTarget(target, yamlTree, config.dryRun ?? false),
       )
@@ -1026,10 +1143,10 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetStatuses: StatusTargetResult[] = []
-    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+    const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
 
     for (const target of selectedTargets) {
-      const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
+      const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target))
       const browserTree = yield* Targets.readTree(target)
       targetStatuses.push({
         target,
@@ -1051,6 +1168,7 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
         ? { yamlPath: config.yamlPath, yamlOverride: config.yamlOverride }
         : { yamlPath: config.yamlPath },
     )
+    const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, [])
     const backupDir = config.backupDir
     const timestamp = DateTime.formatIso(DateTime.unsafeNow())
       .replaceAll(":", "-")
@@ -1062,7 +1180,7 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
     const candidates = [
       { label: "yaml", path: config.yamlPath, filename: `${timestamp}--bookmarks.yaml` },
-      ...Targets.listTargets(yamlConfig).map((target) => ({
+      ...selectedTargets.map((target) => ({
         label: Targets.displayNameOf(target),
         path: target.path,
         filename: `${timestamp}--${Targets.displayNameOf(target).replaceAll("/", "--")}--${Path.basename(target.path)}`,
@@ -1096,26 +1214,25 @@ const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const yamlConfig = yield* loadConfig(config)
     const maxAge = config.graveyardMaxAge ?? Duration.days(90)
     const targetResults: TargetResult[] = []
-    const profileKeys = Targets.listConfiguredProfileKeys(yamlConfig)
-    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
-    const currentResolvedTrees = yield* resolveProfileTrees(yamlConfig, profileKeys)
+    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+    const currentResolvedTrees = yield* resolveTargetTrees(yamlConfig, discoveredTargets.map(Targets.keyOf))
     const cleanedResolvedTrees: Record<string, BookmarkTree> = {}
 
-    for (const profileKey of profileKeys) {
-      cleanedResolvedTrees[profileKey] = yield* gcTree(
-        currentResolvedTrees[profileKey]!,
+    for (const targetId of Object.keys(currentResolvedTrees)) {
+      cleanedResolvedTrees[targetId] = yield* gcTree(
+        currentResolvedTrees[targetId]!,
         maxAge,
       )
     }
 
     for (const target of selectedTargets) {
-      const cleanedTree = cleanedResolvedTrees[Targets.keyOf(target)] ?? BookmarkTree.make({})
+      const cleanedTree = cleanedResolvedTrees[Targets.keyOf(target)] ?? emptyTree()
       targetResults.push(
         yield* pushTarget(target, cleanedTree, config.dryRun ?? false),
       )
     }
 
-    const nextConfig = decomposeResolvedTrees(yamlConfig.targets, cleanedResolvedTrees)
+    const nextConfig = decomposeResolvedTrees(yamlConfig, cleanedResolvedTrees)
     if (!config.dryRun) {
       yield* saveConfig(config.yamlPath, nextConfig)
     }

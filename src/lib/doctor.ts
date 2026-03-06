@@ -9,6 +9,7 @@
 import { Effect } from "effect"
 import * as Paths from "./paths.js"
 import * as Permissions from "./permissions.js"
+import type { BookmarksConfig } from "./schema/__.js"
 import * as Targets from "./targets.js"
 import * as YamlModule from "./yaml.js"
 
@@ -82,23 +83,44 @@ const checkEnabledTargets = (targets: readonly Targets.TargetDescriptor[]): Doct
       )
     : fail(
         "Enabled targets",
-        "No enabled targets are configured in bookmarks.yaml.",
-        "Add at least one enabled target under targets: before syncing.",
+        "No enabled bookmark targets were discovered and enabled.",
+        "Enable safari or chrome in bookmarks.yaml, or create a supported browser profile before syncing.",
       )
 
-const checkConfiguredTarget = (target: Targets.TargetDescriptor): Effect.Effect<DoctorCheck> =>
+const checkDiscoveredTarget = (target: Targets.TargetDescriptor): Effect.Effect<DoctorCheck> =>
   Effect.map(Permissions.checkTargetAvailable(target.path), (ok) =>
     ok
       ? pass(
-          `Configured target ${Targets.displayNameOf(target)} exists`,
-          `Found configured target at ${target.path}`,
+          `Discovered target ${Targets.displayNameOf(target)} exists`,
+          `Found discovered target at ${target.path}`,
         )
       : fail(
-          `Configured target ${Targets.displayNameOf(target)} exists`,
-          `Configured target not found at ${target.path}`,
-          `Update bookmarks.yaml with a valid path for ${Targets.displayNameOf(target)} or create the target file before syncing.`,
+          `Discovered target ${Targets.displayNameOf(target)} exists`,
+          `Discovered target not found at ${target.path}`,
+          `Create the target file for ${Targets.displayNameOf(target)} or reinstall the browser profile before syncing.`,
         ),
   )
+
+const checkConfiguredChromeProfiles = (
+  config: BookmarksConfig,
+  discoveredTargets: readonly Targets.TargetDescriptor[],
+): DoctorCheck => {
+  const discoveredChromeProfiles = new Set(
+    discoveredTargets
+      .filter((target) => target.browser === "chrome" && target.profile)
+      .map((target) => `chrome/${target.profile!}`),
+  )
+  const missingProfiles = YamlModule.configuredChromeProfiles(config)
+    .filter((profile) => !discoveredChromeProfiles.has(`chrome/${profile}`))
+
+  return missingProfiles.length === 0
+    ? pass("Configured Chrome profiles", "All configured Chrome profiles were discovered on this machine.")
+    : fail(
+        "Configured Chrome profiles",
+        `Configured Chrome profiles were not discovered: ${missingProfiles.join(", ")}.`,
+        "Fix the profile names under chrome.profiles in bookmarks.yaml or create those Chrome profiles locally.",
+      )
+}
 
 const checkBrowserNotRunning = (browser: string): Effect.Effect<DoctorCheck> =>
   Effect.map(Permissions.checkBrowserRunning(browser), (running) =>
@@ -119,7 +141,7 @@ const checkBrowserNotRunning = (browser: string): Effect.Effect<DoctorCheck> =>
  * Run all diagnostic checks and return a structured result.
  * Each check is independent — all run even if some fail.
  */
-export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult> => {
+export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult, Error> => {
   const resolvedYamlPath = yamlPath ?? Paths.defaultYamlPath()
 
   return Effect.gen(function* () {
@@ -135,16 +157,26 @@ export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult> =
       }
     }
 
-    const enabledTargets = Targets.listEnabledTargets(config.value)
+    const discoveredTargets = yield* Targets.discoverTargets()
+    const configuredChromeProfilesCheck = checkConfiguredChromeProfiles(config.value, discoveredTargets)
+    const enabledTargets = discoveredTargets.filter((target) =>
+      YamlModule.isTargetEnabled(
+        config.value,
+        target.profile
+          ? { browser: target.browser, profile: target.profile }
+          : { browser: target.browser },
+      )
+    )
     const needsFullDiskAccess = enabledTargets.some((target) => Targets.requiresFullDiskAccess(target))
     const browserChecks = [...new Set(enabledTargets.map((target) => Targets.processNameOf(target.browser)))]
 
     const checks = yield* Effect.all(
       [
         Effect.succeed(yamlCheck),
+        Effect.succeed(configuredChromeProfilesCheck),
         Effect.succeed(checkEnabledTargets(enabledTargets)),
         ...(needsFullDiskAccess ? [checkFullDiskAccess()] : []),
-        ...enabledTargets.map((target) => checkConfiguredTarget(target)),
+        ...enabledTargets.map((target) => checkDiscoveredTarget(target)),
         ...browserChecks.map((browser) => checkBrowserNotRunning(browser)),
       ],
       { concurrency: "unbounded" },

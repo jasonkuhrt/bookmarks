@@ -1,5 +1,5 @@
 export { BookmarkLeaf } from "./bookmark-leaf.js"
 export { BookmarkFolder, BookmarkNode, BookmarkSection } from "./bookmark-structure.js"
 export { BookmarkTree } from "./bookmark-tree.js"
-export { BookmarksConfig } from "./bookmarks-config.js"
+export { BookmarksConfig, ChromeBookmarks, ChromeProfileBookmarks, SafariBookmarks } from "./bookmarks-config.js"
 export { TargetProfile } from "./target-profile.js"

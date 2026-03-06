@@ -9,7 +9,7 @@ import * as Patch from "./patch.js"
 import * as Paths from "./paths.js"
 import * as Permissions from "./permissions.js"
 import * as Safari from "./safari.js"
-import { BookmarkFolder, BookmarkLeaf, type BookmarkNode, BookmarkTree } from "./schema/__.js"
+import { BookmarkFolder, BookmarkLeaf, type BookmarkNode, BookmarkTree, BookmarksConfig } from "./schema/__.js"
 import {
   WorkspaceFile as WorkspaceFileSchema,
   type WorkspaceFile,
@@ -57,7 +57,7 @@ export interface WorkspacePublishResult {
 }
 
 const WORKSPACE_MODELINE = "# bookmarks-workspace: version=1\n"
-const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
+const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const
 
 const emptyTree = (): WorkspaceTree => ({})
 const emptyScopedTrees = (): WorkspaceScopedTrees => ({ global: {}, profiles: {} })
@@ -143,10 +143,9 @@ const doneAction = (message: string): WorkspaceNextAction => ({
 
 const targetToDescriptor = (target: WorkspaceTarget): Targets.TargetDescriptor => ({
   browser: target.browser,
-  profile: target.profile,
+  ...(target.profile ? { profile: target.profile } : {}),
   path: target.path,
   enabled: target.enabled ?? true,
-  ...(target.bookmarkScope ? { bookmarkScope: target.bookmarkScope } : {}),
 })
 
 const normalizeWorkspaceDocument = (value: unknown): Effect.Effect<unknown, Error> =>
@@ -274,30 +273,11 @@ const backupArtifacts = (
     return { backupDir, files, skipped }
   })
 
-const loadOptionalWorkspaceTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarget>> | undefined, Error> =>
-  Effect.gen(function* () {
-    const workspacePath = Paths.defaultWorkspacePath()
-    if (!(yield* exists(workspacePath))) return undefined
-    return (yield* load(workspacePath)).targets
-  }).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-
-const loadOptionalYamlTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarget>> | undefined, Error> =>
+const loadOptionalYamlConfig = (): Effect.Effect<BookmarksConfig | undefined, Error> =>
   Effect.gen(function* () {
     const yamlPath = Paths.defaultYamlPath()
     if (!(yield* exists(yamlPath))) return undefined
-    const config = yield* YamlModule.load(yamlPath)
-    const targets = Object.fromEntries(
-      Targets.listTargets(config).map((target) => [
-        Targets.keyOf(target),
-        {
-          browser: target.browser,
-          profile: target.profile,
-          path: target.path,
-          enabled: target.enabled,
-        } satisfies WorkspaceTarget,
-      ]),
-    )
-    return targets
+    return yield* YamlModule.load(yamlPath)
   }).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
 
 const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
@@ -310,7 +290,6 @@ const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarge
             browser: target.browser,
             profile: target.profile,
             path: target.path,
-            bookmarkScope: target.bookmarkScope,
             enabled: target.enabled,
           } satisfies WorkspaceTarget,
         ]),
@@ -318,50 +297,63 @@ const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarge
     ),
   )
 
-const mergeTargetRegistries = (
-  ...registries: ReadonlyArray<Readonly<Record<string, WorkspaceTarget>> | undefined>
-): Readonly<Record<string, WorkspaceTarget>> => {
-  const merged: Record<string, WorkspaceTarget> = {}
-
-  for (const registry of registries) {
-    if (!registry) continue
-
-    for (const [targetId, target] of Object.entries(registry)) {
-      const previous = merged[targetId]
-      merged[targetId] = {
-        ...previous,
-        ...target,
-        bookmarkScope: target.bookmarkScope ?? previous?.bookmarkScope,
-      }
-    }
-  }
-
-  return merged
-}
+const emptyYamlConfig = (): BookmarksConfig =>
+  BookmarksConfig.make({ all: BookmarkTree.make({}) })
 
 const resolveTargets = (requestedTargetIds: readonly string[]): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
   Effect.gen(function* () {
     const discoveredTargets = yield* discoverTargets()
-    const yamlTargets = yield* loadOptionalYamlTargets()
-    const workspaceTargets = yield* loadOptionalWorkspaceTargets()
-    const registry = mergeTargetRegistries(discoveredTargets, yamlTargets, workspaceTargets)
+    const yamlConfig = (yield* loadOptionalYamlConfig()) ?? emptyYamlConfig()
+    const configuredChromeProfiles = new Set(YamlModule.configuredChromeProfiles(yamlConfig))
+    const discoveredChromeProfiles = new Set(
+      Object.values(discoveredTargets)
+        .filter((target) => target.browser === "chrome" && target.profile)
+        .map((target) => `chrome/${target.profile!}`),
+    )
 
-    if (Object.keys(registry).length === 0) {
+    for (const configuredProfile of configuredChromeProfiles) {
+      if (discoveredChromeProfiles.has(`chrome/${configuredProfile}`)) continue
       return yield* Effect.fail(new Error(
-        "No bookmark targets were discovered or configured. Install a supported browser profile or add explicit targets to bookmarks.yaml.",
+        `Configured Chrome profile "${configuredProfile}" was not discovered on this machine.`,
+      ))
+    }
+
+    if (Object.keys(discoveredTargets).length === 0) {
+      return yield* Effect.fail(new Error(
+        "No bookmark targets were discovered. Install a supported browser profile and retry.",
       ))
     }
 
     const resolvedDescriptors = yield* Targets.resolveTargetSelectors(
-      Object.values(registry).map(targetToDescriptor),
+      Object.values(discoveredTargets).map(targetToDescriptor),
       requestedTargetIds,
     )
+    const explicitlyRequestedDisabled = resolvedDescriptors.filter((descriptor) =>
+      requestedTargetIds.length > 0 && !YamlModule.isTargetEnabled(
+        yamlConfig,
+        descriptor.profile
+          ? { browser: descriptor.browser, profile: descriptor.profile }
+          : { browser: descriptor.browser },
+      )
+    )
+    if (explicitlyRequestedDisabled.length > 0) {
+      return yield* Effect.fail(new Error(
+        `Requested target(s) are disabled: ${explicitlyRequestedDisabled.map(Targets.keyOf).join(", ")}.`,
+      ))
+    }
 
     return Object.fromEntries(
-      resolvedDescriptors.map((descriptor) => {
+      resolvedDescriptors
+        .filter((descriptor) => YamlModule.isTargetEnabled(
+          yamlConfig,
+          descriptor.profile
+            ? { browser: descriptor.browser, profile: descriptor.profile }
+            : { browser: descriptor.browser },
+        ))
+        .map((descriptor) => {
         const key = Targets.keyOf(descriptor)
-        return [key, registry[key]!]
-      }),
+          return [key, discoveredTargets[key]!]
+        }),
     )
   })
 
@@ -488,8 +480,8 @@ export const validate = (): Effect.Effect<WorkspaceValidationResult, Error> =>
 
 const mergeBookmarkTrees = (base: BookmarkTree, overlay: BookmarkTree): BookmarkTree =>
   BookmarkTree.make({
-    favorites_bar: nonEmptyOrUndefined([...(base.favorites_bar ?? []), ...(overlay.favorites_bar ?? [])]),
-    other: nonEmptyOrUndefined([...(base.other ?? []), ...(overlay.other ?? [])]),
+    bar: nonEmptyOrUndefined([...(base.bar ?? []), ...(overlay.bar ?? [])]),
+    menu: nonEmptyOrUndefined([...(base.menu ?? []), ...(overlay.menu ?? [])]),
     reading_list: nonEmptyOrUndefined([...(base.reading_list ?? []), ...(overlay.reading_list ?? [])]),
     mobile: nonEmptyOrUndefined([...(base.mobile ?? []), ...(overlay.mobile ?? [])]),
   })
@@ -562,8 +554,8 @@ const convertTreeForPublish = (
   }
 
   const bookmarkTree = BookmarkTree.make({
-    favorites_bar: nonEmptyOrUndefined(convertSection(tree.favorites_bar, [...locationRoot, "favorites_bar"])),
-    other: nonEmptyOrUndefined(convertSection(tree.other, [...locationRoot, "other"])),
+    bar: nonEmptyOrUndefined(convertSection(tree.bar, [...locationRoot, "bar"])),
+    menu: nonEmptyOrUndefined(convertSection(tree.menu, [...locationRoot, "menu"])),
     reading_list: nonEmptyOrUndefined(convertSection(tree.reading_list, [...locationRoot, "reading_list"])),
     mobile: nonEmptyOrUndefined(convertSection(tree.mobile, [...locationRoot, "mobile"])),
   })
@@ -665,13 +657,13 @@ const buildPlan = (
       }
 
       blockers.push(...targetBlockers)
-      targets.push({
-        targetId,
-        browser: target.browser,
-        profile: target.profile,
-        path: target.path,
-        enabled: targetEnabled,
-        writeMode: "rewrite",
+        targets.push({
+          targetId,
+          browser: target.browser,
+          ...(target.profile ? { profile: target.profile } : {}),
+          path: target.path,
+          enabled: targetEnabled,
+          writeMode: "rewrite",
         status: !targetEnabled
           ? "disabled"
           : targetBlockers.length > 0 || blockers.some((blocker) => !blocker.targetId)
@@ -809,7 +801,7 @@ export const importState = (
       inbox[targetId] = sanitizeTree(snapshot.tree)
       lockTargets[targetId] = {
         browser: target.browser,
-        profile: target.profile,
+        ...(target.profile ? { profile: target.profile } : {}),
         path: target.path,
         importedAt,
         occurrences: snapshot.occurrences,

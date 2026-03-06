@@ -71,10 +71,10 @@ describe("readBookmarks", () => {
     expect(tree).toBeInstanceOf(BookmarkTree)
   })
 
-  test("favorites_bar contains bookmarks from bookmark_bar", async () => {
+  test("bar contains bookmarks from bookmark_bar", async () => {
     const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
-    expect(tree.favorites_bar).toBeDefined()
-    expect(tree.favorites_bar!.length).toBeGreaterThan(0)
+    expect(tree.bar).toBeDefined()
+    expect(tree.bar!.length).toBeGreaterThan(0)
   })
 
   test("leaf nodes have name and url", async () => {
@@ -90,7 +90,7 @@ describe("readBookmarks", () => {
       }
       return undefined
     }
-    const leaf = findLeaf(tree.favorites_bar ?? [])
+    const leaf = findLeaf(tree.bar ?? [])
     expect(leaf).toBeDefined()
     expect(leaf!.name).toBeTruthy()
     expect(leaf!.url).toMatch(/^https?:\/\//)
@@ -98,7 +98,7 @@ describe("readBookmarks", () => {
 
   test("folder nodes have name and children", async () => {
     const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
-    const folder = tree.favorites_bar?.find(
+    const folder = tree.bar?.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n),
     )
     expect(folder).toBeDefined()
@@ -196,14 +196,14 @@ describe("readBookmarks", () => {
 
       const tree = await run(Chrome.readBookmarks(path))
 
-      expect(tree.favorites_bar?.map((node) => node.name)).toEqual([
+      expect(tree.bar?.map((node) => node.name)).toEqual([
         "First",
         "Empty",
         "Nested",
         "Last",
       ])
 
-      const emptyFolder = tree.favorites_bar?.[1]
+      const emptyFolder = tree.bar?.[1]
       expect(emptyFolder).toBeInstanceOf(BookmarkFolder)
       expect((emptyFolder as BookmarkFolder).children).toEqual([])
     } finally {
@@ -287,12 +287,12 @@ describe("applyPatches", () => {
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Add({ url: testUrl, name: testName, path: "favorites_bar", date: now }),
+          Patch.Add({ url: testUrl, name: testName, path: "bar", date: now }),
         ]),
       )
 
       const tree = await run(Chrome.readBookmarks(path))
-      const found = (tree.favorites_bar ?? []).find(
+      const found = (tree.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
       )
       expect(found).toBeDefined()
@@ -310,7 +310,7 @@ describe("applyPatches", () => {
           Patch.Add({
             url: "https://test-checksum.example.com/",
             name: "Checksum Test",
-            path: "favorites_bar",
+            path: "bar",
             date: now,
           }),
         ]),
@@ -342,12 +342,12 @@ describe("applyPatches", () => {
         }
         return undefined
       }
-      const target = findLeaf(treeBefore.favorites_bar ?? [])
+      const target = findLeaf(treeBefore.bar ?? [])
       expect(target).toBeDefined()
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Remove({ url: target!.url, name: target!.name, path: "favorites_bar", date: now }),
+          Patch.Remove({ url: target!.url, name: target!.name, path: "bar", date: now }),
         ]),
       )
 
@@ -360,7 +360,7 @@ describe("applyPatches", () => {
             collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
         }
       }
-      collectUrls(treeAfter.favorites_bar ?? [])
+      collectUrls(treeAfter.bar ?? [])
       expect(allUrls).not.toContain(target!.url)
     } finally {
       await cleanup(dir)
@@ -383,13 +383,13 @@ describe("applyPatches", () => {
         }
         return undefined
       }
-      const target = findLeaf(treeBefore.favorites_bar ?? [])
+      const target = findLeaf(treeBefore.bar ?? [])
       expect(target).toBeDefined()
       const newName = "RENAMED_CHROME_TEST_BOOKMARK"
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Rename({ url: target!.url, path: "favorites_bar", oldName: target!.name, newName, date: now }),
+          Patch.Rename({ url: target!.url, path: "bar", oldName: target!.name, newName, date: now }),
         ]),
       )
 
@@ -407,7 +407,7 @@ describe("applyPatches", () => {
         }
         return undefined
       }
-      const found = findByUrl(treeAfter.favorites_bar ?? [], target!.url)
+      const found = findByUrl(treeAfter.bar ?? [], target!.url)
       expect(found).toBeDefined()
       expect(found!.name).toBe(newName)
     } finally {
@@ -431,7 +431,7 @@ describe("applyPatches", () => {
         }
         return undefined
       }
-      const target = findLeaf(treeBefore.favorites_bar ?? [])
+      const target = findLeaf(treeBefore.bar ?? [])
       expect(target).toBeDefined()
 
       await run(
@@ -439,8 +439,8 @@ describe("applyPatches", () => {
           Patch.Move({
             url: target!.url,
             name: target!.name,
-            fromPath: "favorites_bar",
-            toPath: "other",
+            fromPath: "bar",
+            toPath: "menu",
             date: now,
           }),
         ]),
@@ -448,7 +448,7 @@ describe("applyPatches", () => {
 
       const treeAfter = await run(Chrome.readBookmarks(path))
 
-      // Gone from favorites_bar
+      // Gone from bar
       const favUrls: string[] = []
       const collectUrls = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): void => {
         for (const n of nodes) {
@@ -457,7 +457,7 @@ describe("applyPatches", () => {
             collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
         }
       }
-      collectUrls(treeAfter.favorites_bar ?? [])
+      collectUrls(treeAfter.bar ?? [])
       expect(favUrls).not.toContain(target!.url)
 
       // Present in other
@@ -472,7 +472,7 @@ describe("applyPatches", () => {
         }
         return urls
       }
-      const foundInOther = collectOtherUrls(treeAfter.other ?? [])
+      const foundInOther = collectOtherUrls(treeAfter.menu ?? [])
       expect(foundInOther).toContain(target!.url)
     } finally {
       await cleanup(dir)
@@ -490,15 +490,15 @@ describe("applyPatches", () => {
           Patch.Add({
             url: testUrl,
             name: testName,
-            path: "other/NewFolder/SubFolder",
+            path: "menu/NewFolder/SubFolder",
             date: now,
           }),
         ]),
       )
 
       const tree = await run(Chrome.readBookmarks(path))
-      // Navigate: other -> NewFolder -> SubFolder -> leaf
-      const newFolder = (tree.other ?? []).find(
+      // Navigate: menu -> NewFolder -> SubFolder -> leaf
+      const newFolder = (tree.menu ?? []).find(
         (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "NewFolder",
       )
       expect(newFolder).toBeDefined()
@@ -526,7 +526,7 @@ describe("writeTree", () => {
       await copyChromeBookmarksFixture(path)
 
       const desired = BookmarkTree.make({
-        favorites_bar: [
+        bar: [
           BookmarkLeaf.make({ name: "Top Link", url: "https://top.example" }),
           BookmarkFolder.make({ name: "Empty", children: [] }),
           BookmarkFolder.make({
@@ -537,7 +537,7 @@ describe("writeTree", () => {
           }),
           BookmarkLeaf.make({ name: "Move Me", url: "https://move.example" }),
         ],
-        other: [
+        menu: [
           BookmarkLeaf.make({ name: "Other Link", url: "https://other.example" }),
         ],
       })

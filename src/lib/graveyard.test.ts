@@ -94,14 +94,14 @@ describe("makeEventFolderName", () => {
 describe("addToGraveyard", () => {
   test("creates _graveyard folder under other when none exists", async () => {
     const tree = emptyTree()
-    const patch = mkAddPatch("https://example.com", "Example", "favorites_bar/Tools", mkDate("2025-01-01"))
+    const patch = mkAddPatch("https://example.com", "Example", "bar/Tools", mkDate("2025-01-01"))
 
     const result = await run(
       Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
     )
 
-    expect(result.other).toBeDefined()
-    const graveyardFolder = result.other!.find(
+    expect(result.menu).toBeDefined()
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )
     expect(graveyardFolder).toBeDefined()
@@ -110,22 +110,22 @@ describe("addToGraveyard", () => {
 
   test("preserves original path as nested folders", async () => {
     const tree = emptyTree()
-    const patch = mkAddPatch("https://chat.openai.com", "ChatGPT", "favorites_bar/AI/Tools", mkDate("2025-01-01"))
+    const patch = mkAddPatch("https://chat.openai.com", "ChatGPT", "bar/AI/Tools", mkDate("2025-01-01"))
 
     const result = await run(
       Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     // Event folder is the first child
     const eventFolder = graveyardFolder.children[0] as BookmarkFolder
     expect(eventFolder.name).toMatch(/^\d{4}-\d{2}-\d{2}_safari_conflict$/)
 
-    // Path should be: favorites_bar/AI/Tools/ChatGPT (leaf)
+    // Path should be: bar/AI/Tools/ChatGPT (leaf)
     const pathRoot = eventFolder.children[0] as BookmarkFolder
-    expect(pathRoot.name).toBe("favorites_bar")
+    expect(pathRoot.name).toBe("bar")
     const aiFolder = pathRoot.children[0] as BookmarkFolder
     expect(aiFolder.name).toBe("AI")
     const toolsFolder = aiFolder.children[0] as BookmarkFolder
@@ -137,16 +137,16 @@ describe("addToGraveyard", () => {
 
   test("preserves existing other content", async () => {
     const tree = BookmarkTree.make({
-      other: [leaf("Existing", "https://existing.com")],
+      menu: [leaf("Existing", "https://existing.com")],
     })
-    const patch = mkAddPatch("https://example.com", "Example", "other", mkDate("2025-01-01"))
+    const patch = mkAddPatch("https://example.com", "Example", "menu", mkDate("2025-01-01"))
 
     const result = await run(
       Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
     )
 
-    expect(result.other!.length).toBe(2) // existing leaf + _graveyard folder
-    const existingLeaf = result.other!.find(
+    expect(result.menu!.length).toBe(2) // existing leaf + _graveyard folder
+    const existingLeaf = result.menu!.find(
       (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.name === "Existing",
     )
     expect(existingLeaf).toBeDefined()
@@ -154,13 +154,13 @@ describe("addToGraveyard", () => {
 
   test("handles Remove patch", async () => {
     const tree = emptyTree()
-    const patch = mkRemovePatch("https://removed.com", "Old Bookmark", "favorites_bar/Old", mkDate("2025-01-01"))
+    const patch = mkRemovePatch("https://removed.com", "Old Bookmark", "bar/Old", mkDate("2025-01-01"))
 
     const result = await run(
       Graveyard.addToGraveyard(tree, patch, "safari", "deleted"),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     expect(graveyardFolder.children.length).toBe(1)
@@ -177,7 +177,7 @@ describe("addToGraveyard", () => {
     const tree = emptyTree()
     const patch = mkRenamePatch(
       "https://renamed.com",
-      "favorites_bar/Research",
+      "bar/Research",
       "Old Title",
       "New Title",
       mkDate("2025-01-01"),
@@ -187,14 +187,14 @@ describe("addToGraveyard", () => {
       Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     const eventFolder = graveyardFolder.children[0] as BookmarkFolder
     const pathRoot = eventFolder.children[0] as BookmarkFolder
     const researchFolder = pathRoot.children[0] as BookmarkFolder
     const leafNode = researchFolder.children[0] as BookmarkLeaf
-    expect(pathRoot.name).toBe("favorites_bar")
+    expect(pathRoot.name).toBe("bar")
     expect(researchFolder.name).toBe("Research")
     expect(leafNode.name).toBe("Old Title")
     expect(leafNode.url).toBe("https://renamed.com")
@@ -205,8 +205,8 @@ describe("addToGraveyard", () => {
     const patch = mkMovePatch(
       "https://moved.com",
       "Moved Bookmark",
-      "favorites_bar/Projects",
-      "other/Archive",
+      "bar/Projects",
+      "menu/Archive",
       mkDate("2025-01-01"),
     )
 
@@ -214,14 +214,14 @@ describe("addToGraveyard", () => {
       Graveyard.addToGraveyard(tree, patch, "safari", "conflict"),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     const eventFolder = graveyardFolder.children[0] as BookmarkFolder
     const pathRoot = eventFolder.children[0] as BookmarkFolder
     const projectsFolder = pathRoot.children[0] as BookmarkFolder
     const leafNode = projectsFolder.children[0] as BookmarkLeaf
-    expect(pathRoot.name).toBe("favorites_bar")
+    expect(pathRoot.name).toBe("bar")
     expect(projectsFolder.name).toBe("Projects")
     expect(leafNode.name).toBe("Moved Bookmark")
     expect(leafNode.url).toBe("https://moved.com")
@@ -234,15 +234,15 @@ describe("addGraveyardEntries", () => {
   test("adds multiple patches to graveyard", async () => {
     const tree = emptyTree()
     const patches = [
-      mkAddPatch("https://a.com", "A", "favorites_bar", mkDate("2025-01-01")),
-      mkAddPatch("https://b.com", "B", "other/Tools", mkDate("2025-01-01")),
+      mkAddPatch("https://a.com", "A", "bar", mkDate("2025-01-01")),
+      mkAddPatch("https://b.com", "B", "menu/Tools", mkDate("2025-01-01")),
     ]
 
     const result = await run(
       Graveyard.addGraveyardEntries(tree, patches, "safari", "conflict"),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     // Both patches should share the same event folder (same date, source, reason)
@@ -255,7 +255,7 @@ describe("addGraveyardEntries", () => {
     const result = await run(
       Graveyard.addGraveyardEntries(tree, [], "safari", "conflict"),
     )
-    expect(result.other).toBeUndefined()
+    expect(result.menu).toBeUndefined()
   })
 })
 
@@ -267,7 +267,7 @@ describe("gc", () => {
       (name) => folder(name, [leaf("bookmark", "https://example.com")]),
     )
     const graveyardFolder = folder("_graveyard", eventFolders)
-    return BookmarkTree.make({ other: [graveyardFolder] })
+    return BookmarkTree.make({ menu: [graveyardFolder] })
   }
 
   test("removes entries older than maxAge", async () => {
@@ -284,7 +284,7 @@ describe("gc", () => {
       }),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     expect(graveyardFolder.children.length).toBe(1)
@@ -305,7 +305,7 @@ describe("gc", () => {
     )
 
     // Graveyard folder should be removed entirely
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )
     expect(graveyardFolder).toBeUndefined()
@@ -324,14 +324,14 @@ describe("gc", () => {
       }),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     expect(graveyardFolder.children.length).toBe(2)
   })
 
   test("returns tree unchanged when no graveyard folder exists", async () => {
-    const tree = BookmarkTree.make({ other: [leaf("A", "https://a.com")] })
+    const tree = BookmarkTree.make({ menu: [leaf("A", "https://a.com")] })
 
     const result = await run(
       Effect.gen(function* () {
@@ -340,7 +340,7 @@ describe("gc", () => {
       }),
     )
 
-    expect(result.other!.length).toBe(1)
+    expect(result.menu!.length).toBe(1)
   })
 
   test("returns tree unchanged when other section is absent", async () => {
@@ -353,14 +353,14 @@ describe("gc", () => {
       }),
     )
 
-    expect(result.other).toBeUndefined()
+    expect(result.menu).toBeUndefined()
   })
 
   test("preserves non-graveyard content in other section", async () => {
     const existingLeaf = leaf("MyBookmark", "https://keep.com")
     const eventFolders = [folder("2024-01-01_safari_conflict", [leaf("old", "https://old.com")])]
     const graveyardFolder = folder("_graveyard", eventFolders)
-    const tree = BookmarkTree.make({ other: [existingLeaf, graveyardFolder] })
+    const tree = BookmarkTree.make({ menu: [existingLeaf, graveyardFolder] })
 
     const result = await run(
       Effect.gen(function* () {
@@ -370,15 +370,15 @@ describe("gc", () => {
     )
 
     // Graveyard removed (all entries expired), but existing leaf kept
-    expect(result.other!.length).toBe(1)
-    const kept = result.other![0] as BookmarkLeaf
+    expect(result.menu!.length).toBe(1)
+    const kept = result.menu![0] as BookmarkLeaf
     expect(kept.name).toBe("MyBookmark")
     expect(kept.url).toBe("https://keep.com")
   })
 
   test("keeps unparseable folder names", async () => {
     const tree = BookmarkTree.make({
-      other: [
+      menu: [
         folder("_graveyard", [
           folder("not-a-valid-name", [leaf("x", "https://x.com")]),
           folder("2024-01-01_safari_conflict", [leaf("old", "https://old.com")]),
@@ -393,7 +393,7 @@ describe("gc", () => {
       }),
     )
 
-    const graveyardFolder = result.other!.find(
+    const graveyardFolder = result.menu!.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     )!
     // Only the unparseable folder should remain

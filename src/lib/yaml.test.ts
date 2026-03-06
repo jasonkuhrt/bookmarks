@@ -3,7 +3,7 @@ import { Effect } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
+import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, SafariBookmarks } from "./schema/__.js"
 import * as YamlModule from "./yaml.js"
 
 const leaf = (name: string, url: string) => new BookmarkLeaf({ name, url })
@@ -19,27 +19,20 @@ describe("yaml", () => {
 
     try {
       const config = BookmarksConfig.make({
-        targets: {
-          safari: {
-            default: TargetProfile.make({ path: "/tmp/safari-default.plist" }),
-          },
-        },
-        base: new BookmarkTree({
-          favorites_bar: [
+        all: new BookmarkTree({
+          bar: [
             leaf("First", "https://first.example"),
             folder("Empty", []),
             folder("Nested", [leaf("Inside", "https://inside.example")]),
             leaf("Last", "https://last.example"),
           ],
         }),
-        profiles: {
-          "safari/default": new BookmarkTree({
-            other: [
-              folder("Profile Empty", []),
-              leaf("Profile Bookmark", "https://profile.example"),
-            ],
-          }),
-        },
+        safari: SafariBookmarks.make({
+          menu: [
+            folder("Profile Empty", []),
+            leaf("Profile Bookmark", "https://profile.example"),
+          ],
+        }),
       })
 
       await run(YamlModule.save(yamlPath, config))

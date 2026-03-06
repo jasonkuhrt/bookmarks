@@ -4,7 +4,15 @@ import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
-import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
+import {
+  BookmarkFolder,
+  BookmarkLeaf,
+  BookmarksConfig,
+  BookmarkTree,
+  ChromeBookmarks,
+  ChromeProfileBookmarks,
+  SafariBookmarks,
+} from "./schema/__.js"
 import * as Patch from "./patch.js"
 import * as Sync from "./sync.js"
 import * as YamlModule from "./yaml.js"
@@ -16,6 +24,39 @@ const folder = (name: string, children: Array<BookmarkLeaf | BookmarkFolder>) =>
   new BookmarkFolder({ name, children })
 
 const emptyTree = () => new BookmarkTree({})
+
+type SafariInput = Parameters<typeof SafariBookmarks.make>[0]
+type ChromeProfileInput = Parameters<typeof ChromeProfileBookmarks.make>[0]
+type ChromeInput = Omit<Parameters<typeof ChromeBookmarks.make>[0], "profiles"> & {
+  readonly profiles?: Readonly<Record<string, ChromeProfileInput>>
+}
+
+const makeConfig = (options: {
+  readonly all?: BookmarkTree
+  readonly safari?: SafariInput
+  readonly chrome?: ChromeInput
+} = {}): BookmarksConfig =>
+  BookmarksConfig.make({
+    all: options.all ?? new BookmarkTree({}),
+    ...(options.safari ? { safari: SafariBookmarks.make(options.safari) } : {}),
+    ...(options.chrome
+      ? {
+          chrome: ChromeBookmarks.make({
+            ...options.chrome,
+            ...(options.chrome.profiles
+              ? {
+                  profiles: Object.fromEntries(
+                    Object.entries(options.chrome.profiles).map(([profile, profileConfig]) => [
+                      profile,
+                      ChromeProfileBookmarks.make(profileConfig),
+                    ]),
+                  ),
+                }
+              : {}),
+          }),
+        }
+      : {}),
+  })
 
 const run = <A>(effect: Effect.Effect<A, Error>) =>
   Effect.runPromise(effect)
@@ -67,12 +108,50 @@ const writeChromeFixture = async (path: string, names: readonly string[]) => {
   }, null, 2))
 }
 
+const setupDiscoveryEnv = async (
+  dir: string,
+  profileDirectories: readonly string[] = ["Default"],
+): Promise<{
+  readonly chromeDataDir: string
+  readonly restore: () => void
+}> => {
+  const chromeDataDir = join(dir, "Chrome")
+  const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"]
+  const originalSafariPlistPath = process.env["BOOKMARKS_SAFARI_PLIST_PATH"]
+  const originalSafariTabsDbPath = process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"]
+
+  await mkdir(chromeDataDir, { recursive: true })
+  await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+    profile: {
+      info_cache: Object.fromEntries(profileDirectories.map((directory) => [directory, {}])),
+    },
+  }))
+
+  process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
+  process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = join(dir, "Safari", "Missing-Bookmarks.plist")
+  process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = join(dir, "Safari", "Missing-SafariTabs.db")
+
+  return {
+    chromeDataDir,
+    restore: () => {
+      if (originalChromeDataDir === undefined) delete process.env["BOOKMARKS_CHROME_DATA_DIR"]
+      else process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir
+
+      if (originalSafariPlistPath === undefined) delete process.env["BOOKMARKS_SAFARI_PLIST_PATH"]
+      else process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = originalSafariPlistPath
+
+      if (originalSafariTabsDbPath === undefined) delete process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"]
+      else process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = originalSafariTabsDbPath
+    },
+  }
+}
+
 // -- resolveConflicts --
 
 describe("resolveConflicts", () => {
   test("non-overlapping patches: all applied, none graveyarded", async () => {
-    const yamlPatches = [Patch.Add({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") })]
-    const browserPatches = [Patch.Add({ url: "https://b.com", name: "B", path: "favorites_bar", date: makeDate("2025-01-01") })]
+    const yamlPatches = [Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") })]
+    const browserPatches = [Patch.Add({ url: "https://b.com", name: "B", path: "bar", date: makeDate("2025-01-01") })]
 
     const result = await run(Sync.resolveConflicts(yamlPatches, browserPatches))
     expect(result.apply.length).toBe(2)
@@ -83,8 +162,8 @@ describe("resolveConflicts", () => {
     const older = makeDate("2025-01-01")
     const newer = makeDate("2025-06-01")
 
-    const yamlPatches = [Patch.Add({ url: "https://conflict.com", name: "YAML Version", path: "favorites_bar", date: older })]
-    const browserPatches = [Patch.Add({ url: "https://conflict.com", name: "Browser Version", path: "favorites_bar", date: newer })]
+    const yamlPatches = [Patch.Add({ url: "https://conflict.com", name: "YAML Version", path: "bar", date: older })]
+    const browserPatches = [Patch.Add({ url: "https://conflict.com", name: "Browser Version", path: "bar", date: newer })]
 
     const result = await run(Sync.resolveConflicts(yamlPatches, browserPatches))
     expect(result.apply.length).toBe(1)
@@ -105,8 +184,8 @@ describe("resolveConflicts", () => {
   test("tie-break: YAML wins when dates are equal", async () => {
     const sameDate = makeDate("2025-03-15")
 
-    const yamlPatches = [Patch.Add({ url: "https://tie.com", name: "YAML", path: "favorites_bar", date: sameDate })]
-    const browserPatches = [Patch.Add({ url: "https://tie.com", name: "Browser", path: "favorites_bar", date: sameDate })]
+    const yamlPatches = [Patch.Add({ url: "https://tie.com", name: "YAML", path: "bar", date: sameDate })]
+    const browserPatches = [Patch.Add({ url: "https://tie.com", name: "Browser", path: "bar", date: sameDate })]
 
     const result = await run(Sync.resolveConflicts(yamlPatches, browserPatches))
     expect(result.apply.length).toBe(1)
@@ -125,8 +204,8 @@ describe("resolveConflicts", () => {
 
   test("one side empty: all from other side applied", async () => {
     const patches = [
-      Patch.Add({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
-      Patch.Remove({ url: "https://b.com", name: "B", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://b.com", name: "B", path: "bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.resolveConflicts(patches, []))
     expect(result.apply.length).toBe(2)
@@ -140,12 +219,12 @@ describe("applyPatches", () => {
   test("add to empty tree creates section and leaf", async () => {
     const tree = emptyTree()
     const patches = [
-      Patch.Add({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeDefined()
-    expect(result.favorites_bar!.length).toBe(1)
-    const node = result.favorites_bar![0] as BookmarkLeaf
+    expect(result.bar).toBeDefined()
+    expect(result.bar!.length).toBe(1)
+    const node = result.bar![0] as BookmarkLeaf
     expect(node.name).toBe("A")
     expect(node.url).toBe("https://a.com")
   })
@@ -153,12 +232,12 @@ describe("applyPatches", () => {
   test("add to nested folder path creates folders", async () => {
     const tree = emptyTree()
     const patches = [
-      Patch.Add({ url: "https://gpt.com", name: "ChatGPT", path: "favorites_bar/AI/Tools", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://gpt.com", name: "ChatGPT", path: "bar/AI/Tools", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeDefined()
+    expect(result.bar).toBeDefined()
 
-    const aiFolder = result.favorites_bar!.find(
+    const aiFolder = result.bar!.find(
       (n) => BookmarkFolder.is(n) && n.name === "AI",
     ) as BookmarkFolder
     expect(aiFolder).toBeDefined()
@@ -177,41 +256,41 @@ describe("applyPatches", () => {
 
   test("remove deletes leaf from tree", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeDefined()
-    expect(result.favorites_bar!.length).toBe(1)
-    const remaining = result.favorites_bar![0] as BookmarkLeaf
+    expect(result.bar).toBeDefined()
+    expect(result.bar!.length).toBe(1)
+    const remaining = result.bar![0] as BookmarkLeaf
     expect(remaining.url).toBe("https://b.com")
   })
 
   test("remove last leaf prunes empty section", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
-      other: [leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com")],
+      menu: [leaf("B", "https://b.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://a.com", name: "A", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeUndefined()
-    expect(result.other).toBeDefined()
+    expect(result.bar).toBeUndefined()
+    expect(result.menu).toBeDefined()
   })
 
   test("rename changes leaf name, preserves URL and position", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("Old Name", "https://a.com")],
+      bar: [leaf("Old Name", "https://a.com")],
     })
     const patches = [
-      Patch.Rename({ url: "https://a.com", path: "favorites_bar", oldName: "Old Name", newName: "New Name", date: makeDate("2025-01-01") }),
+      Patch.Rename({ url: "https://a.com", path: "bar", oldName: "Old Name", newName: "New Name", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeDefined()
-    const node = result.favorites_bar!.find(
+    expect(result.bar).toBeDefined()
+    const node = result.bar!.find(
       (n) => BookmarkLeaf.is(n) && n.url === "https://a.com",
     ) as BookmarkLeaf
     expect(node).toBeDefined()
@@ -220,15 +299,15 @@ describe("applyPatches", () => {
 
   test("move relocates leaf between sections", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const patches = [
-      Patch.Move({ url: "https://a.com", name: "A", fromPath: "favorites_bar", toPath: "other", date: makeDate("2025-01-01") }),
+      Patch.Move({ url: "https://a.com", name: "A", fromPath: "bar", toPath: "menu", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeUndefined()
-    expect(result.other).toBeDefined()
-    const node = result.other!.find(
+    expect(result.bar).toBeUndefined()
+    expect(result.menu).toBeDefined()
+    const node = result.menu!.find(
       (n) => BookmarkLeaf.is(n) && n.url === "https://a.com",
     ) as BookmarkLeaf
     expect(node).toBeDefined()
@@ -237,17 +316,17 @@ describe("applyPatches", () => {
 
   test("multiple patches applied in correct order", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("ToRemove", "https://remove.com"), leaf("ToRename", "https://rename.com")],
+      bar: [leaf("ToRemove", "https://remove.com"), leaf("ToRename", "https://rename.com")],
     })
     const patches = [
-      Patch.Remove({ url: "https://remove.com", name: "ToRemove", path: "favorites_bar", date: makeDate("2025-01-01") }),
-      Patch.Rename({ url: "https://rename.com", path: "favorites_bar", oldName: "ToRename", newName: "Renamed", date: makeDate("2025-01-01") }),
-      Patch.Add({ url: "https://new.com", name: "New", path: "favorites_bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://remove.com", name: "ToRemove", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Rename({ url: "https://rename.com", path: "bar", oldName: "ToRename", newName: "Renamed", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://new.com", name: "New", path: "bar", date: makeDate("2025-01-01") }),
     ]
     const result = await run(Sync.applyPatches(tree, patches))
-    expect(result.favorites_bar).toBeDefined()
+    expect(result.bar).toBeDefined()
 
-    const urls = result.favorites_bar!
+    const urls = result.bar!
       .filter((n): n is BookmarkLeaf => BookmarkLeaf.is(n))
       .map((n) => n.url)
 
@@ -255,7 +334,7 @@ describe("applyPatches", () => {
     expect(urls).toContain("https://new.com")
     expect(urls).not.toContain("https://remove.com")
 
-    const renamed = result.favorites_bar!.find(
+    const renamed = result.bar!.find(
       (n) => BookmarkLeaf.is(n) && n.url === "https://rename.com",
     ) as BookmarkLeaf
     expect(renamed.name).toBe("Renamed")
@@ -263,22 +342,22 @@ describe("applyPatches", () => {
 
   test("empty patches returns tree unchanged", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const result = await run(Sync.applyPatches(tree, []))
-    expect(result.favorites_bar).toBeDefined()
-    expect(result.favorites_bar!.length).toBe(1)
+    expect(result.bar).toBeDefined()
+    expect(result.bar!.length).toBe(1)
   })
 
   test("empty patches preserve sibling ordering and empty folders", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         leaf("First", "https://first.example"),
         folder("Empty", []),
         folder("Nested", [leaf("Inside", "https://inside.example")]),
         leaf("Last", "https://last.example"),
       ],
-      other: [folder("Other Empty", [])],
+      menu: [folder("Other Empty", [])],
     })
 
     const result = await run(Sync.applyPatches(tree, []))
@@ -288,64 +367,58 @@ describe("applyPatches", () => {
 
   test("remove preserves folders that become empty", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         folder("Projects", [leaf("Only", "https://only.example")]),
       ],
     })
 
     const result = await run(Sync.applyPatches(tree, [
-      Patch.Remove({ url: "https://only.example", name: "Only", path: "favorites_bar/Projects", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://only.example", name: "Only", path: "bar/Projects", date: makeDate("2025-01-01") }),
     ]))
 
     expect(result).toEqual(new BookmarkTree({
-      favorites_bar: [folder("Projects", [])],
+      bar: [folder("Projects", [])],
     }))
   })
 })
 
 describe("decomposeResolvedTrees", () => {
   test("extracts common bookmarks into base and profile-specific bookmarks into overlays", () => {
-    const targets = {
-      safari: {
-        default: TargetProfile.make({ path: "/tmp/safari-default.plist" }),
-      },
-      chrome: {
-        work: TargetProfile.make({ path: "/tmp/chrome-work.json" }),
-      },
-    }
-
     const safariTree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         folder("Shared", [leaf("Common", "https://common.example")]),
         leaf("Safari Only", "https://safari-only.example"),
       ],
     })
     const chromeTree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         folder("Shared", [leaf("Common", "https://common.example")]),
         leaf("Chrome Only", "https://chrome-only.example"),
       ],
     })
 
-    const config = Sync.decomposeResolvedTrees(targets, {
-      "safari/default": safariTree,
+    const config = Sync.decomposeResolvedTrees(makeConfig({
+      safari: {},
+      chrome: { profiles: { work: {} } },
+    }), {
+      safari: safariTree,
       "chrome/work": chromeTree,
     })
 
-    expect(config.base.favorites_bar).toBeDefined()
-    const sharedFolder = config.base.favorites_bar!.find(
+    expect(config.all.bar).toBeDefined()
+    const sharedFolder = config.all.bar!.find(
       (node): node is BookmarkFolder => BookmarkFolder.is(node) && node.name === "Shared",
     )
     expect(sharedFolder).toBeDefined()
     expect(sharedFolder!.children.length).toBe(1)
 
-    expect(config.profiles?.["safari/default"]?.favorites_bar).toBeDefined()
-    expect(config.profiles?.["chrome/work"]?.favorites_bar).toBeDefined()
+    expect(config.safari?.bar).toBeDefined()
+    expect(config.chrome?.bar).toBeDefined()
 
-    const safariOnly = config.profiles?.["safari/default"]?.favorites_bar?.find(
+    const safariOnly = config.safari?.bar?.find(
       (node): node is BookmarkLeaf => BookmarkLeaf.is(node),
     )
-    const chromeOnly = config.profiles?.["chrome/work"]?.favorites_bar?.find(
+    const chromeOnly = config.chrome?.bar?.find(
       (node): node is BookmarkLeaf => BookmarkLeaf.is(node),
     )
     expect(safariOnly?.url).toBe("https://safari-only.example")
@@ -353,41 +426,27 @@ describe("decomposeResolvedTrees", () => {
   })
 
   test("omits profile overlays when every resolved tree is identical", () => {
-    const targets = {
-      safari: {
-        default: TargetProfile.make({ path: "/tmp/safari-default.plist" }),
-      },
-      chrome: {
-        default: TargetProfile.make({ path: "/tmp/chrome-default.json" }),
-      },
-    }
-
     const sharedTree = new BookmarkTree({
-      other: [leaf("Shared", "https://shared.example")],
+      menu: [leaf("Shared", "https://shared.example")],
     })
 
-    const config = Sync.decomposeResolvedTrees(targets, {
-      "safari/default": sharedTree,
+    const config = Sync.decomposeResolvedTrees(makeConfig({
+      safari: {},
+      chrome: { profiles: { default: {} } },
+    }), {
+      safari: sharedTree,
       "chrome/default": sharedTree,
     })
 
-    expect(config.base.other).toBeDefined()
-    expect(config.base.other!.length).toBe(1)
-    expect(config.profiles).toBeUndefined()
+    expect(config.all.menu).toBeDefined()
+    expect(config.all.menu!.length).toBe(1)
+    expect(config.safari?.menu).toBeUndefined()
+    expect(config.chrome?.profiles?.["default"]?.menu).toBeUndefined()
   })
 
   test("preserves exact resolved ordering when shared bookmarks diverge after the prefix", async () => {
-    const targets = {
-      safari: {
-        default: TargetProfile.make({ path: "/tmp/safari-default.plist" }),
-      },
-      chrome: {
-        work: TargetProfile.make({ path: "/tmp/chrome-work.json" }),
-      },
-    }
-
     const safariTree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         leaf("Common A", "https://common-a.example"),
         leaf("Safari Only", "https://safari-only.example"),
         folder("Shared Empty", []),
@@ -396,7 +455,7 @@ describe("decomposeResolvedTrees", () => {
     })
 
     const chromeTree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         leaf("Common A", "https://common-a.example"),
         leaf("Chrome Only", "https://chrome-only.example"),
         folder("Shared Empty", []),
@@ -404,15 +463,18 @@ describe("decomposeResolvedTrees", () => {
       ],
     })
 
-    const config = Sync.decomposeResolvedTrees(targets, {
-      "safari/default": safariTree,
+    const config = Sync.decomposeResolvedTrees(makeConfig({
+      safari: {},
+      chrome: { profiles: { work: {} } },
+    }), {
+      safari: safariTree,
       "chrome/work": chromeTree,
     })
 
-    expect(config.base.favorites_bar?.map((node) => node.name)).toEqual(["Common A"])
+    expect(config.all.bar?.map((node) => node.name)).toEqual(["Common A"])
 
-    const safariResolved = await run(YamlModule.resolveProfile(config, "safari/default"))
-    const chromeResolved = await run(YamlModule.resolveProfile(config, "chrome/work"))
+    const safariResolved = await run(YamlModule.resolveTarget(config, { browser: "safari" }))
+    const chromeResolved = await run(YamlModule.resolveTarget(config, { browser: "chrome", profile: "work" }))
 
     expect(safariResolved).toEqual(safariTree)
     expect(chromeResolved).toEqual(chromeTree)
@@ -422,30 +484,32 @@ describe("decomposeResolvedTrees", () => {
 describe("push", () => {
   test("projects structural-only YAML changes exactly through a target rewrite", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-"))
-    const chromePath = join(dir, "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+    const discovery = await setupDiscoveryEnv(dir)
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks")
 
     try {
       process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true })
       await writeChromeFixture(chromePath, ["First", "Last"])
 
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
-          },
-        },
-        base: new BookmarkTree({
-          favorites_bar: [
+      const config = makeConfig({
+        all: new BookmarkTree({
+          bar: [
             leaf("Last", "https://last.example"),
             leaf("First", "https://first.example"),
             folder("Empty", []),
           ],
         }),
+        chrome: {
+          profiles: {
+            default: {},
+          },
+        },
       })
 
       const result = await run(Sync.push({
@@ -465,9 +529,10 @@ describe("push", () => {
         expect(result.backup?.skipped).toEqual(["yaml"])
         expect(await readdir(backupDir)).toHaveLength(1)
         const browserTree = await run(Chrome.readBookmarks(chromePath))
-        expect(browserTree).toEqual(config.base)
+        expect(browserTree).toEqual(config.all)
       }
     } finally {
+      discovery.restore()
       if (originalBackupDir === undefined) {
         delete process.env["BOOKMARKS_BACKUP_DIR"]
       } else {
@@ -484,29 +549,31 @@ describe("push", () => {
 
   test("refuses duplicate URLs in YAML with actionable diagnostics", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-duplicates-"))
-    const chromePath = join(dir, "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+    const discovery = await setupDiscoveryEnv(dir)
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks")
 
     try {
       process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true })
       await writeChromeFixture(chromePath, ["First"])
 
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
-          },
-        },
-        base: new BookmarkTree({
-          favorites_bar: [
+      const config = makeConfig({
+        all: new BookmarkTree({
+          bar: [
             leaf("First Copy", "https://dup.example"),
             leaf("Second Copy", "https://dup.example"),
           ],
         }),
+        chrome: {
+          profiles: {
+            default: {},
+          },
+        },
       })
 
       await expect(run(Sync.push({
@@ -515,6 +582,7 @@ describe("push", () => {
       }))).rejects.toThrow('Duplicate URL "https://dup.example"')
       await expect(readdir(backupDir)).rejects.toThrow()
     } finally {
+      discovery.restore()
       if (originalBackupDir === undefined) {
         delete process.env["BOOKMARKS_BACKUP_DIR"]
       } else {
@@ -533,25 +601,27 @@ describe("push", () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-missing-target-"))
     const runtimeDir = join(dir, "runtime")
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+    const discovery = await setupDiscoveryEnv(dir)
 
     try {
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: join(dir, "missing-Bookmarks") }),
+      const config = makeConfig({
+        all: new BookmarkTree({
+          bar: [leaf("First", "https://first.example")],
+        }),
+        chrome: {
+          profiles: {
+            default: {},
           },
         },
-        base: new BookmarkTree({
-          favorites_bar: [leaf("First", "https://first.example")],
-        }),
       })
 
       await expect(run(Sync.push({
         yamlPath: join(dir, "bookmarks.yaml"),
         yamlOverride: config,
-      }))).rejects.toThrow("Target unavailable")
+      }))).rejects.toThrow('Configured Chrome profile "default" was not discovered on this machine.')
     } finally {
+      discovery.restore()
       if (originalRuntimeDir === undefined) {
         delete process.env["BOOKMARKS_RUNTIME_DIR"]
       } else {
@@ -563,12 +633,14 @@ describe("push", () => {
 
   test("defers when another sync already holds the runtime lock", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-locked-"))
-    const chromePath = join(dir, "Bookmarks")
     const runtimeDir = join(dir, "runtime")
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+    const discovery = await setupDiscoveryEnv(dir)
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks")
 
     try {
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true })
       await writeChromeFixture(chromePath, ["First"])
       await mkdir(runtimeDir, { recursive: true })
       await Bun.write(join(runtimeDir, "sync.lock.json"), JSON.stringify({
@@ -578,15 +650,15 @@ describe("push", () => {
         acquiredAt: "2026-01-01T00:00:00.000Z",
       }))
 
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+      const config = makeConfig({
+        all: new BookmarkTree({
+          bar: [leaf("First", "https://first.example")],
+        }),
+        chrome: {
+          profiles: {
+            default: {},
           },
         },
-        base: new BookmarkTree({
-          favorites_bar: [leaf("First", "https://first.example")],
-        }),
       })
 
       const result = await run(Sync.push({
@@ -598,6 +670,7 @@ describe("push", () => {
       expect(result.orchestration?.state).toBe("busy")
       expect(result.orchestration?.message).toContain("already running")
     } finally {
+      discovery.restore()
       if (originalRuntimeDir === undefined) {
         delete process.env["BOOKMARKS_RUNTIME_DIR"]
       } else {
@@ -611,9 +684,11 @@ describe("push", () => {
 describe("pull", () => {
   test("refuses unsupported separator constructs before mutation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-pull-separator-"))
-    const chromePath = join(dir, "Bookmarks")
+    const discovery = await setupDiscoveryEnv(dir)
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks")
 
     try {
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true })
       await Bun.write(chromePath, JSON.stringify({
         checksum: "",
         version: 1,
@@ -657,13 +732,12 @@ describe("pull", () => {
         },
       }, null, 2))
 
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+      const config = makeConfig({
+        chrome: {
+          profiles: {
+            default: {},
           },
         },
-        base: new BookmarkTree({}),
       })
 
       await expect(run(Sync.pull({
@@ -672,6 +746,7 @@ describe("pull", () => {
         dryRun: true,
       }))).rejects.toThrow("Bookmark separators are not supported")
     } finally {
+      discovery.restore()
       await rm(dir, { recursive: true, force: true })
     }
   })
@@ -680,24 +755,25 @@ describe("pull", () => {
 describe("sync", () => {
   test("fails clearly for duplicate URLs in the browser before queueing or backup", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-browser-duplicates-"))
-    const chromePath = join(dir, "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
     const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"]
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"]
+    const discovery = await setupDiscoveryEnv(dir)
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks")
 
     try {
       process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true })
       await writeChromeFixture(chromePath, ["Dup", "Dup"])
 
-      const config = BookmarksConfig.make({
-        targets: {
-          chrome: {
-            default: TargetProfile.make({ path: chromePath }),
+      const config = makeConfig({
+        chrome: {
+          profiles: {
+            default: {},
           },
         },
-        base: new BookmarkTree({}),
       })
 
       await expect(run(Sync.sync({
@@ -706,6 +782,7 @@ describe("sync", () => {
       }))).rejects.toThrow('Duplicate URL "https://dup.example"')
       await expect(readdir(backupDir)).rejects.toThrow()
     } finally {
+      discovery.restore()
       if (originalBackupDir === undefined) {
         delete process.env["BOOKMARKS_BACKUP_DIR"]
       } else {

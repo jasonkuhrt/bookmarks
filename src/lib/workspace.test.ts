@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
-import { BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
+import { BookmarkLeaf, BookmarksConfig, BookmarkTree, ChromeBookmarks, ChromeProfileBookmarks } from "./schema/__.js"
 import * as Workspace from "./workspace.js"
 import * as YamlModule from "./yaml.js"
 
@@ -113,15 +113,15 @@ const setupWorkspaceEnv = async (profiles = [{ directory: "Default", title: "Top
   }
 
   const config = BookmarksConfig.make({
-    targets: {
-      chrome: {
-        default: TargetProfile.make({ path: chromePath }),
-      },
-    },
-    base: new BookmarkTree({
-      favorites_bar: [
+    all: new BookmarkTree({
+      bar: [
         new BookmarkLeaf({ name: "Docs", url: "https://docs.example" }),
       ],
+    }),
+    chrome: ChromeBookmarks.make({
+      profiles: {
+        default: ChromeProfileBookmarks.make({}),
+      },
     }),
   })
 
@@ -178,8 +178,8 @@ describe("workspace workflow", () => {
       expect(imported.backup).toBeNull()
 
       const workspace = await run(Workspace.load(env.workspacePath))
-      expect(workspace.inbox["chrome/default"]?.favorites_bar?.[0]?.kind).toBe("bookmark")
-      expect(workspace.publish.global.favorites_bar).toBeUndefined()
+      expect(workspace.inbox["chrome/default"]?.bar?.[0]?.kind).toBe("bookmark")
+      expect(workspace.publish.global.bar).toBeUndefined()
 
       const validation = await run(Workspace.validate())
       expect(validation.valid).toBe(true)
@@ -201,15 +201,15 @@ describe("workspace workflow", () => {
       await run(Workspace.importState(["chrome/default"]))
 
       const workspace = await run(Workspace.load(env.workspacePath))
-      const importedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
+      const importedNode = workspace.inbox["chrome/default"]?.bar?.[0]
       expect(importedNode?.kind).toBe("bookmark")
       if (!importedNode || importedNode.kind !== "bookmark") {
-        throw new Error("Expected imported bookmark in favorites_bar")
+        throw new Error("Expected imported bookmark in bar")
       }
 
       workspace.inbox = {}
       workspace.publish.profiles["chrome/default"] = {
-        favorites_bar: [
+        bar: [
           {
             ...importedNode,
             title: "Curated Link",
@@ -231,7 +231,7 @@ describe("workspace workflow", () => {
         expect(published.backup.files).toHaveLength(4)
 
         const tree = await run(Chrome.readBookmarks(env.chromePath))
-        const first = tree.favorites_bar?.[0]
+        const first = tree.bar?.[0]
         expect(first?.name).toBe("Curated Link")
 
         const next = await run(Workspace.next())
@@ -257,8 +257,8 @@ describe("workspace workflow", () => {
       expect(imported.targets).toEqual(["chrome/default", "chrome/profile-1"])
 
       const workspace = await run(Workspace.load(env.workspacePath))
-      const sharedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
-      const workNode = workspace.inbox["chrome/profile-1"]?.favorites_bar?.[0]
+      const sharedNode = workspace.inbox["chrome/default"]?.bar?.[0]
+      const workNode = workspace.inbox["chrome/profile-1"]?.bar?.[0]
 
       expect(sharedNode?.kind).toBe("bookmark")
       expect(workNode?.kind).toBe("bookmark")
@@ -268,10 +268,10 @@ describe("workspace workflow", () => {
 
       workspace.inbox = {}
       workspace.publish.global = {
-        favorites_bar: [{ ...sharedNode, title: "Shared Everywhere" }],
+        bar: [{ ...sharedNode, title: "Shared Everywhere" }],
       }
       workspace.publish.profiles["chrome/profile-1"] = {
-        favorites_bar: [{ ...workNode, title: "Profile One Only" }],
+        bar: [{ ...workNode, title: "Profile One Only" }],
       }
 
       await run(Workspace.save(env.workspacePath, workspace))
@@ -282,10 +282,10 @@ describe("workspace workflow", () => {
         expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"])
 
         const defaultTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")))
-        expect(defaultTree.favorites_bar?.map((node) => node.name)).toEqual(["Shared Everywhere"])
+        expect(defaultTree.bar?.map((node) => node.name)).toEqual(["Shared Everywhere"])
 
         const profileTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")))
-        expect(profileTree.favorites_bar?.map((node) => node.name)).toEqual([
+        expect(profileTree.bar?.map((node) => node.name)).toEqual([
           "Shared Everywhere",
           "Profile One Only",
         ])

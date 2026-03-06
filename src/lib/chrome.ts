@@ -68,15 +68,15 @@ const nowChromeTimestamp = (): string => unixMsToChromeTimestamp(DateTime.toEpoc
 
 // -- Chrome section key ↔ domain section key mappings --
 
-const CHROME_KEY_TO_SECTION: Record<string, "favorites_bar" | "other" | "mobile"> = {
-  bookmark_bar: "favorites_bar",
-  other: "other",
+const CHROME_KEY_TO_SECTION: Record<string, "bar" | "menu" | "mobile"> = {
+  bookmark_bar: "bar",
+  other: "menu",
   synced: "mobile",
 }
 
 const SECTION_TO_CHROME_KEY: Record<string, keyof ChromeRoot> = {
-  favorites_bar: "bookmark_bar",
-  other: "other",
+  bar: "bookmark_bar",
+  menu: "other",
   mobile: "synced",
 }
 
@@ -191,7 +191,7 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
     const file = JSON.parse(text) as ChromeBookmarksFile
     const { roots } = file
 
-    const sections: Partial<Record<"favorites_bar" | "other" | "mobile", BookmarkSection>> = {}
+    const sections: Partial<Record<"bar" | "menu" | "mobile", BookmarkSection>> = {}
     const issues: BookmarkIssue[] = []
 
     for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
@@ -210,8 +210,8 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
     }
 
     return BookmarkTree.make({
-      favorites_bar: sections.favorites_bar,
-      other: sections.other,
+      bar: sections.bar,
+      menu: sections.menu,
       mobile: sections.mobile,
     })
   })
@@ -436,14 +436,14 @@ export const writeTree = (
     const existing = collectChromeNodes(roots)
 
     roots.bookmark_bar.children = buildChromeChildren(
-      tree.favorites_bar,
-      "favorites_bar",
+      tree.bar,
+      "bar",
       existing,
       () => nextId++,
     )
     roots.other.children = buildChromeChildren(
-      tree.other,
-      "other",
+      tree.menu,
+      "menu",
       existing,
       () => nextId++,
     )
@@ -613,7 +613,7 @@ function decodeNodes(children: ChromeNode[]): BookmarkNode[] {
 
 // -- Write path helpers (raw JSON mutation -- see applyPatches architecture note) --
 
-/** Parse a domain path like "favorites_bar/Dev" into Chrome root key + folder path. */
+/** Parse a domain path like "bar/Dev" into Chrome root key + folder path. */
 const parseDomainPath = (path: string): { chromeKey: keyof ChromeRoot; folderPath: string[] } => {
   const [sectionKey, ...rest] = path.split("/")
   const chromeKey = SECTION_TO_CHROME_KEY[sectionKey!] ?? (sectionKey as keyof ChromeRoot)

@@ -25,8 +25,8 @@ describe("flatten", () => {
 
   test("flattens leaves across sections", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
-      other: [leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com")],
+      menu: [leaf("B", "https://b.com")],
     })
     const result = Patch.flatten(tree)
     expect(HashMap.size(result.index)).toBe(2)
@@ -35,13 +35,13 @@ describe("flatten", () => {
     expect(Option.isSome(a)).toBe(true)
     if (Option.isSome(a)) {
       expect(a.value.name).toBe("A")
-      expect(a.value.path).toBe("favorites_bar")
+      expect(a.value.path).toBe("bar")
     }
   })
 
   test("flattens nested folders with correct path", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         folder("AI", [
           folder("Tools", [leaf("ChatGPT", "https://chat.openai.com")]),
         ]),
@@ -51,14 +51,14 @@ describe("flatten", () => {
     const entry = HashMap.get(result.index, "https://chat.openai.com")
     expect(Option.isSome(entry)).toBe(true)
     if (Option.isSome(entry)) {
-      expect(entry.value.path).toBe("favorites_bar/AI/Tools")
+      expect(entry.value.path).toBe("bar/AI/Tools")
     }
   })
 
   test("duplicate URLs: first wins, produces warning", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("First", "https://dup.com")],
-      other: [leaf("Second", "https://dup.com")],
+      bar: [leaf("First", "https://dup.com")],
+      menu: [leaf("Second", "https://dup.com")],
     })
     const result = Patch.flatten(tree)
     expect(HashMap.size(result.index)).toBe(1)
@@ -77,35 +77,35 @@ describe("flatten", () => {
 describe("toTrie / fromTrie", () => {
   test("round-trip preserves single leaf", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const result = Patch.fromTrie(Patch.toTrie(tree))
-    expect(result.favorites_bar).toBeDefined()
-    expect(result.favorites_bar!.length).toBe(1)
-    const node = result.favorites_bar![0] as BookmarkLeaf
+    expect(result.bar).toBeDefined()
+    expect(result.bar!.length).toBe(1)
+    const node = result.bar![0] as BookmarkLeaf
     expect(node.name).toBe("A")
     expect(node.url).toBe("https://a.com")
   })
 
   test("round-trip preserves nested folders", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         folder("AI", [
           leaf("GPT", "https://gpt.com"),
           folder("Research", [leaf("Papers", "https://papers.com")]),
         ]),
       ],
-      other: [leaf("News", "https://news.com")],
+      menu: [leaf("News", "https://news.com")],
     })
     const result = Patch.fromTrie(Patch.toTrie(tree))
 
-    expect(result.favorites_bar).toBeDefined()
-    expect(result.other).toBeDefined()
+    expect(result.bar).toBeDefined()
+    expect(result.menu).toBeDefined()
     expect(result.reading_list).toBeUndefined()
     expect(result.mobile).toBeUndefined()
 
     // Check nested structure
-    const aiFolder = result.favorites_bar!.find(
+    const aiFolder = result.bar!.find(
       (n) => BookmarkFolder.is(n) && n.name === "AI",
     ) as BookmarkFolder
     expect(aiFolder).toBeDefined()
@@ -114,13 +114,13 @@ describe("toTrie / fromTrie", () => {
 
   test("round-trip preserves sibling ordering and empty folders", () => {
     const tree = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         leaf("First", "https://first.example"),
         folder("Empty", []),
         folder("Nested", [leaf("Inside", "https://inside.example")]),
         leaf("Last", "https://last.example"),
       ],
-      other: [folder("Other Empty", [])],
+      menu: [folder("Other Empty", [])],
     })
 
     const result = Patch.fromTrie(Patch.toTrie(tree))
@@ -131,8 +131,8 @@ describe("toTrie / fromTrie", () => {
   test("round-trip with empty tree", () => {
     const tree = emptyTree()
     const result = Patch.fromTrie(Patch.toTrie(tree))
-    expect(result.favorites_bar).toBeUndefined()
-    expect(result.other).toBeUndefined()
+    expect(result.bar).toBeUndefined()
+    expect(result.menu).toBeUndefined()
   })
 })
 
@@ -142,7 +142,7 @@ describe("generatePatches", () => {
   test("first run (empty lastSync) produces only Add patches", async () => {
     const lastSync = emptyTree()
     const current = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     expect(patches.length).toBe(2)
@@ -151,10 +151,10 @@ describe("generatePatches", () => {
 
   test("removed bookmarks produce Remove patches", async () => {
     const lastSync = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
     })
     const current = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     const removes = patches.filter(Patch.$is("Remove"))
@@ -164,10 +164,10 @@ describe("generatePatches", () => {
 
   test("renamed bookmark produces Rename patch", async () => {
     const lastSync = new BookmarkTree({
-      favorites_bar: [leaf("Old Name", "https://a.com")],
+      bar: [leaf("Old Name", "https://a.com")],
     })
     const current = new BookmarkTree({
-      favorites_bar: [leaf("New Name", "https://a.com")],
+      bar: [leaf("New Name", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     const renames = patches.filter(Patch.$is("Rename"))
@@ -178,24 +178,24 @@ describe("generatePatches", () => {
 
   test("moved bookmark produces Move patch", async () => {
     const lastSync = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const current = new BookmarkTree({
-      other: [leaf("A", "https://a.com")],
+      menu: [leaf("A", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     const moves = patches.filter(Patch.$is("Move"))
     expect(moves.length).toBe(1)
-    expect(moves[0]!.fromPath).toBe("favorites_bar")
-    expect(moves[0]!.toPath).toBe("other")
+    expect(moves[0]!.fromPath).toBe("bar")
+    expect(moves[0]!.toPath).toBe("menu")
   })
 
   test("moved + renamed in one produces both patches", async () => {
     const lastSync = new BookmarkTree({
-      favorites_bar: [leaf("Old", "https://a.com")],
+      bar: [leaf("Old", "https://a.com")],
     })
     const current = new BookmarkTree({
-      other: [leaf("New", "https://a.com")],
+      menu: [leaf("New", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     expect(patches.filter(Patch.$is("Move")).length).toBe(1)
@@ -204,7 +204,7 @@ describe("generatePatches", () => {
 
   test("no changes produces empty patches", async () => {
     const tree = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(tree, tree, "yaml"))
     expect(patches.length).toBe(0)
@@ -213,7 +213,7 @@ describe("generatePatches", () => {
   test("all patches have DateTime.Utc dates", async () => {
     const lastSync = emptyTree()
     const current = new BookmarkTree({
-      favorites_bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com")],
     })
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"))
     for (const p of patches) {
@@ -223,7 +223,7 @@ describe("generatePatches", () => {
 
   test("duplicate URLs fail patch generation instead of silently collapsing", async () => {
     const current = new BookmarkTree({
-      favorites_bar: [
+      bar: [
         leaf("First", "https://dup.example"),
         leaf("Second", "https://dup.example"),
       ],

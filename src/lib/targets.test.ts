@@ -10,14 +10,25 @@ import * as Targets from "./targets.js"
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
 
 describe("targets", () => {
-  test("discoverSafariTargets reads Safari profiles from SafariTabs.db", async () => {
+  test("discoverSafariTargets discovers the shared Safari bookmark store once", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-targets-"))
     const plistPath = join(dir, "Bookmarks.plist")
-    const tabsDbPath = join(dir, "SafariTabs.db")
 
     try {
       await Bun.write(plistPath, serialize({ Children: [] }))
 
+      const targets = await run(Targets.discoverSafariTargets(plistPath))
+      expect(targets.map(Targets.keyOf)).toEqual(["safari"])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("discoverSafariProfiles reads Safari profile metadata from SafariTabs.db", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-profiles-"))
+    const tabsDbPath = join(dir, "SafariTabs.db")
+
+    try {
       const db = new Database(tabsDbPath)
       try {
         db.run(
@@ -58,14 +69,10 @@ describe("targets", () => {
         db.close()
       }
 
-      const targets = await run(Targets.discoverSafariTargets(plistPath, tabsDbPath))
-      expect(targets.map(Targets.keyOf)).toEqual([
-        "safari/default",
-        "safari/heartbeat",
-      ])
-      expect(targets.map((target) => target.bookmarkScope)).toEqual([
-        "Favorites Bar",
-        "Favorites Bar",
+      const profiles = await run(Targets.discoverSafariProfiles(tabsDbPath))
+      expect(profiles).toEqual([
+        { profile: "default", bookmarkScope: "Favorites Bar" },
+        { profile: "heartbeat", bookmarkScope: "Favorites Bar" },
       ])
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -101,11 +108,26 @@ describe("targets", () => {
     }
   })
 
-  test("resolveTargetSelectors treats bare browser selectors as all profiles", async () => {
+  test("resolveTargetSelectors with no selectors returns Safari once and all discovered Chrome profiles", async () => {
     const targets = [
+      { browser: "safari", path: "/tmp/Safari.plist", enabled: true },
       { browser: "chrome", profile: "default", path: "/tmp/default", enabled: true },
       { browser: "chrome", profile: "profile-1", path: "/tmp/profile-1", enabled: true },
-      { browser: "safari", profile: "default", path: "/tmp/safari", enabled: true },
+    ] as const
+
+    const resolved = await run(Targets.resolveTargetSelectors(targets, []))
+    expect(resolved.map(Targets.keyOf)).toEqual([
+      "safari",
+      "chrome/default",
+      "chrome/profile-1",
+    ])
+  })
+
+  test("resolveTargetSelectors treats bare browser selectors as all matching targets", async () => {
+    const targets = [
+      { browser: "safari", path: "/tmp/Safari.plist", enabled: true },
+      { browser: "chrome", profile: "default", path: "/tmp/default", enabled: true },
+      { browser: "chrome", profile: "profile-1", path: "/tmp/profile-1", enabled: true },
     ] as const
 
     const resolved = await run(Targets.resolveTargetSelectors(targets, ["chrome"]))
@@ -115,7 +137,7 @@ describe("targets", () => {
     ])
   })
 
-  test("resolveTargetSelectors fails clearly for unknown exact profile selectors", async () => {
+  test("resolveTargetSelectors fails clearly for unknown exact Chrome profile selectors", async () => {
     const targets = [
       { browser: "chrome", profile: "default", path: "/tmp/default", enabled: true },
     ] as const
@@ -125,14 +147,13 @@ describe("targets", () => {
     )
   })
 
-  test("resolveTargetSelectors fails clearly when Safari profiles share one bookmark scope", async () => {
+  test("resolveTargetSelectors fails clearly for Safari profile selectors", async () => {
     const targets = [
-      { browser: "safari", profile: "default", path: "/tmp/Bookmarks.plist", enabled: true, bookmarkScope: "Favorites Bar" },
-      { browser: "safari", profile: "heartbeat", path: "/tmp/Bookmarks.plist", enabled: true, bookmarkScope: "Favorites Bar" },
+      { browser: "safari", path: "/tmp/Safari.plist", enabled: true },
     ] as const
 
-    await expect(run(Targets.resolveTargetSelectors(targets, ["safari"]))).rejects.toThrow(
-      'Safari profiles share the same bookmarks scope "Favorites Bar": safari/default, safari/heartbeat.',
+    await expect(run(Targets.resolveTargetSelectors(targets, ["safari/default"]))).rejects.toThrow(
+      'Safari bookmarks are shared; use "safari" instead of "safari/default".',
     )
   })
 })

@@ -95,13 +95,13 @@ const SafariFolderTransform = Schema.transform(
 // -- Safari section Title ↔ domain section key mappings --
 
 const SECTION_TITLE_TO_KEY: Record<string, keyof Omit<BookmarkTree, "_tag">> = {
-  BookmarksBar: "favorites_bar",
+  BookmarksBar: "bar",
   "com.apple.ReadingList": "reading_list",
 }
 
 const SECTION_KEY_TO_TITLE: Record<string, string> = {
-  favorites_bar: "BookmarksBar",
-  other: "BookmarksMenu",
+  bar: "BookmarksBar",
+  menu: "BookmarksMenu",
   reading_list: "com.apple.ReadingList",
 }
 
@@ -119,7 +119,7 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
     const children = root["Children"] as PlistDict[]
     const issues = scanNodes(children, "root")
 
-    const sections: Partial<Record<"favorites_bar" | "other" | "reading_list" | "mobile", BookmarkSection>> = {}
+    const sections: Partial<Record<"bar" | "menu" | "reading_list" | "mobile", BookmarkSection>> = {}
 
     for (const child of children) {
       const type = child["WebBookmarkType"] as string
@@ -132,20 +132,20 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
         // Standard section (BookmarksBar, ReadingList)
         sections[sectionKey] = decodeNodes(child["Children"] as PlistDict[])
       } else if (title === "BookmarksMenu") {
-        // BookmarksMenu maps to "other" — its children merge with root-level extras
-        if (!sections.other) sections.other = []
+        // BookmarksMenu maps to "menu" — its children merge with root-level extras
+        if (!sections.menu) sections.menu = []
         const menuChildren = child["Children"] as PlistDict[] | undefined
         if (menuChildren) {
-          sections.other = [...sections.other, ...decodeNodes(menuChildren)]
+          sections.menu = [...sections.menu, ...decodeNodes(menuChildren)]
         }
       } else if (type === "WebBookmarkTypeList") {
-        // Root-level folder outside standard sections → append to "other"
-        if (!sections.other) sections.other = []
-        sections.other = [...sections.other, Schema.decodeUnknownSync(SafariFolderTransform)(child)]
+        // Root-level folder outside standard sections → append to "menu"
+        if (!sections.menu) sections.menu = []
+        sections.menu = [...sections.menu, Schema.decodeUnknownSync(SafariFolderTransform)(child)]
       } else if (type === "WebBookmarkTypeLeaf") {
-        // Root-level leaf → append to "other"
-        if (!sections.other) sections.other = []
-        sections.other = [...sections.other, Schema.decodeUnknownSync(SafariLeafTransform)(child)]
+        // Root-level leaf → append to "menu"
+        if (!sections.menu) sections.menu = []
+        sections.menu = [...sections.menu, Schema.decodeUnknownSync(SafariLeafTransform)(child)]
       }
     }
 
@@ -157,8 +157,8 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
     }
 
     return BookmarkTree.make({
-      favorites_bar: sections.favorites_bar,
-      other: sections.other,
+      bar: sections.bar,
+      menu: sections.menu,
       reading_list: sections.reading_list,
     })
   })
@@ -292,7 +292,7 @@ export const importBookmarks = (
       })
 
     const tree: WorkspaceTree = {}
-    const other: WorkspaceNode[] = []
+    const menu: WorkspaceNode[] = []
 
     for (const child of children) {
       const type = String(child["WebBookmarkType"] ?? "")
@@ -305,19 +305,19 @@ export const importBookmarks = (
       }
 
       if (title === "BookmarksMenu") {
-        other.push(...importNodes((child["Children"] as PlistDict[] | undefined) ?? [], ["other"]))
+        menu.push(...importNodes((child["Children"] as PlistDict[] | undefined) ?? [], ["menu"]))
         continue
       }
 
       if (type === "WebBookmarkTypeProxy" && title === "History") {
-        other.push(...importNodes([child], ["other"]))
+        menu.push(...importNodes([child], ["menu"]))
         continue
       }
 
-      other.push(...importNodes([child], ["other"]))
+      menu.push(...importNodes([child], ["menu"]))
     }
 
-    if (other.length > 0) tree.other = other
+    if (menu.length > 0) tree.menu = menu
 
     return { tree, occurrences }
   })
@@ -409,11 +409,11 @@ export const writeTree = (
 
     setSectionChildren(
       favoritesSection,
-      buildSafariChildren(tree.favorites_bar, "favorites_bar", lookup),
+      buildSafariChildren(tree.bar, "bar", lookup),
     )
     setSectionChildren(
       otherSection,
-      buildSafariChildren(tree.other, "other", lookup),
+      buildSafariChildren(tree.menu, "menu", lookup),
     )
     setSectionChildren(
       readingListSection,
@@ -467,13 +467,13 @@ const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
 
     if (type === "WebBookmarkTypeList" && title === "BookmarksBar") {
       lookup.sectionsByTitle.set(title, child)
-      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "favorites_bar", lookup)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "bar", lookup)
       continue
     }
 
     if (type === "WebBookmarkTypeList" && title === "BookmarksMenu") {
       lookup.sectionsByTitle.set(title, child)
-      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "other", lookup)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "menu", lookup)
       continue
     }
 
@@ -490,7 +490,7 @@ const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
     }
 
     if (type === "WebBookmarkTypeList" && title) {
-      const folderPath = `other/${title}`
+      const folderPath = `menu/${title}`
       lookup.foldersByPath.set(folderPath, child)
       collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], folderPath, lookup)
       continue
@@ -628,7 +628,7 @@ function decodeNodes(children: PlistDict[]): BookmarkNode[] {
 
 // -- Write path helpers (raw PlistDict mutation — see applyPatches architecture note) --
 
-/** Parse a domain path like "favorites_bar/Dev" into Safari section title + folder path. */
+/** Parse a domain path like "bar/Dev" into Safari section title + folder path. */
 const parseDomainPath = (path: string): { sectionTitle: string; folderPath: string[] } => {
   const [sectionKey, ...rest] = path.split("/")
   const sectionTitle = SECTION_KEY_TO_TITLE[sectionKey!] ?? sectionKey!

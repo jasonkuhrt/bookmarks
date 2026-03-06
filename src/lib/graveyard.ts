@@ -7,7 +7,7 @@
  *
  * Original bookmark paths are preserved as nested folders inside each
  * graveyard event folder, so the structure is:
- *   other/_graveyard/2025-01-15_safari_conflict/favorites_bar/AI/Tools/ChatGPT
+ *   menu/_graveyard/2025-01-15_safari_conflict/bar/AI/Tools/ChatGPT
  */
 
 import { DateTime, Duration, Effect, Option } from "effect"
@@ -18,7 +18,7 @@ import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkTree } from "./sche
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Name of the top-level graveyard folder under `other`. */
+/** Name of the top-level graveyard folder under `menu`. */
 export const GRAVEYARD_FOLDER_NAME = "_graveyard"
 
 /** Regex for parsing graveyard event folder names. */
@@ -52,8 +52,8 @@ export const parseEventFolderName = (
 /**
  * Build a nested folder structure representing the original path of a bookmark.
  *
- * Given path "favorites_bar/AI/Tools" and a leaf bookmark, produces:
- *   BookmarkFolder("favorites_bar", [BookmarkFolder("AI", [BookmarkFolder("Tools", [leaf])])])
+ * Given path "bar/AI/Tools" and a leaf bookmark, produces:
+ *   BookmarkFolder("bar", [BookmarkFolder("AI", [BookmarkFolder("Tools", [leaf])])])
  */
 const buildPathFolders = (
   pathSegments: readonly string[],
@@ -81,20 +81,20 @@ const patchToBookmarkInfo = (patch: Patch.BookmarkPatch): { url: string; name: s
   })
 
 /**
- * Find or create the _graveyard folder within the `other` section.
- * Returns the updated `other` array and the graveyard folder.
+ * Find or create the _graveyard folder within the `menu` section.
+ * Returns the updated `menu` array and the graveyard folder.
  */
 const ensureGraveyardFolder = (
-  other: readonly BookmarkNode[],
-): { other: readonly BookmarkNode[]; graveyardFolder: BookmarkFolder } => {
-  const existing = other.find(
+  menu: readonly BookmarkNode[],
+): { menu: readonly BookmarkNode[]; graveyardFolder: BookmarkFolder } => {
+  const existing = menu.find(
     (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === GRAVEYARD_FOLDER_NAME,
   )
   if (existing) {
-    return { other, graveyardFolder: existing }
+    return { menu, graveyardFolder: existing }
   }
   const folder = BookmarkFolder.make({ name: GRAVEYARD_FOLDER_NAME, children: [] })
-  return { other: [...other, folder], graveyardFolder: folder }
+  return { menu: [...menu, folder], graveyardFolder: folder }
 }
 
 /**
@@ -120,13 +120,13 @@ const ensureEventFolder = (
 }
 
 /**
- * Replace the graveyard folder in the `other` array with an updated version.
+ * Replace the graveyard folder in the `menu` array with an updated version.
  */
-const replaceGraveyardInOther = (
-  other: readonly BookmarkNode[],
+const replaceGraveyardInMenu = (
+  menu: readonly BookmarkNode[],
   graveyardFolder: BookmarkFolder,
 ): readonly BookmarkNode[] =>
-  other.map((n) =>
+  menu.map((n) =>
     BookmarkFolder.is(n) && n.name === GRAVEYARD_FOLDER_NAME ? graveyardFolder : n,
   )
 
@@ -166,11 +166,11 @@ export const addToGraveyard = (
     // Build the nested path structure
     const entry = buildPathFolders(info.pathSegments, graveyardLeaf)
 
-    // Ensure `other` section exists
-    const otherSection = tree.other ?? []
+    // Ensure `menu` section exists
+    const menuSection = tree.menu ?? []
 
     // Ensure _graveyard folder exists
-    const { other: otherWithGraveyard, graveyardFolder } = ensureGraveyardFolder(otherSection)
+    const { menu: menuWithGraveyard, graveyardFolder } = ensureGraveyardFolder(menuSection)
 
     // Ensure event folder exists
     const { graveyardFolder: graveyardWithEvent, eventFolder } = ensureEventFolder(
@@ -184,13 +184,13 @@ export const addToGraveyard = (
       children: [...eventFolder.children, entry],
     })
 
-    // Reassemble: event -> graveyard -> other -> tree
+    // Reassemble: event -> graveyard -> menu -> tree
     const updatedGraveyard = replaceEventInGraveyard(graveyardWithEvent, updatedEventFolder)
-    const updatedOther = replaceGraveyardInOther(otherWithGraveyard, updatedGraveyard)
+    const updatedMenu = replaceGraveyardInMenu(menuWithGraveyard, updatedGraveyard)
 
     return BookmarkTree.make({
       ...tree,
-      other: updatedOther,
+      menu: updatedMenu,
     })
   })
 
@@ -215,10 +215,10 @@ export const gc = (
   maxAge: Duration.Duration,
 ): Effect.Effect<BookmarkTree, Error> =>
   Effect.gen(function* () {
-    const otherSection = tree.other
-    if (!otherSection) return tree
+    const menuSection = tree.menu
+    if (!menuSection) return tree
 
-    const graveyardFolder = otherSection.find(
+    const graveyardFolder = menuSection.find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === GRAVEYARD_FOLDER_NAME,
     )
     if (!graveyardFolder) return tree
@@ -240,12 +240,12 @@ export const gc = (
 
     // If no children remain, remove the graveyard folder entirely
     if (keptChildren.length === 0) {
-      const updatedOther = otherSection.filter(
+      const updatedMenu = menuSection.filter(
         (n) => !(BookmarkFolder.is(n) && n.name === GRAVEYARD_FOLDER_NAME),
       )
       return BookmarkTree.make({
         ...tree,
-        other: updatedOther,
+        menu: updatedMenu,
       })
     }
 
@@ -254,9 +254,9 @@ export const gc = (
       name: GRAVEYARD_FOLDER_NAME,
       children: keptChildren,
     })
-    const updatedOther = replaceGraveyardInOther(otherSection, updatedGraveyard)
+    const updatedMenu = replaceGraveyardInMenu(menuSection, updatedGraveyard)
     return BookmarkTree.make({
       ...tree,
-      other: updatedOther,
+      menu: updatedMenu,
     })
   })

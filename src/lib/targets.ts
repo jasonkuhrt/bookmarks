@@ -11,10 +11,14 @@ import { BookmarksConfig, BookmarkTree } from "./schema/__.js"
 
 export interface TargetDescriptor {
   readonly browser: string
-  readonly profile: string
   readonly path: string
   readonly enabled: boolean
-  readonly bookmarkScope?: string
+  readonly profile?: string | undefined
+}
+
+export interface SafariProfileMetadata {
+  readonly profile: string
+  readonly bookmarkScope: string
 }
 
 type ChromeLocalState = {
@@ -32,10 +36,10 @@ type SafariProfileRow = {
 const DEFAULT_SAFARI_BOOKMARK_SCOPE = "Favorites Bar"
 
 export const keyOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  `${target.browser}/${target.profile}`
+  target.profile ? `${target.browser}/${target.profile}` : target.browser
 
 export const displayNameOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  `${target.browser}/${target.profile}`
+  keyOf(target)
 
 const exists = async (path: string): Promise<boolean> => {
   try {
@@ -121,22 +125,12 @@ export const discoverChromeTargets = (
     catch: (e) => new Error(`Failed to discover Chrome targets in ${chromeDataDir}: ${e}`),
   })
 
-export const discoverSafariTargets = (
-  plistPath = Paths.defaultSafariPlistPath(),
+export const discoverSafariProfiles = (
   tabsDbPath = Paths.defaultSafariTabsDbPath(),
-): Effect.Effect<readonly TargetDescriptor[], Error> =>
+): Effect.Effect<readonly SafariProfileMetadata[], Error> =>
   Effect.tryPromise({
     try: async () => {
-      if (!(await exists(plistPath))) return []
-      if (!(await exists(tabsDbPath))) {
-        return [{
-          browser: "safari",
-          profile: "default",
-          path: plistPath,
-          enabled: true,
-          bookmarkScope: DEFAULT_SAFARI_BOOKMARK_SCOPE,
-        } satisfies TargetDescriptor]
-      }
+      if (!(await exists(tabsDbPath))) return []
 
       const db = new Database(tabsDbPath)
       try {
@@ -146,26 +140,30 @@ export const discoverSafariTargets = (
           )
           .all()
 
-        if (rows.length === 0) {
-          return [{
-            browser: "safari",
-            profile: "default",
-            path: plistPath,
-            enabled: true,
-            bookmarkScope: DEFAULT_SAFARI_BOOKMARK_SCOPE,
-          } satisfies TargetDescriptor]
-        }
+        if (rows.length === 0) return []
 
         return rows.map((row) => ({
-          browser: "safari",
           profile: normalizeSafariProfileSelector(row.title, row.external_uuid),
-          path: plistPath,
-          enabled: true,
           bookmarkScope: bookmarkScopeOf(row.extra_attributes),
-        } satisfies TargetDescriptor))
+        } satisfies SafariProfileMetadata))
       } finally {
         db.close()
       }
+    },
+    catch: (e) => new Error(`Failed to discover Safari profiles at ${tabsDbPath}: ${e}`),
+  })
+
+export const discoverSafariTargets = (
+  plistPath = Paths.defaultSafariPlistPath(),
+): Effect.Effect<readonly TargetDescriptor[], Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      if (!(await exists(plistPath))) return []
+      return [{
+        browser: "safari",
+        path: plistPath,
+        enabled: true,
+      } satisfies TargetDescriptor]
     },
     catch: (e) => new Error(`Failed to discover Safari targets at ${plistPath}: ${e}`),
   })
@@ -196,6 +194,12 @@ export const resolveTargetSelectors = (
 
     for (const selector of selectors) {
       if (selector.includes("/")) {
+        if (selector.startsWith("safari/")) {
+          return yield* Effect.fail(new Error(
+            `Safari bookmarks are shared; use "safari" instead of "${selector}".`,
+          ))
+        }
+
         const exact = byId.get(selector)
         if (!exact) {
           return yield* Effect.fail(new Error(
@@ -219,21 +223,6 @@ export const resolveTargetSelectors = (
       }
     }
 
-    const safariScopeGroups = new Map<string, TargetDescriptor[]>()
-    for (const target of resolved) {
-      if (target.browser !== "safari" || !target.bookmarkScope) continue
-      const group = safariScopeGroups.get(target.bookmarkScope) ?? []
-      group.push(target)
-      safariScopeGroups.set(target.bookmarkScope, group)
-    }
-
-    for (const [bookmarkScope, group] of safariScopeGroups) {
-      if (group.length < 2) continue
-      return yield* Effect.fail(new Error(
-        `Safari profiles share the same bookmarks scope "${bookmarkScope}": ${group.map(keyOf).join(", ")}. Safari bookmarks are shared across these profiles. Choose distinct Favorites folders in Safari Settings > Profiles before selecting them together.`,
-      ))
-    }
-
     return resolved
   })
 
@@ -252,45 +241,12 @@ export const requiresFullDiskAccess = (target: Pick<TargetDescriptor, "browser" 
   target.browser === "safari" && target.path === Paths.defaultSafariPlistPath()
 
 export const graveyardSourceOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  target.browser === "safari" && target.profile === "default"
+  target.browser === "safari"
     ? "safari"
-    : `${target.browser}-${target.profile}`
+    : `${target.browser}-${target.profile ?? "default"}`
 
-export const listTargets = (config: BookmarksConfig): readonly TargetDescriptor[] =>
-  Object.entries(config.targets).flatMap(([browser, profiles]) =>
-    Object.entries(profiles).map(([profile, target]) => ({
-      browser,
-      profile,
-      path: target.path,
-      enabled: target.enabled ?? true,
-      ...("bookmarkScope" in target && typeof target.bookmarkScope === "string"
-        ? { bookmarkScope: target.bookmarkScope }
-        : {}),
-    })),
-  )
-
-export const listEnabledTargets = (config: BookmarksConfig): readonly TargetDescriptor[] =>
-  listTargets(config).filter((target) => target.enabled)
-
-export const listConfiguredProfileKeys = (config: BookmarksConfig): readonly string[] => {
-  const keys = new Set<string>()
-
-  for (const target of listTargets(config)) {
-    keys.add(keyOf(target))
-  }
-
-  for (const profileKey of Object.keys(config.profiles ?? {})) {
-    keys.add(profileKey)
-  }
-
-  return [...keys]
-}
-
-export const findTarget = (
-  config: BookmarksConfig,
-  profileKey: string,
-): TargetDescriptor | undefined =>
-  listTargets(config).find((target) => keyOf(target) === profileKey)
+export const listConfiguredChromeProfileKeys = (config: BookmarksConfig): readonly string[] =>
+  Object.keys(config.chrome?.profiles ?? {}).map((profile) => `chrome/${profile}`)
 
 export const readTree = (target: TargetDescriptor): Effect.Effect<BookmarkTree, Error> => {
   switch (target.browser) {

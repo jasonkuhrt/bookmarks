@@ -55,7 +55,7 @@ export const collectDuplicateUrlIssues = (
     }
   }
 
-  for (const sectionKey of ["favorites_bar", "other", "reading_list", "mobile"] as const) {
+  for (const sectionKey of ["bar", "menu", "reading_list", "mobile"] as const) {
     visit(tree[sectionKey], sectionKey)
   }
 

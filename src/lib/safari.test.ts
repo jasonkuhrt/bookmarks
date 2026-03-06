@@ -41,12 +41,12 @@ describe("readBookmarks", () => {
     })
   })
 
-  test("favorites_bar contains folders from BookmarksBar", async () => {
+  test("bar contains folders from BookmarksBar", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path))
-      expect(tree.favorites_bar).toBeDefined()
-      expect(tree.favorites_bar!.length).toBeGreaterThan(0)
-      const firstItem = tree.favorites_bar![0]!
+      expect(tree.bar).toBeDefined()
+      expect(tree.bar!.length).toBeGreaterThan(0)
+      const firstItem = tree.bar![0]!
       expect(firstItem).toBeInstanceOf(BookmarkFolder)
     })
   })
@@ -65,8 +65,8 @@ describe("readBookmarks", () => {
   test("other section collects root-level folders and BookmarksMenu content", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path))
-      expect(tree.other).toBeDefined()
-      expect(tree.other!.length).toBeGreaterThan(0)
+      expect(tree.menu).toBeDefined()
+      expect(tree.menu!.length).toBeGreaterThan(0)
     })
   })
 
@@ -74,8 +74,8 @@ describe("readBookmarks", () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path))
       const allNames = [
-        ...(tree.favorites_bar ?? []),
-        ...(tree.other ?? []),
+        ...(tree.bar ?? []),
+        ...(tree.menu ?? []),
         ...(tree.reading_list ?? []),
       ].map((n) => ("name" in n ? n.name : ""))
       expect(allNames).not.toContain("History")
@@ -95,7 +95,7 @@ describe("readBookmarks", () => {
   test("folder nodes have name and children", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path))
-      const folder = tree.favorites_bar![0]! as BookmarkFolder
+      const folder = tree.bar![0]! as BookmarkFolder
       expect(folder.name).toBeTruthy()
       expect(Array.isArray(folder.children)).toBe(true)
     })
@@ -155,14 +155,14 @@ describe("readBookmarks", () => {
 
       const tree = await run(Safari.readBookmarks(path))
 
-      expect(tree.favorites_bar?.map((node) => node.name)).toEqual([
+      expect(tree.bar?.map((node) => node.name)).toEqual([
         "First",
         "Empty",
         "Nested",
         "Last",
       ])
 
-      const emptyFolder = tree.favorites_bar?.[1]
+      const emptyFolder = tree.bar?.[1]
       expect(emptyFolder).toBeInstanceOf(BookmarkFolder)
       expect((emptyFolder as BookmarkFolder).children).toEqual([])
     } finally {
@@ -225,11 +225,11 @@ describe("applyPatches", () => {
       const testName = "Test Add Bookmark"
 
       await run(Safari.applyPatches(path, [
-        Patch.Add({ url: testUrl, name: testName, path: "favorites_bar", date: now }),
+        Patch.Add({ url: testUrl, name: testName, path: "bar", date: now }),
       ]))
 
       const tree = await run(Safari.readBookmarks(path))
-      const found = (tree.favorites_bar ?? []).find(
+      const found = (tree.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
       )
       expect(found).toBeDefined()
@@ -288,7 +288,7 @@ describe("applyPatches", () => {
       const target = treeBefore.reading_list![0]! as BookmarkLeaf
 
       await run(Safari.applyPatches(path, [
-        Patch.Move({ url: target.url, name: target.name, fromPath: "reading_list", toPath: "favorites_bar", date: now }),
+        Patch.Move({ url: target.url, name: target.name, fromPath: "reading_list", toPath: "bar", date: now }),
       ]))
 
       const treeAfter = await run(Safari.readBookmarks(path))
@@ -299,8 +299,8 @@ describe("applyPatches", () => {
         .map((n) => n.url)
       expect(remainingUrls).not.toContain(target.url)
 
-      // Present in favorites_bar
-      const found = (treeAfter.favorites_bar ?? []).find(
+      // Present in bar
+      const found = (treeAfter.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === target.url,
       )
       expect(found).toBeDefined()
@@ -317,12 +317,12 @@ describe("applyPatches", () => {
       const testName = "Nested Add Test"
 
       await run(Safari.applyPatches(path, [
-        Patch.Add({ url: testUrl, name: testName, path: "other/NewFolder/SubFolder", date: now }),
+        Patch.Add({ url: testUrl, name: testName, path: "menu/NewFolder/SubFolder", date: now }),
       ]))
 
       const tree = await run(Safari.readBookmarks(path))
       // Navigate: other → NewFolder → SubFolder → leaf
-      const newFolder = (tree.other ?? []).find(
+      const newFolder = (tree.menu ?? []).find(
         (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "NewFolder",
       )
       expect(newFolder).toBeDefined()
@@ -347,7 +347,7 @@ describe("writeTree", () => {
 
     try {
       const desired = BookmarkTree.make({
-        favorites_bar: [
+        bar: [
           BookmarkLeaf.make({ name: "Top Link", url: "https://top.example" }),
           BookmarkFolder.make({
             name: "Favorites Folder",
@@ -357,7 +357,7 @@ describe("writeTree", () => {
           }),
           BookmarkFolder.make({ name: "Empty", children: [] }),
         ],
-        other: [
+        menu: [
           BookmarkLeaf.make({ name: "Menu Link", url: "https://menu.example" }),
           BookmarkFolder.make({
             name: "Loose Folder",
