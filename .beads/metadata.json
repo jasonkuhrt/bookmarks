@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "bookmarks",
+  "project_id": "6215e3b3-42da-4313-845f-b10e9dcd9eb6"
+}
