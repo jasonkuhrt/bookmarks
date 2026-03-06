@@ -12,6 +12,7 @@ import { Effect, Schema } from "effect"
 import { rename } from "node:fs/promises"
 import * as Patch from "./patch.js"
 import { BookmarkLeaf, BookmarkFolder, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
+import { BookmarkIssue, separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.js"
 
 // -- Plist type aliases (matches @plist/common; avoids direct dependency on internal package) --
 
@@ -113,6 +114,7 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
 
     const root = parse(data) as PlistDict
     const children = root["Children"] as PlistDict[]
+    const issues = scanNodes(children, "root")
 
     const sections: Partial<Record<"favorites_bar" | "other" | "reading_list" | "mobile", BookmarkSection>> = {}
 
@@ -142,6 +144,13 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
         if (!sections.other) sections.other = []
         sections.other = [...sections.other, Schema.decodeUnknownSync(SafariLeafTransform)(child)]
       }
+    }
+
+    if (issues.length > 0) {
+      return yield* Effect.fail(new UnsupportedBookmarks({
+        source: `Safari bookmarks at ${plistPath}`,
+        issues,
+      }))
     }
 
     return BookmarkTree.make({
@@ -219,6 +228,43 @@ export const applyPatches = (
   })
 
 // -- Read path helpers (Schema-driven decoding) --
+
+const scanNodes = (children: PlistDict[], path: string): BookmarkIssue[] => {
+  const issues: BookmarkIssue[] = []
+
+  for (let index = 0; index < children.length; index++) {
+    const child = children[index]!
+    const type = String(child["WebBookmarkType"] ?? "")
+    const title = typeof child["Title"] === "string" ? child["Title"] : undefined
+    const itemPath = title ? `${path}/${title}` : `${path}/[${index + 1}]`
+
+    if (type === "WebBookmarkTypeLeaf") continue
+
+    if (type === "WebBookmarkTypeList") {
+      issues.push(...scanNodes((child["Children"] as PlistDict[] | undefined) ?? [], itemPath))
+      continue
+    }
+
+    if (type === "WebBookmarkTypeProxy" && title === "History") {
+      continue
+    }
+
+    if (type.includes("Separator") || (title?.toLowerCase().includes("separator") ?? false)) {
+      issues.push(separatorIssue(
+        itemPath,
+        `Safari bookmark node type "${type}" would be dropped during sync.`,
+      ))
+      continue
+    }
+
+    issues.push(unsupportedNodeIssue(
+      itemPath,
+      `Unsupported Safari bookmark node type "${type}" would be dropped during sync.`,
+    ))
+  }
+
+  return issues
+}
 
 function decodeNodes(children: PlistDict[]): BookmarkNode[] {
   const nodes: BookmarkNode[] = []

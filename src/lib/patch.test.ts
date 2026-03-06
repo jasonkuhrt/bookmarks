@@ -220,4 +220,17 @@ describe("generatePatches", () => {
       expect(DateTime.isDateTime(p.date)).toBe(true)
     }
   })
+
+  test("duplicate URLs fail patch generation instead of silently collapsing", async () => {
+    const current = new BookmarkTree({
+      favorites_bar: [
+        leaf("First", "https://dup.example"),
+        leaf("Second", "https://dup.example"),
+      ],
+    })
+
+    await expect(run(Patch.generatePatches(emptyTree(), current, "yaml"))).rejects.toThrow(
+      'Duplicate URL "https://dup.example"',
+    )
+  })
 })

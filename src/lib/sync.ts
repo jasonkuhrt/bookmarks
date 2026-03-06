@@ -591,14 +591,15 @@ const resolveProfileTrees = (
 const projectTree = (
   fromTree: BookmarkTree,
   toTree: BookmarkTree,
-  source: string,
+  toSource: string,
+  fromSource = "existing state",
 ): Effect.Effect<{
   readonly exact: boolean
   readonly patches: readonly Patch.BookmarkPatch[]
   readonly projectedTree: BookmarkTree
 }, Error> =>
   Effect.gen(function* () {
-    const patches = yield* Patch.generatePatches(fromTree, toTree, source)
+    const patches = yield* Patch.generatePatches(fromTree, toTree, toSource, undefined, fromSource)
     const projectedTree = yield* applyPatches(fromTree, patches)
     return {
       exact: treeEquals(projectedTree, toTree),
@@ -616,12 +617,12 @@ const syncTarget = (
 ): Effect.Effect<{ readonly target: Targets.TargetDescriptor; readonly tree: BookmarkTree; readonly result: TargetResult }, Error> =>
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target)
-    const yamlPatches = yield* Patch.generatePatches(baselineTree, yamlTree, "yaml")
-    const browserPatches = yield* Patch.generatePatches(baselineTree, browserTree, target.browser)
+    const yamlPatches = yield* Patch.generatePatches(baselineTree, yamlTree, "yaml", undefined, "git baseline")
+    const browserPatches = yield* Patch.generatePatches(baselineTree, browserTree, target.browser, undefined, "git baseline")
     const resolution = yield* resolveConflicts(yamlPatches, browserPatches)
 
-    const yamlProjection = yield* projectTree(baselineTree, yamlTree, "yaml")
-    const browserProjection = yield* projectTree(baselineTree, browserTree, target.browser)
+    const yamlProjection = yield* projectTree(baselineTree, yamlTree, "yaml", "git baseline")
+    const browserProjection = yield* projectTree(baselineTree, browserTree, target.browser, "git baseline")
     const mergedLeafTree = yield* applyPatches(baselineTree, resolution.apply)
 
     const structuralBase = !yamlProjection.exact && !browserProjection.exact
@@ -636,7 +637,7 @@ const syncTarget = (
           ? browserTree
           : mergedLeafTree
 
-    const mergedProjection = yield* projectTree(structuralBase, mergedLeafTree, "merged")
+    const mergedProjection = yield* projectTree(structuralBase, mergedLeafTree, "merged", "resolved structural state")
     const mergedTree = mergedProjection.exact
       ? mergedProjection.projectedTree
       : structuralBase
@@ -650,7 +651,7 @@ const syncTarget = (
         )
       : mergedTree
     const finalTree = yield* Graveyard.gc(withGraveyard, maxAge)
-    const finalProjection = yield* projectTree(browserTree, finalTree, target.browser)
+    const finalProjection = yield* projectTree(browserTree, finalTree, `${target.browser} target`, `${target.browser} target`)
 
     if (!finalProjection.exact) {
       return yield* Effect.fail(new Error(
@@ -679,7 +680,7 @@ const pullTarget = (
 ): Effect.Effect<{ readonly target: Targets.TargetDescriptor; readonly tree: BookmarkTree; readonly result: TargetResult }, Error> =>
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target)
-    const pulledPatches = yield* Patch.generatePatches(currentTree, browserTree, target.browser)
+    const pulledPatches = yield* Patch.generatePatches(currentTree, browserTree, target.browser, undefined, "yaml")
     return {
       target,
       tree: browserTree,
@@ -698,7 +699,7 @@ const pushTarget = (
 ): Effect.Effect<TargetResult, Error> =>
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target)
-    const finalProjection = yield* projectTree(browserTree, yamlTree, "yaml")
+    const finalProjection = yield* projectTree(browserTree, yamlTree, "yaml", `${target.browser} target`)
 
     if (!finalProjection.exact) {
       return yield* Effect.fail(new Error(
@@ -835,8 +836,8 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
       const browserTree = yield* Targets.readTree(target)
       targetStatuses.push({
         target,
-        yamlPatches: yield* Patch.generatePatches(browserTree, yamlTree, "yaml"),
-        browserPatches: yield* Patch.generatePatches(yamlTree, browserTree, target.browser),
+        yamlPatches: yield* Patch.generatePatches(browserTree, yamlTree, "yaml", undefined, `${target.browser} target`),
+        browserPatches: yield* Patch.generatePatches(yamlTree, browserTree, target.browser, undefined, "yaml"),
       })
     }
 

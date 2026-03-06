@@ -10,11 +10,12 @@ import { DateTime, Effect, Schema } from "effect"
 import { rename } from "node:fs/promises"
 import * as Patch from "./patch.js"
 import { BookmarkLeaf, BookmarkFolder, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
+import { BookmarkIssue, separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.js"
 
 // -- Chrome JSON type aliases --
 
 type ChromeNode = {
-  type: "url" | "folder"
+  type: string
   name: string
   id: string
   guid: string
@@ -188,12 +189,21 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
     const { roots } = file
 
     const sections: Partial<Record<"favorites_bar" | "other" | "mobile", BookmarkSection>> = {}
+    const issues: BookmarkIssue[] = []
 
     for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
       const rootNode = roots[chromeKey as keyof ChromeRoot]
       if (rootNode?.children && rootNode.children.length > 0) {
+        issues.push(...scanNodes(rootNode.children, sectionKey))
         sections[sectionKey] = decodeNodes(rootNode.children)
       }
+    }
+
+    if (issues.length > 0) {
+      return yield* Effect.fail(new UnsupportedBookmarks({
+        source: `Chrome bookmarks at ${bookmarksPath}`,
+        issues,
+      }))
     }
 
     return BookmarkTree.make({
@@ -287,6 +297,37 @@ export const applyPatches = (
   })
 
 // -- Read path helpers (Schema-driven decoding) --
+
+const scanNodes = (children: ChromeNode[], path: string): BookmarkIssue[] => {
+  const issues: BookmarkIssue[] = []
+
+  for (let index = 0; index < children.length; index++) {
+    const child = children[index]!
+    const itemPath = `${path}/[${index + 1}]`
+
+    if (child.type === "url") continue
+
+    if (child.type === "folder") {
+      issues.push(...scanNodes(child.children ?? [], `${path}/${child.name}`))
+      continue
+    }
+
+    if (child.type === "separator") {
+      issues.push(separatorIssue(
+        itemPath,
+        "Imported Chrome separators would be dropped during sync. Remove them manually before retrying.",
+      ))
+      continue
+    }
+
+    issues.push(unsupportedNodeIssue(
+      itemPath,
+      `Unsupported Chrome bookmark node type "${String(child.type)}" would be dropped during sync.`,
+    ))
+  }
+
+  return issues
+}
 
 function decodeNodes(children: ChromeNode[]): BookmarkNode[] {
   const nodes: BookmarkNode[] = []

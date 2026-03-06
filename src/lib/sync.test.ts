@@ -450,4 +450,104 @@ describe("push", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("refuses duplicate URLs in YAML with actionable diagnostics", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-duplicates-"))
+    const chromePath = join(dir, "Bookmarks")
+
+    try {
+      await writeChromeFixture(chromePath, ["First"])
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({
+          favorites_bar: [
+            leaf("First Copy", "https://dup.example"),
+            leaf("Second Copy", "https://dup.example"),
+          ],
+        }),
+      })
+
+      await expect(run(Sync.push({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+        dryRun: true,
+      }))).rejects.toThrow('Duplicate URL "https://dup.example"')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("pull", () => {
+  test("refuses unsupported separator constructs before mutation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-pull-separator-"))
+    const chromePath = join(dir, "Bookmarks")
+
+    try {
+      await Bun.write(chromePath, JSON.stringify({
+        checksum: "",
+        version: 1,
+        roots: {
+          bookmark_bar: {
+            type: "folder",
+            name: "Bookmarks Bar",
+            id: "1",
+            guid: "bookmark-bar",
+            date_added: "0",
+            date_modified: "0",
+            children: [
+              {
+                type: "separator",
+                id: "2",
+                guid: "separator",
+                name: "",
+                date_added: "0",
+                date_modified: "0",
+              },
+            ],
+          },
+          other: {
+            type: "folder",
+            name: "Other Bookmarks",
+            id: "10",
+            guid: "other",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+          synced: {
+            type: "folder",
+            name: "Mobile Bookmarks",
+            id: "11",
+            guid: "mobile",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+        },
+      }, null, 2))
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({}),
+      })
+
+      await expect(run(Sync.pull({
+        yamlPath: join(dir, "bookmarks.yaml"),
+        yamlOverride: config,
+        dryRun: true,
+      }))).rejects.toThrow("Bookmark separators are not supported")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

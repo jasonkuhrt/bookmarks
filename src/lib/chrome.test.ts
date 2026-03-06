@@ -213,6 +213,60 @@ describe("readBookmarks", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("refuses separator nodes that would otherwise be dropped", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-unsupported-"))
+    const path = join(dir, "Bookmarks")
+
+    try {
+      await Bun.write(path, JSON.stringify({
+        checksum: "",
+        version: 1,
+        roots: {
+          bookmark_bar: {
+            type: "folder",
+            name: "Bookmarks Bar",
+            id: "1",
+            guid: "root-bookmark-bar",
+            date_added: "0",
+            date_modified: "0",
+            children: [
+              {
+                type: "separator",
+                name: "",
+                id: "2",
+                guid: "separator",
+                date_added: "0",
+                date_modified: "0",
+              },
+            ],
+          },
+          other: {
+            type: "folder",
+            name: "Other Bookmarks",
+            id: "7",
+            guid: "root-other",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+          synced: {
+            type: "folder",
+            name: "Mobile Bookmarks",
+            id: "8",
+            guid: "root-synced",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+        },
+      }, null, 2))
+
+      await expect(run(Chrome.readBookmarks(path))).rejects.toThrow("Bookmark separators are not supported")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // -- applyPatches --

@@ -27,6 +27,7 @@ import * as Daemon from "../lib/daemon.js"
 import * as Doctor from "../lib/doctor.js"
 import * as Paths from "../lib/paths.js"
 import * as SyncModule from "../lib/sync.js"
+import { UnsupportedBookmarks } from "../lib/unsupported.js"
 import * as YamlModule from "../lib/yaml.js"
 
 const USAGE = `
@@ -256,7 +257,11 @@ const program = Effect.gen(function* () {
 Effect.runPromiseExit(program).then((exit) => {
   if (Exit.isFailure(exit)) {
     const err = Cause.squash(exit.cause)
-    if (!CliExitError.is(err)) console.error(err)
+    if (UnsupportedBookmarks.is(err)) {
+      console.error(err.message)
+    } else if (!CliExitError.is(err)) {
+      console.error(err)
+    }
     process.exit(1)
   }
 })

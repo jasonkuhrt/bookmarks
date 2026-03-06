@@ -138,6 +138,42 @@ describe("readBookmarks", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("refuses unsupported separator-like nodes that would otherwise be dropped", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-unsupported-"))
+    const path = join(dir, "Bookmarks.plist")
+
+    try {
+      await Bun.write(path, serialize({
+        Children: [
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "BookmarksBar",
+            Children: [
+              {
+                WebBookmarkType: "WebBookmarkTypeSeparator",
+                Title: "Separator",
+              },
+            ],
+          },
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "BookmarksMenu",
+            Children: [],
+          },
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "com.apple.ReadingList",
+            Children: [],
+          },
+        ],
+      }))
+
+      await expect(run(Safari.readBookmarks(path))).rejects.toThrow("Bookmark separators are not supported")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // -- applyPatches --

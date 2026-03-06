@@ -11,6 +11,7 @@
 
 import { Data, DateTime, Effect, HashMap, Option, pipe } from "effect"
 import { BookmarkFolder, BookmarkLeaf, BookmarkNode, BookmarkSection, BookmarkTree } from "./schema/__.js"
+import { collectDuplicateUrlIssues, UnsupportedBookmarks } from "./unsupported.js"
 
 // -- Patch types (Data.TaggedEnum) --
 
@@ -110,10 +111,27 @@ export const fromTrie = (trie: BookmarkTrie): BookmarkTree => toTrie(trie)
 export const generatePatches = (
   lastSync: BookmarkTree,
   current: BookmarkTree,
-  _source: string,
+  currentSource: string,
   dates?: HashMap.HashMap<string, DateTime.Utc>,
+  lastSyncSource = "existing state",
 ): Effect.Effect<readonly BookmarkPatch[], Error> =>
   Effect.gen(function* () {
+    const lastSyncIssues = collectDuplicateUrlIssues(lastSync)
+    if (lastSyncIssues.length > 0) {
+      return yield* Effect.fail(new UnsupportedBookmarks({
+        source: lastSyncSource,
+        issues: lastSyncIssues,
+      }))
+    }
+
+    const currentIssues = collectDuplicateUrlIssues(current)
+    if (currentIssues.length > 0) {
+      return yield* Effect.fail(new UnsupportedBookmarks({
+        source: currentSource,
+        issues: currentIssues,
+      }))
+    }
+
     const now = yield* DateTime.now
     const { index: lastIndex } = flatten(lastSync)
     const { index: currentIndex } = flatten(current)
