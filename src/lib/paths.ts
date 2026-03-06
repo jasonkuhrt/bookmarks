@@ -1,29 +1,38 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-export const defaultBookmarksDir = (): string =>
-  process.env["BOOKMARKS_DIR"] ?? join(homedir(), ".bookmarks")
+const defaultXdgConfigHome = (): string =>
+  process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config")
+
+const defaultXdgStateHome = (): string =>
+  process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state")
+
+export const defaultConfigDir = (): string =>
+  process.env["BOOKMARKS_CONFIG_DIR"] ?? join(defaultXdgConfigHome(), "bookmarks")
+
+export const defaultStateDir = (): string =>
+  process.env["BOOKMARKS_STATE_DIR"] ?? join(defaultXdgStateHome(), "bookmarks")
 
 export const defaultYamlPath = (): string =>
-  process.env["BOOKMARKS_YAML_PATH"] ?? join(defaultBookmarksDir(), "bookmarks.yaml")
+  process.env["BOOKMARKS_YAML_PATH"] ?? join(defaultConfigDir(), "bookmarks.yaml")
 
 export const defaultSchemaPath = (): string =>
-  process.env["BOOKMARKS_SCHEMA_PATH"] ?? join(defaultBookmarksDir(), "bookmarks.schema.json")
+  process.env["BOOKMARKS_SCHEMA_PATH"] ?? join(defaultConfigDir(), "bookmarks.schema.json")
 
 export const defaultWorkspacePath = (): string =>
-  process.env["BOOKMARKS_WORKSPACE_PATH"] ?? join(defaultBookmarksDir(), "workspace.yaml")
+  process.env["BOOKMARKS_WORKSPACE_PATH"] ?? join(defaultStateDir(), "workspace.yaml")
 
 export const defaultImportLockPath = (): string =>
-  process.env["BOOKMARKS_IMPORT_LOCK_PATH"] ?? join(defaultBookmarksDir(), "import.lock.json")
+  process.env["BOOKMARKS_IMPORT_LOCK_PATH"] ?? join(defaultStateDir(), "import.lock.json")
 
 export const defaultPublishPlanPath = (): string =>
-  process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] ?? join(defaultBookmarksDir(), "publish.plan.json")
+  process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] ?? join(defaultStateDir(), "publish.plan.json")
 
 export const defaultBackupDir = (): string =>
-  process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultBookmarksDir(), "backups")
+  process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultStateDir(), "backups")
 
 export const defaultRuntimeDir = (): string =>
-  process.env["BOOKMARKS_RUNTIME_DIR"] ?? join(defaultBookmarksDir(), "runtime")
+  process.env["BOOKMARKS_RUNTIME_DIR"] ?? join(defaultStateDir(), "runtime")
 
 export const defaultSyncLockPath = (): string =>
   join(defaultRuntimeDir(), "sync.lock.json")
@@ -34,5 +43,8 @@ export const defaultSyncQueuePath = (): string =>
 export const defaultSafariPlistPath = (): string =>
   join(homedir(), "Library/Safari/Bookmarks.plist")
 
+export const defaultChromeDataDir = (): string =>
+  join(homedir(), "Library/Application Support/Google/Chrome")
+
 export const defaultChromeBookmarksPath = (): string =>
-  join(homedir(), "Library/Application Support/Google/Chrome/Default/Bookmarks")
+  join(defaultChromeDataDir(), "Default", "Bookmarks")

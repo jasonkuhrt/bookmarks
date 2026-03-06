@@ -258,7 +258,7 @@ describe("bookmarks CLI", () => {
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
 
-      const imported = await runCommand(dir, [process.execPath, cliPath, "import", "--json"], cliEnv)
+      const imported = await runCommand(dir, [process.execPath, cliPath, "import", "chrome/default", "--json"], cliEnv)
       expect(imported.exitCode).toBe(0)
       const parsedImport = JSON.parse(imported.stdout) as {
         readonly targets: readonly string[]

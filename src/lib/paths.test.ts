@@ -4,7 +4,10 @@ import { join } from "node:path"
 import * as Paths from "./paths.js"
 
 const ENV_KEYS = [
-  "BOOKMARKS_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_STATE_HOME",
+  "BOOKMARKS_CONFIG_DIR",
+  "BOOKMARKS_STATE_DIR",
   "BOOKMARKS_YAML_PATH",
   "BOOKMARKS_SCHEMA_PATH",
   "BOOKMARKS_WORKSPACE_PATH",
@@ -30,23 +33,50 @@ afterEach(() => {
 })
 
 describe("paths", () => {
-  test("defaults to ~/.bookmarks", () => {
+  test("defaults to XDG config and state directories", () => {
     for (const key of ENV_KEYS) delete process.env[key]
 
-    expect(Paths.defaultBookmarksDir()).toBe(join(homedir(), ".bookmarks"))
-    expect(Paths.defaultYamlPath()).toBe(join(homedir(), ".bookmarks", "bookmarks.yaml"))
-    expect(Paths.defaultSchemaPath()).toBe(join(homedir(), ".bookmarks", "bookmarks.schema.json"))
-    expect(Paths.defaultWorkspacePath()).toBe(join(homedir(), ".bookmarks", "workspace.yaml"))
-    expect(Paths.defaultImportLockPath()).toBe(join(homedir(), ".bookmarks", "import.lock.json"))
-    expect(Paths.defaultPublishPlanPath()).toBe(join(homedir(), ".bookmarks", "publish.plan.json"))
-    expect(Paths.defaultBackupDir()).toBe(join(homedir(), ".bookmarks", "backups"))
-    expect(Paths.defaultRuntimeDir()).toBe(join(homedir(), ".bookmarks", "runtime"))
-    expect(Paths.defaultSyncLockPath()).toBe(join(homedir(), ".bookmarks", "runtime", "sync.lock.json"))
-    expect(Paths.defaultSyncQueuePath()).toBe(join(homedir(), ".bookmarks", "runtime", "sync.queue.json"))
+    expect(Paths.defaultConfigDir()).toBe(join(homedir(), ".config", "bookmarks"))
+    expect(Paths.defaultStateDir()).toBe(join(homedir(), ".local", "state", "bookmarks"))
+    expect(Paths.defaultYamlPath()).toBe(join(homedir(), ".config", "bookmarks", "bookmarks.yaml"))
+    expect(Paths.defaultSchemaPath()).toBe(join(homedir(), ".config", "bookmarks", "bookmarks.schema.json"))
+    expect(Paths.defaultWorkspacePath()).toBe(join(homedir(), ".local", "state", "bookmarks", "workspace.yaml"))
+    expect(Paths.defaultImportLockPath()).toBe(join(homedir(), ".local", "state", "bookmarks", "import.lock.json"))
+    expect(Paths.defaultPublishPlanPath()).toBe(join(homedir(), ".local", "state", "bookmarks", "publish.plan.json"))
+    expect(Paths.defaultBackupDir()).toBe(join(homedir(), ".local", "state", "bookmarks", "backups"))
+    expect(Paths.defaultRuntimeDir()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime"))
+    expect(Paths.defaultSyncLockPath()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.lock.json"))
+    expect(Paths.defaultSyncQueuePath()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.queue.json"))
+    expect(Paths.defaultChromeDataDir()).toBe(join(homedir(), "Library/Application Support/Google/Chrome"))
+    expect(Paths.defaultChromeBookmarksPath()).toBe(join(homedir(), "Library/Application Support/Google/Chrome", "Default", "Bookmarks"))
   })
 
-  test("explicit env vars override derived paths", () => {
-    process.env["BOOKMARKS_DIR"] = "/tmp/bookmarks"
+  test("config and state dir env vars override derived paths", () => {
+    process.env["BOOKMARKS_CONFIG_DIR"] = "/tmp/bookmarks-config"
+    process.env["BOOKMARKS_STATE_DIR"] = "/tmp/bookmarks-state"
+
+    expect(Paths.defaultConfigDir()).toBe("/tmp/bookmarks-config")
+    expect(Paths.defaultStateDir()).toBe("/tmp/bookmarks-state")
+    expect(Paths.defaultYamlPath()).toBe("/tmp/bookmarks-config/bookmarks.yaml")
+    expect(Paths.defaultSchemaPath()).toBe("/tmp/bookmarks-config/bookmarks.schema.json")
+    expect(Paths.defaultWorkspacePath()).toBe("/tmp/bookmarks-state/workspace.yaml")
+    expect(Paths.defaultImportLockPath()).toBe("/tmp/bookmarks-state/import.lock.json")
+    expect(Paths.defaultPublishPlanPath()).toBe("/tmp/bookmarks-state/publish.plan.json")
+    expect(Paths.defaultBackupDir()).toBe("/tmp/bookmarks-state/backups")
+    expect(Paths.defaultRuntimeDir()).toBe("/tmp/bookmarks-state/runtime")
+    expect(Paths.defaultSyncLockPath()).toBe("/tmp/bookmarks-state/runtime/sync.lock.json")
+    expect(Paths.defaultSyncQueuePath()).toBe("/tmp/bookmarks-state/runtime/sync.queue.json")
+  })
+
+  test("XDG home env vars feed the default bookmarks directories", () => {
+    process.env["XDG_CONFIG_HOME"] = "/tmp/xdg-config"
+    process.env["XDG_STATE_HOME"] = "/tmp/xdg-state"
+
+    expect(Paths.defaultConfigDir()).toBe("/tmp/xdg-config/bookmarks")
+    expect(Paths.defaultStateDir()).toBe("/tmp/xdg-state/bookmarks")
+  })
+
+  test("file-specific env vars override derived paths", () => {
     process.env["BOOKMARKS_YAML_PATH"] = "/tmp/custom.yaml"
     process.env["BOOKMARKS_SCHEMA_PATH"] = "/tmp/custom.schema.json"
     process.env["BOOKMARKS_WORKSPACE_PATH"] = "/tmp/workspace.yaml"
@@ -55,7 +85,6 @@ describe("paths", () => {
     process.env["BOOKMARKS_BACKUP_DIR"] = "/tmp/custom-backups"
     process.env["BOOKMARKS_RUNTIME_DIR"] = "/tmp/custom-runtime"
 
-    expect(Paths.defaultBookmarksDir()).toBe("/tmp/bookmarks")
     expect(Paths.defaultYamlPath()).toBe("/tmp/custom.yaml")
     expect(Paths.defaultSchemaPath()).toBe("/tmp/custom.schema.json")
     expect(Paths.defaultWorkspacePath()).toBe("/tmp/workspace.yaml")

@@ -1,5 +1,6 @@
 import { Data, DateTime, Effect } from "effect"
 import * as Fs from "node:fs/promises"
+import * as ManagedPaths from "./managed-paths.js"
 import * as Paths from "./paths.js"
 
 export type SyncOperation = "gc" | "pull" | "push" | "sync"
@@ -60,10 +61,7 @@ const hasCode = (error: unknown, code: string): boolean =>
   && error.code === code
 
 const ensureRuntimeDir = (): Effect.Effect<void, Error> =>
-  Effect.tryPromise({
-    try: () => Fs.mkdir(Paths.defaultRuntimeDir(), { recursive: true }),
-    catch: (e) => new Error(`Failed to create runtime directory ${Paths.defaultRuntimeDir()}: ${e}`),
-  })
+  ManagedPaths.ensureDir(Paths.defaultRuntimeDir())
 
 const clearFile = (path: string): Effect.Effect<void> =>
   Effect.tryPromise({

@@ -11,6 +11,7 @@ import { execFile } from "node:child_process"
 import * as Fs from "node:fs/promises"
 import * as Path from "node:path"
 import * as Yaml from "yaml"
+import * as ManagedPaths from "./managed-paths.js"
 import * as Paths from "./paths.js"
 import * as Graveyard from "./graveyard.js"
 import * as Orchestration from "./orchestration.js"
@@ -1000,10 +1001,7 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
     const files: string[] = []
     const skipped: string[] = []
 
-    yield* Effect.tryPromise({
-      try: () => Fs.mkdir(backupDir, { recursive: true }),
-      catch: (e) => new Error(`Failed to create backup directory ${backupDir}: ${e}`),
-    })
+    yield* ManagedPaths.ensureDir(backupDir)
 
     const candidates = [
       { label: "yaml", path: config.yamlPath, filename: `${timestamp}--bookmarks.yaml` },

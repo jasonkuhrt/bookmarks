@@ -4,6 +4,7 @@ import * as Path from "node:path"
 import { DateTime, Effect, Schema } from "effect"
 import * as Yaml from "yaml"
 import * as Chrome from "./chrome.js"
+import * as ManagedPaths from "./managed-paths.js"
 import * as Patch from "./patch.js"
 import * as Paths from "./paths.js"
 import * as Permissions from "./permissions.js"
@@ -72,9 +73,12 @@ const readJsonFile = <A>(path: string): Effect.Effect<A, Error> =>
   })
 
 const writeJsonFile = (path: string, value: unknown): Effect.Effect<void, Error> =>
-  Effect.tryPromise({
-    try: () => Fs.writeFile(path, JSON.stringify(value, null, 2), "utf-8"),
-    catch: (e) => new Error(`Failed to write ${path}: ${e}`),
+  Effect.gen(function* () {
+    yield* ManagedPaths.ensureParentDir(path)
+    yield* Effect.tryPromise({
+      try: () => Fs.writeFile(path, JSON.stringify(value, null, 2), "utf-8"),
+      catch: (e) => new Error(`Failed to write ${path}: ${e}`),
+    })
   })
 
 const sanitizeTree = (tree: WorkspaceTree): WorkspaceTree => {
@@ -156,11 +160,9 @@ export const save = (path: string, workspace: WorkspaceFile): Effect.Effect<void
       Effect.mapError((e) => new Error(`Failed to encode workspace: ${e.message}`)),
     )
     const yaml = WORKSPACE_MODELINE + Yaml.stringify(encoded, { indent: 2 })
+    yield* ManagedPaths.ensureParentDir(path)
     yield* Effect.tryPromise({
-      try: async () => {
-        await Fs.mkdir(Path.dirname(path), { recursive: true })
-        await Fs.writeFile(path, yaml, "utf-8")
-      },
+      try: () => Fs.writeFile(path, yaml, "utf-8"),
       catch: (e) => new Error(`Failed to write ${path}: ${e}`),
     })
   })
@@ -169,25 +171,13 @@ export const loadImportLock = (path = Paths.defaultImportLockPath()): Effect.Eff
   readJsonFile<ImportLock>(path)
 
 const saveImportLock = (path: string, value: ImportLock): Effect.Effect<void, Error> =>
-  Effect.gen(function* () {
-    yield* Effect.tryPromise({
-      try: () => Fs.mkdir(Path.dirname(path), { recursive: true }),
-      catch: (e) => new Error(`Failed to create directory for ${path}: ${e}`),
-    })
-    yield* writeJsonFile(path, value)
-  })
+  writeJsonFile(path, value)
 
 export const loadPlan = (path = Paths.defaultPublishPlanPath()): Effect.Effect<WorkspacePlan, Error> =>
   readJsonFile<WorkspacePlan>(path)
 
 const savePlan = (path: string, value: WorkspacePlan): Effect.Effect<void, Error> =>
-  Effect.gen(function* () {
-    yield* Effect.tryPromise({
-      try: () => Fs.mkdir(Path.dirname(path), { recursive: true }),
-      catch: (e) => new Error(`Failed to create directory for ${path}: ${e}`),
-    })
-    yield* writeJsonFile(path, value)
-  })
+  writeJsonFile(path, value)
 
 const backupArtifacts = (
   label: string,
@@ -201,10 +191,7 @@ const backupArtifacts = (
     const files: string[] = []
     const skipped: string[] = []
 
-    yield* Effect.tryPromise({
-      try: () => Fs.mkdir(backupDir, { recursive: true }),
-      catch: (e) => new Error(`Failed to create backup directory ${backupDir}: ${e}`),
-    })
+    yield* ManagedPaths.ensureDir(backupDir)
 
     for (const candidate of candidates) {
       const candidateExists = yield* exists(candidate.path)
@@ -253,86 +240,52 @@ const loadOptionalYamlTargets = (): Effect.Effect<Readonly<Record<string, Worksp
     return targets
   }).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
 
-const loadDefaultTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
-  Effect.gen(function* () {
-    const targets: Record<string, WorkspaceTarget> = {}
-    const safariPath = Paths.defaultSafariPlistPath()
-    if (yield* exists(safariPath)) {
-      targets["safari/default"] = {
-        browser: "safari",
-        profile: "default",
-        path: safariPath,
-        enabled: true,
-      }
-    }
+const discoverTargets = (): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
+  Targets.discoverTargets().pipe(
+    Effect.map((targets) =>
+      Object.fromEntries(
+        targets.map((target) => [
+          Targets.keyOf(target),
+          {
+            browser: target.browser,
+            profile: target.profile,
+            path: target.path,
+            enabled: target.enabled,
+          } satisfies WorkspaceTarget,
+        ]),
+      ),
+    ),
+  )
 
-    const chromePath = Paths.defaultChromeBookmarksPath()
-    if (yield* exists(chromePath)) {
-      targets["chrome/default"] = {
-        browser: "chrome",
-        profile: "default",
-        path: chromePath,
-        enabled: true,
-      }
-    }
-
-    return targets
-  })
-
-const defaultTargetFor = (targetId: string): WorkspaceTarget | undefined => {
-  const [browser, profile] = targetId.split("/")
-  if (profile !== "default") return undefined
-  switch (browser) {
-    case "safari":
-      return {
-        browser,
-        profile,
-        path: Paths.defaultSafariPlistPath(),
-        enabled: true,
-      }
-    case "chrome":
-      return {
-        browser,
-        profile,
-        path: Paths.defaultChromeBookmarksPath(),
-        enabled: true,
-      }
-    default:
-      return undefined
-  }
-}
+const mergeTargetRegistries = (
+  ...registries: ReadonlyArray<Readonly<Record<string, WorkspaceTarget>> | undefined>
+): Readonly<Record<string, WorkspaceTarget>> =>
+  Object.assign({}, ...registries.filter((registry): registry is Readonly<Record<string, WorkspaceTarget>> => registry !== undefined))
 
 const resolveTargets = (requestedTargetIds: readonly string[]): Effect.Effect<Readonly<Record<string, WorkspaceTarget>>, Error> =>
   Effect.gen(function* () {
-    const registry = (yield* loadOptionalWorkspaceTargets())
-      ?? (yield* loadOptionalYamlTargets())
-      ?? (yield* loadDefaultTargets())
+    const discoveredTargets = yield* discoverTargets()
+    const yamlTargets = yield* loadOptionalYamlTargets()
+    const workspaceTargets = yield* loadOptionalWorkspaceTargets()
+    const registry = mergeTargetRegistries(discoveredTargets, yamlTargets, workspaceTargets)
 
-    if (requestedTargetIds.length === 0) {
-      if (Object.keys(registry).length === 0) {
-        return yield* Effect.fail(new Error(
-          "No configured targets found. Add targets to bookmarks.yaml or run `bookmarks import safari/default chrome/default` with available browser files.",
-        ))
-      }
-      return registry
+    if (Object.keys(registry).length === 0) {
+      return yield* Effect.fail(new Error(
+        "No bookmark targets were discovered or configured. Install a supported browser profile or add explicit targets to bookmarks.yaml.",
+      ))
     }
 
-    const next: Record<string, WorkspaceTarget> = {}
-    for (const targetId of requestedTargetIds) {
-      const known = registry[targetId]
-      if (known) {
-        next[targetId] = known
-        continue
-      }
+    const resolvedDescriptors = yield* Targets.resolveTargetSelectors(
+      Object.values(registry).map(targetToDescriptor),
+      requestedTargetIds,
+    )
 
-      const fallback = defaultTargetFor(targetId)
-      if (!fallback) {
-        return yield* Effect.fail(new Error(`Unknown target ${targetId}`))
-      }
-      next[targetId] = fallback
-    }
-
-    return next
+    return Object.fromEntries(
+      resolvedDescriptors.map((descriptor) => {
+        const key = Targets.keyOf(descriptor)
+        return [key, registry[key]!]
+      }),
+    )
   })
 
 const importTarget = (
@@ -510,6 +463,7 @@ const buildPlan = (
   workspace: WorkspaceFile,
   workspacePath: string,
   workspaceHashValue: string,
+  requestedTargetIds: readonly string[],
 ): Effect.Effect<{ readonly plan: WorkspacePlan; readonly canonicalTree: BookmarkTree }, Error> =>
   Effect.gen(function* () {
     const blockers: WorkspacePlanBlocker[] = []
@@ -532,8 +486,15 @@ const buildPlan = (
     const converted = convertTreeForPublish(workspace.canonical)
     blockers.push(...converted.blockers)
 
+    const selectedTargets = yield* Targets.resolveTargetSelectors(
+      Object.values(workspace.targets).map(targetToDescriptor),
+      requestedTargetIds,
+    )
+
     const targets: WorkspacePlanTarget[] = []
-    for (const [targetId, target] of Object.entries(workspace.targets)) {
+    for (const descriptor of selectedTargets) {
+      const targetId = Targets.keyOf(descriptor)
+      const target = workspace.targets[targetId]!
       const targetBlockers: WorkspacePlanBlocker[] = []
       const targetEnabled = target.enabled ?? true
       if ((target.enabled ?? true) && !(yield* exists(target.path))) {
@@ -598,6 +559,9 @@ const buildPlan = (
   })
 
 export const plan = (): Effect.Effect<WorkspacePlan, Error> =>
+  planFor([])
+
+export const planFor = (requestedTargetIds: readonly string[]): Effect.Effect<WorkspacePlan, Error> =>
   Effect.gen(function* () {
     const { workspacePath, importLockPath, planPath } = workspaceFiles()
     const rawWorkspace = yield* Effect.tryPromise({
@@ -610,7 +574,7 @@ export const plan = (): Effect.Effect<WorkspacePlan, Error> =>
     if (!valid) {
       return yield* Effect.fail(new Error(errors.join("\n")))
     }
-    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace))
+    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace), requestedTargetIds)
     yield* savePlan(planPath, built.plan)
     return built.plan
   })
@@ -627,6 +591,9 @@ const plansEqual = (
   })
 
 export const publish = (): Effect.Effect<WorkspacePublishResult, Error> =>
+  publishTo([])
+
+export const publishTo = (requestedTargetIds: readonly string[]): Effect.Effect<WorkspacePublishResult, Error> =>
   Effect.gen(function* () {
     const { workspacePath, importLockPath, planPath } = workspaceFiles()
     const rawWorkspace = yield* Effect.tryPromise({
@@ -640,7 +607,7 @@ export const publish = (): Effect.Effect<WorkspacePublishResult, Error> =>
       return yield* Effect.fail(new Error(validation.errors.join("\n")))
     }
 
-    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace))
+    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace), requestedTargetIds)
     if (built.plan.blockers.length > 0) {
       return yield* Effect.fail(new Error(built.plan.blockers.map((blocker) => blocker.message).join("\n")))
     }
@@ -798,7 +765,7 @@ export const next = (): Effect.Effect<WorkspaceNextResult, Error> =>
       }
     }
 
-    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace))
+    const built = yield* buildPlan(workspace, workspacePath, workspaceHash(rawWorkspace), [])
     const planExists = yield* exists(planPath)
     const savedPlan = planExists
       ? yield* loadPlan(planPath).pipe(Effect.catchAll(() => Effect.succeed(undefined)))

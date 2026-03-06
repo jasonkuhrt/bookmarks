@@ -21,7 +21,7 @@
  */
 
 import { Cause, Console, Data, DateTime, Duration, Effect, Exit, LogLevel, Logger, Option } from "effect"
-import { access, mkdir, readFile, writeFile } from "node:fs/promises"
+import { access, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { BookmarkPatch } from "../lib/patch.js"
 
@@ -32,6 +32,7 @@ class CliExitError extends Data.TaggedError("CliExitError")<{}> {
 }
 import * as Daemon from "../lib/daemon.js"
 import * as Doctor from "../lib/doctor.js"
+import * as ManagedPaths from "../lib/managed-paths.js"
 import * as Paths from "../lib/paths.js"
 import * as SyncModule from "../lib/sync.js"
 import { UnsupportedBookmarks } from "../lib/unsupported.js"
@@ -117,14 +118,8 @@ const ensureManagedFiles = (yamlPath: string): Effect.Effect<{ readonly yamlPath
   Effect.gen(function* () {
     const schemaPath = resolveManagedSchemaPath(yamlPath)
 
-    yield* Effect.tryPromise({
-      try: () => mkdir(dirname(yamlPath), { recursive: true }),
-      catch: (e) => new Error(`Failed to create config directory for ${yamlPath}: ${e}`),
-    })
-    yield* Effect.tryPromise({
-      try: () => mkdir(dirname(schemaPath), { recursive: true }),
-      catch: (e) => new Error(`Failed to create schema directory for ${schemaPath}: ${e}`),
-    })
+    yield* ManagedPaths.ensureParentDir(yamlPath)
+    yield* ManagedPaths.ensureParentDir(schemaPath)
 
     const schema = yield* Effect.tryPromise({
       try: () => readFile(REPO_SCHEMA_PATH, "utf-8"),
@@ -461,7 +456,7 @@ const program = Effect.gen(function* () {
       break
     }
     case "plan": {
-      const workspacePlan = yield* Workspace.plan()
+      const workspacePlan = yield* Workspace.planFor(positional)
       if (flags.json) {
         yield* printJson(workspacePlan)
       } else {
@@ -473,7 +468,7 @@ const program = Effect.gen(function* () {
       break
     }
     case "publish": {
-      const publishResult = yield* Workspace.publish()
+      const publishResult = yield* Workspace.publishTo(positional)
       if (flags.json) {
         yield* printJson(publishResult)
       } else {

@@ -1,6 +1,6 @@
 # bookmarks
 
-Cross-browser bookmark sync driven by editable files under `~/.bookmarks/`.
+Cross-browser bookmark sync driven by durable config under `~/.config/bookmarks/` and workflow state under `~/.local/state/bookmarks/`.
 
 The repo is the product. The normal workflow is to clone it locally, run the CLI from the clone, and optionally install the `bookmarks` launcher globally so it points back at your working tree.
 
@@ -35,21 +35,24 @@ bun run bookmarks -- status
 
 ## Managed Files
 
-The CLI manages a config directory at `~/.bookmarks/` by default.
+The CLI manages separate config and state roots by default:
+
+- config: `~/.config/bookmarks/`
+- state: `~/.local/state/bookmarks/`
 
 Important paths:
 
-- `~/.bookmarks/bookmarks.yaml`
-- `~/.bookmarks/bookmarks.schema.json`
-- `~/.bookmarks/workspace.yaml`
-- `~/.bookmarks/import.lock.json`
-- `~/.bookmarks/publish.plan.json`
-- `~/.bookmarks/backups/`
-- `~/.bookmarks/runtime/`
+- `~/.config/bookmarks/bookmarks.yaml`
+- `~/.config/bookmarks/bookmarks.schema.json`
+- `~/.local/state/bookmarks/workspace.yaml`
+- `~/.local/state/bookmarks/import.lock.json`
+- `~/.local/state/bookmarks/publish.plan.json`
+- `~/.local/state/bookmarks/backups/`
+- `~/.local/state/bookmarks/runtime/`
 
 Relevant commands now bootstrap what they can safely bootstrap:
 
-- they create the managed config directory if it does not exist
+- they create the managed config and state directories if they do not exist
 - they mirror the repo JSON schema into the managed schema path
 - write commands create `bookmarks.yaml` when they first save it
 - workspace commands create `workspace.yaml`, `import.lock.json`, and `publish.plan.json` as needed
@@ -87,7 +90,7 @@ The default workflow is file-first and agent-friendly:
 ```bash
 bookmarks next
 bookmarks import
-$EDITOR ~/.bookmarks/workspace.yaml
+$EDITOR ~/.local/state/bookmarks/workspace.yaml
 bookmarks validate
 bookmarks plan
 bookmarks publish
@@ -129,7 +132,7 @@ Notes:
 - `next` supports `--json` for agents and scripts.
 - `status` shows pending changes in both directions and now includes patch previews.
 - `push`, `pull`, and `sync` support `--dry-run` and `--json`.
-- non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.bookmarks/backups/` before they attempt writes.
+- non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
 - the explicit `bookmarks backup` command is still available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
 - runtime orchestration serializes active sync runs and queues temporary browser-open blockers instead of forcing manual retry loops.

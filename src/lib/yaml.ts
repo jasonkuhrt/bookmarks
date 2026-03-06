@@ -8,6 +8,7 @@
 import { Effect, Schema } from "effect"
 import * as Yaml from "yaml"
 import * as Fs from "node:fs/promises"
+import * as ManagedPaths from "./managed-paths.js"
 import { BookmarkSection, BookmarkTree, BookmarksConfig } from "./schema/__.js"
 
 /** Load and validate bookmarks.yaml from the given path. */
@@ -35,6 +36,7 @@ export const save = (path: string, config: BookmarksConfig): Effect.Effect<void,
       Effect.mapError((e) => new Error(`Schema encoding failed: ${e.message}`)),
     )
     const yamlStr = SCHEMA_MODELINE + Yaml.stringify(encoded, { indent: 2 })
+    yield* ManagedPaths.ensureParentDir(path)
     yield* Effect.tryPromise({
       try: () => Fs.writeFile(path, yamlStr, "utf-8"),
       catch: (e) => new Error(`Failed to write ${path}: ${e}`),

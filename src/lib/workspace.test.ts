@@ -9,7 +9,10 @@ import * as Workspace from "./workspace.js"
 import * as YamlModule from "./yaml.js"
 
 const ENV_KEYS = [
-  "BOOKMARKS_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_STATE_HOME",
+  "BOOKMARKS_CONFIG_DIR",
+  "BOOKMARKS_STATE_DIR",
   "BOOKMARKS_YAML_PATH",
   "BOOKMARKS_WORKSPACE_PATH",
   "BOOKMARKS_IMPORT_LOCK_PATH",
@@ -147,7 +150,7 @@ describe("workspace workflow", () => {
     const env = await setupWorkspaceEnv()
 
     try {
-      const imported = await run(Workspace.importState([]))
+      const imported = await run(Workspace.importState(["chrome/default"]))
       expect(imported.workspacePath).toBe(env.workspacePath)
       expect(imported.importLockPath).toBe(env.importLockPath)
       expect(imported.targets).toEqual(["chrome/default"])
@@ -174,7 +177,7 @@ describe("workspace workflow", () => {
     const env = await setupWorkspaceEnv()
 
     try {
-      await run(Workspace.importState([]))
+      await run(Workspace.importState(["chrome/default"]))
 
       const workspace = await run(Workspace.load(env.workspacePath))
       const importedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
