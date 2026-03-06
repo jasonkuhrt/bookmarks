@@ -40,6 +40,7 @@ describe("bookmarks CLI", () => {
   test("status and sync --dry-run work against temp git repos and fixture browser files", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-"))
     const yamlPath = join(dir, "bookmarks.yaml")
+    const schemaPath = join(dir, "bookmarks.schema.json")
     const chromePath = join(dir, "Chrome-Bookmarks.json")
 
     try {
@@ -74,11 +75,44 @@ describe("bookmarks CLI", () => {
       expect(status.stdout).toContain("chrome/default")
       expect(status.stdout).toContain("pending -> browser:")
       expect(status.stdout).toContain("pending -> yaml:")
+      expect(status.stdout).toContain('Add "Top Link"')
+
+      const statusJson = await runCommand(dir, [process.execPath, cliPath, "status", "--json"], cliEnv)
+      expect(statusJson.exitCode).toBe(0)
+      const parsedStatus = JSON.parse(statusJson.stdout) as {
+        readonly yamlPath: string
+        readonly targets: Array<{
+          readonly target: { readonly browser: string; readonly profile: string }
+          readonly pendingToYaml: readonly unknown[]
+        }>
+      }
+      expect(parsedStatus.yamlPath).toBe(yamlPath)
+      expect(parsedStatus.targets[0]?.target.browser).toBe("chrome")
+      expect(parsedStatus.targets[0]?.pendingToYaml.length).toBeGreaterThan(0)
 
       const sync = await runCommand(dir, [process.execPath, cliPath, "sync", "--dry-run"], cliEnv)
       expect(sync.exitCode).toBe(0)
       expect(sync.stdout).toContain("Sync complete")
       expect(sync.stdout).toContain("chrome/default")
+      expect(sync.stdout).toContain('Add "Top Link"')
+
+      const syncJson = await runCommand(dir, [process.execPath, cliPath, "sync", "--dry-run", "--json"], cliEnv)
+      expect(syncJson.exitCode).toBe(0)
+      const parsedSync = JSON.parse(syncJson.stdout) as {
+        readonly command: string
+        readonly dryRun: boolean
+        readonly preview: {
+          readonly targets: Array<{
+            readonly pendingToYaml: readonly unknown[]
+          }>
+        } | null
+      }
+      expect(parsedSync.command).toBe("sync")
+      expect(parsedSync.dryRun).toBe(true)
+      expect(parsedSync.preview?.targets[0]?.pendingToYaml.length).toBeGreaterThan(0)
+
+      const schema = await readFile(schemaPath, "utf-8")
+      expect(schema).toContain('"$schema"')
 
       const yamlAfter = await readFile(yamlPath, "utf-8")
       expect(yamlAfter).toContain("https://docs.example")

@@ -3,6 +3,15 @@ set shell := ["zsh", "-eu", "-o", "pipefail", "-c"]
 default:
   @just --list
 
+install:
+  bun install
+
+install-global:
+  bun install -g .
+
+schema:
+  bun run generate:json-schema
+
 lint:
   bun run lint
 
