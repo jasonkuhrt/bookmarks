@@ -238,6 +238,7 @@ const serializeSyncResult = (
   graveyarded: result.graveyarded.map(serializePatch),
   targets: result.targets.map((targetResult) => ({
     target: targetResult.target,
+    writeMode: targetResult.writeMode ?? "patches",
     applied: targetResult.applied.map(serializePatch),
     graveyarded: targetResult.graveyarded.map(serializePatch),
   })),
@@ -275,7 +276,8 @@ const printSyncSummary = (
     for (const targetResult of result.targets) {
       yield* Console.log(
         `  ${targetResult.target.browser}/${targetResult.target.profile}: ` +
-          `${targetResult.applied.length} applied, ${targetResult.graveyarded.length} graveyarded`,
+          `${targetResult.applied.length} applied, ${targetResult.graveyarded.length} graveyarded` +
+          (targetResult.writeMode === "rewrite" ? ", exact structural rewrite" : ""),
       )
       if (options?.showDetails) {
         yield* printPatchPreview("apply", targetResult.applied)

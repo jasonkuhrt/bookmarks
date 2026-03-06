@@ -100,3 +100,19 @@ export const applyPatches = (
       )
   }
 }
+
+export const writeTree = (
+  target: TargetDescriptor,
+  tree: BookmarkTree,
+): Effect.Effect<void, Error> => {
+  switch (target.browser) {
+    case "safari":
+      return Safari.writeTree(target.path, tree)
+    case "chrome":
+      return Chrome.writeTree(target.path, tree)
+    default:
+      return Effect.fail(
+        new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
+      )
+  }
+}

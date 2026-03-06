@@ -297,7 +297,153 @@ export const applyPatches = (
     })
   })
 
+export const writeTree = (
+  bookmarksPath: string,
+  tree: BookmarkTree,
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const text = yield* Effect.tryPromise({
+      try: () => Bun.file(bookmarksPath).text(),
+      catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
+    })
+
+    const file = JSON.parse(text) as ChromeBookmarksFile
+    const { roots } = file
+    let nextId = findMaxId(roots) + 1
+    const existing = collectChromeNodes(roots)
+
+    roots.bookmark_bar.children = buildChromeChildren(
+      tree.favorites_bar,
+      "favorites_bar",
+      existing,
+      () => nextId++,
+    )
+    roots.other.children = buildChromeChildren(
+      tree.other,
+      "other",
+      existing,
+      () => nextId++,
+    )
+    roots.synced.children = buildChromeChildren(
+      tree.mobile,
+      "mobile",
+      existing,
+      () => nextId++,
+    )
+
+    file.checksum = calculateChecksum(roots)
+
+    const serialized = JSON.stringify(file, null, 3)
+    const tmpPath = `${bookmarksPath}.tmp.${Date.now()}`
+
+    yield* Effect.tryPromise({
+      try: async () => {
+        await Bun.write(tmpPath, serialized)
+        await rename(tmpPath, bookmarksPath)
+      },
+      catch: (cause) => new Error(`Failed to write Chrome bookmarks at ${bookmarksPath}`, { cause }),
+    })
+  })
+
 // -- Read path helpers (Schema-driven decoding) --
+
+interface ChromeNodeLookup {
+  readonly foldersByPath: Map<string, ChromeNode>
+  readonly leavesByUrl: Map<string, ChromeNode>
+}
+
+const collectChromeNodes = (roots: ChromeRoot): ChromeNodeLookup => {
+  const lookup: ChromeNodeLookup = {
+    foldersByPath: new Map(),
+    leavesByUrl: new Map(),
+  }
+
+  for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
+    const rootNode = roots[chromeKey as keyof ChromeRoot]
+    collectChromeChildren(rootNode.children ?? [], sectionKey, lookup)
+  }
+
+  return lookup
+}
+
+const collectChromeChildren = (
+  children: ChromeNode[],
+  parentPath: string,
+  lookup: ChromeNodeLookup,
+): void => {
+  for (const child of children) {
+    if (child.type === "url" && child.url) {
+      lookup.leavesByUrl.set(child.url, child)
+      continue
+    }
+
+    if (child.type === "folder") {
+      const folderPath = `${parentPath}/${child.name}`
+      lookup.foldersByPath.set(folderPath, child)
+      collectChromeChildren(child.children ?? [], folderPath, lookup)
+    }
+  }
+}
+
+const makeChromeLeaf = (leaf: BookmarkLeaf, allocateId: () => number): ChromeNode => {
+  const ts = nowChromeTimestamp()
+  return {
+    type: "url",
+    name: leaf.name,
+    url: leaf.url,
+    id: String(allocateId()),
+    guid: crypto.randomUUID(),
+    date_added: ts,
+    date_last_used: "0",
+  }
+}
+
+const makeChromeFolder = (name: string, allocateId: () => number): ChromeNode => {
+  const ts = nowChromeTimestamp()
+  return {
+    type: "folder",
+    name,
+    children: [],
+    id: String(allocateId()),
+    guid: crypto.randomUUID(),
+    date_added: ts,
+    date_modified: ts,
+    date_last_used: "0",
+  }
+}
+
+const buildChromeChildren = (
+  nodes: BookmarkSection | undefined,
+  parentPath: string,
+  lookup: ChromeNodeLookup,
+  allocateId: () => number,
+): ChromeNode[] =>
+  (nodes ?? []).map((node) => {
+    if (BookmarkLeaf.is(node)) {
+      const existing = lookup.leavesByUrl.get(node.url)
+      if (existing) {
+        existing.name = node.name
+        existing.url = node.url
+        lookup.leavesByUrl.delete(node.url)
+        return existing
+      }
+
+      return makeChromeLeaf(node, allocateId)
+    }
+
+    const folderPath = `${parentPath}/${node.name}`
+    const existing = lookup.foldersByPath.get(folderPath)
+    const folder = existing ?? makeChromeFolder(node.name, allocateId)
+    folder.name = node.name
+    folder.children = buildChromeChildren(
+      node.children as BookmarkSection,
+      folderPath,
+      lookup,
+      allocateId,
+    )
+    lookup.foldersByPath.delete(folderPath)
+    return folder
+  })
 
 const scanNodes = (children: ChromeNode[], path: string): BookmarkIssue[] => {
   const issues: BookmarkIssue[] = []

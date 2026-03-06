@@ -523,3 +523,38 @@ describe("applyPatches", () => {
     }
   })
 })
+
+describe("writeTree", () => {
+  test("writes structural changes exactly, including ordering and empty folders", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-tree-"))
+    const path = join(dir, "Bookmarks.json")
+
+    try {
+      await copyChromeBookmarksFixture(path)
+
+      const desired = BookmarkTree.make({
+        favorites_bar: [
+          BookmarkLeaf.make({ name: "Top Link", url: "https://top.example" }),
+          BookmarkFolder.make({ name: "Empty", children: [] }),
+          BookmarkFolder.make({
+            name: "Work",
+            children: [
+              BookmarkLeaf.make({ name: "Docs", url: "https://docs.example" }),
+            ],
+          }),
+          BookmarkLeaf.make({ name: "Move Me", url: "https://move.example" }),
+        ],
+        other: [
+          BookmarkLeaf.make({ name: "Other Link", url: "https://other.example" }),
+        ],
+      })
+
+      await run(Chrome.writeTree(path, desired))
+
+      const reread = await run(Chrome.readBookmarks(path))
+      expect(reread).toEqual(desired)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

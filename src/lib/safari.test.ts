@@ -340,3 +340,44 @@ describe("applyPatches", () => {
     }
   })
 })
+
+describe("writeTree", () => {
+  test("writes structural changes exactly, including ordering and empty folders", async () => {
+    const { dir, path } = await setupFixture()
+
+    try {
+      const desired = BookmarkTree.make({
+        favorites_bar: [
+          BookmarkLeaf.make({ name: "Top Link", url: "https://top.example" }),
+          BookmarkFolder.make({
+            name: "Favorites Folder",
+            children: [
+              BookmarkLeaf.make({ name: "Docs", url: "https://docs.example" }),
+            ],
+          }),
+          BookmarkFolder.make({ name: "Empty", children: [] }),
+        ],
+        other: [
+          BookmarkLeaf.make({ name: "Menu Link", url: "https://menu.example" }),
+          BookmarkFolder.make({
+            name: "Loose Folder",
+            children: [
+              BookmarkLeaf.make({ name: "Loose Folder Link", url: "https://loose-folder.example" }),
+            ],
+          }),
+          BookmarkLeaf.make({ name: "Loose Leaf", url: "https://loose.example" }),
+        ],
+        reading_list: [
+          BookmarkLeaf.make({ name: "Reading Item", url: "https://reading.example" }),
+        ],
+      })
+
+      await run(Safari.writeTree(path, desired))
+
+      const reread = await run(Safari.readBookmarks(path))
+      expect(reread).toEqual(desired)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

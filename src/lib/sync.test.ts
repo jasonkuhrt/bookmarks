@@ -3,6 +3,7 @@ import { DateTime, Effect } from "effect"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import * as Chrome from "./chrome.js"
 import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, TargetProfile } from "./schema/__.js"
 import * as Patch from "./patch.js"
 import * as Sync from "./sync.js"
@@ -419,7 +420,7 @@ describe("decomposeResolvedTrees", () => {
 })
 
 describe("push", () => {
-  test("refuses structural-only YAML changes that cannot be projected exactly", async () => {
+  test("projects structural-only YAML changes exactly through a target rewrite", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-"))
     const chromePath = join(dir, "Bookmarks")
 
@@ -434,18 +435,21 @@ describe("push", () => {
         },
         base: new BookmarkTree({
           favorites_bar: [
+            leaf("Last", "https://last.example"),
             leaf("First", "https://first.example"),
             folder("Empty", []),
-            leaf("Last", "https://last.example"),
           ],
         }),
       })
 
-      await expect(run(Sync.push({
+      const result = await run(Sync.push({
         yamlPath: join(dir, "bookmarks.yaml"),
         yamlOverride: config,
-        dryRun: true,
-      }))).rejects.toThrow("Cannot safely push structural bookmark changes")
+      }))
+
+      expect(result.targets[0]?.writeMode).toBe("rewrite")
+      const browserTree = await run(Chrome.readBookmarks(chromePath))
+      expect(browserTree).toEqual(config.base)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

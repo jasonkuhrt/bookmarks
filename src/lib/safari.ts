@@ -228,7 +228,192 @@ export const applyPatches = (
     })
   })
 
+export const writeTree = (
+  plistPath: string,
+  tree: BookmarkTree,
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const data = yield* Effect.tryPromise({
+      try: () => Bun.file(plistPath).arrayBuffer(),
+      catch: (cause) => new Error(`Failed to read plist at ${plistPath}`, { cause }),
+    })
+
+    const root = parse(data) as PlistDict
+    const children = root["Children"] as PlistDict[]
+    const lookup = collectSafariNodes(children)
+
+    const favoritesSection = reuseOrCreateSectionNode(lookup, "BookmarksBar")
+    const otherSection = reuseOrCreateSectionNode(lookup, "BookmarksMenu")
+    const readingListSection = reuseOrCreateSectionNode(lookup, "com.apple.ReadingList")
+
+    setSectionChildren(
+      favoritesSection,
+      buildSafariChildren(tree.favorites_bar, "favorites_bar", lookup),
+    )
+    setSectionChildren(
+      otherSection,
+      buildSafariChildren(tree.other, "other", lookup),
+    )
+    setSectionChildren(
+      readingListSection,
+      buildSafariChildren(tree.reading_list, "reading_list", lookup),
+    )
+
+    root["Children"] = [
+      favoritesSection,
+      otherSection,
+      readingListSection,
+      ...lookup.unmanagedRootChildren,
+    ]
+
+    const serialized = serialize(root as PlistValue)
+    const tmpPath = `${plistPath}.tmp.${Date.now()}`
+
+    yield* Effect.tryPromise({
+      try: async () => {
+        await Bun.write(tmpPath, serialized)
+        await rename(tmpPath, plistPath)
+      },
+      catch: (cause) => new Error(`Failed to write plist at ${plistPath}`, { cause }),
+    })
+  })
+
 // -- Read path helpers (Schema-driven decoding) --
+
+interface SafariNodeLookup {
+  readonly foldersByPath: Map<string, PlistDict>
+  readonly leavesByUrl: Map<string, PlistDict>
+  readonly sectionsByTitle: Map<string, PlistDict>
+  readonly unmanagedRootChildren: PlistDict[]
+}
+
+const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
+  const lookup: SafariNodeLookup = {
+    foldersByPath: new Map(),
+    leavesByUrl: new Map(),
+    sectionsByTitle: new Map(),
+    unmanagedRootChildren: [],
+  }
+
+  for (const child of rootChildren) {
+    const type = child["WebBookmarkType"] as string
+    const title = child["Title"] as string | undefined
+
+    if (type === "WebBookmarkTypeProxy") {
+      lookup.unmanagedRootChildren.push(child)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeList" && title === "BookmarksBar") {
+      lookup.sectionsByTitle.set(title, child)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "favorites_bar", lookup)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeList" && title === "BookmarksMenu") {
+      lookup.sectionsByTitle.set(title, child)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "other", lookup)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeList" && title === "com.apple.ReadingList") {
+      lookup.sectionsByTitle.set(title, child)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], "reading_list", lookup)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeLeaf") {
+      const url = child["URLString"] as string | undefined
+      if (url) lookup.leavesByUrl.set(url, child)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeList" && title) {
+      const folderPath = `other/${title}`
+      lookup.foldersByPath.set(folderPath, child)
+      collectSafariChildren((child["Children"] as PlistDict[] | undefined) ?? [], folderPath, lookup)
+      continue
+    }
+
+    lookup.unmanagedRootChildren.push(child)
+  }
+
+  return lookup
+}
+
+const collectSafariChildren = (
+  nodes: PlistDict[],
+  parentPath: string,
+  lookup: SafariNodeLookup,
+): void => {
+  for (const node of nodes) {
+    const type = node["WebBookmarkType"] as string
+    if (type === "WebBookmarkTypeLeaf") {
+      const url = node["URLString"] as string | undefined
+      if (url) lookup.leavesByUrl.set(url, node)
+      continue
+    }
+
+    if (type === "WebBookmarkTypeList") {
+      const title = node["Title"] as string
+      const folderPath = `${parentPath}/${title}`
+      lookup.foldersByPath.set(folderPath, node)
+      collectSafariChildren((node["Children"] as PlistDict[] | undefined) ?? [], folderPath, lookup)
+    }
+  }
+}
+
+const reuseOrCreateSectionNode = (lookup: SafariNodeLookup, title: string): PlistDict =>
+  lookup.sectionsByTitle.get(title)
+  ?? SafariFolderNode.make({ Title: title, Children: [] }) as unknown as PlistDict
+
+const setSectionChildren = (section: PlistDict, children: PlistDict[]): void => {
+  if (children.length > 0) {
+    section["Children"] = children
+  } else {
+    delete section["Children"]
+  }
+}
+
+const buildSafariChildren = (
+  nodes: BookmarkSection | undefined,
+  parentPath: string,
+  lookup: SafariNodeLookup,
+): PlistDict[] =>
+  (nodes ?? []).map((node) => {
+    if (BookmarkLeaf.is(node)) {
+      const existing = lookup.leavesByUrl.get(node.url)
+      if (existing) {
+        existing["URLString"] = node.url
+        const uriDict = (existing["URIDictionary"] as PlistDict | undefined) ?? {}
+        uriDict["title"] = node.name
+        existing["URIDictionary"] = uriDict
+        lookup.leavesByUrl.delete(node.url)
+        return existing
+      }
+
+      return SafariLeafNode.make({
+        URLString: node.url,
+        URIDictionary: { title: node.name },
+      }) as unknown as PlistDict
+    }
+
+    const folderPath = `${parentPath}/${node.name}`
+    const existing = lookup.foldersByPath.get(folderPath)
+    const folder = existing ?? SafariFolderNode.make({
+      Title: node.name,
+      Children: [],
+    }) as unknown as PlistDict
+
+    folder["Title"] = node.name
+    folder["Children"] = buildSafariChildren(
+      node.children as BookmarkSection,
+      folderPath,
+      lookup,
+    )
+    lookup.foldersByPath.delete(folderPath)
+    return folder
+  })
 
 const scanNodes = (children: PlistDict[], path: string): BookmarkIssue[] => {
   const issues: BookmarkIssue[] = []

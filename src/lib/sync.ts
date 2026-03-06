@@ -36,6 +36,7 @@ export interface TargetResult {
   readonly target: Targets.TargetDescriptor
   readonly applied: readonly Patch.BookmarkPatch[]
   readonly graveyarded: readonly Patch.BookmarkPatch[]
+  readonly writeMode?: "patches" | "rewrite"
 }
 
 export interface StatusTargetResult {
@@ -732,15 +733,14 @@ const syncTarget = (
       : mergedTree
     const finalTree = yield* Graveyard.gc(withGraveyard, maxAge)
     const finalProjection = yield* projectTree(browserTree, finalTree, `${target.browser} target`, `${target.browser} target`)
-
-    if (!finalProjection.exact) {
-      return yield* Effect.fail(new Error(
-        `Cannot safely apply structural bookmark changes to ${Targets.displayNameOf(target)}. Pull preserves ordering and empty folders, but pushing those structural edits back to the browser is not yet exact.`,
-      ))
-    }
+    const writeMode = finalProjection.exact ? "patches" as const : "rewrite" as const
 
     if (!dryRun) {
-      yield* Targets.applyPatches(target, finalProjection.patches)
+      if (writeMode === "rewrite") {
+        yield* Targets.writeTree(target, finalTree)
+      } else {
+        yield* Targets.applyPatches(target, finalProjection.patches)
+      }
     }
 
     return {
@@ -750,6 +750,7 @@ const syncTarget = (
         target,
         applied: finalProjection.patches,
         graveyarded: resolution.graveyard,
+        writeMode,
       },
     }
   })
@@ -780,21 +781,21 @@ const pushTarget = (
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target)
     const finalProjection = yield* projectTree(browserTree, yamlTree, "yaml", `${target.browser} target`)
-
-    if (!finalProjection.exact) {
-      return yield* Effect.fail(new Error(
-        `Cannot safely push structural bookmark changes to ${Targets.displayNameOf(target)}. Ordering and empty folders would not round-trip exactly yet.`,
-      ))
-    }
+    const writeMode = finalProjection.exact ? "patches" as const : "rewrite" as const
 
     if (!dryRun) {
-      yield* Targets.applyPatches(target, finalProjection.patches)
+      if (writeMode === "rewrite") {
+        yield* Targets.writeTree(target, yamlTree)
+      } else {
+        yield* Targets.applyPatches(target, finalProjection.patches)
+      }
     }
 
     return {
       target,
       applied: finalProjection.patches,
       graveyarded: [],
+      writeMode,
     }
   })
 
