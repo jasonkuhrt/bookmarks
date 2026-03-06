@@ -108,15 +108,25 @@ export const WorkspaceTarget: Schema.Schema<WorkspaceTarget> = Schema.mutable(Sc
   enabled: Schema.optional(Schema.Boolean),
 }))
 
+export interface WorkspaceScopedTrees {
+  global: WorkspaceTree
+  profiles: Record<string, WorkspaceTree>
+}
+
+export const WorkspaceScopedTrees: Schema.Schema<WorkspaceScopedTrees> = Schema.mutable(Schema.Struct({
+  global: WorkspaceTree,
+  profiles: Schema.Record({ key: Schema.String, value: WorkspaceTree }),
+}))
+
 export interface WorkspaceFile {
   version: 1
   snapshotId: string
   importedAt: string
   targets: Record<string, WorkspaceTarget>
   inbox: Record<string, WorkspaceTree>
-  canonical: WorkspaceTree
-  archive: WorkspaceTree
-  quarantine: WorkspaceTree
+  publish: WorkspaceScopedTrees
+  archive: WorkspaceScopedTrees
+  quarantine: WorkspaceScopedTrees
 }
 
 export const WorkspaceFile: Schema.Schema<WorkspaceFile> = Schema.mutable(Schema.Struct({
@@ -125,7 +135,7 @@ export const WorkspaceFile: Schema.Schema<WorkspaceFile> = Schema.mutable(Schema
   importedAt: Schema.String,
   targets: Schema.Record({ key: Schema.String, value: WorkspaceTarget }),
   inbox: Schema.Record({ key: Schema.String, value: WorkspaceTree }),
-  canonical: WorkspaceTree,
-  archive: WorkspaceTree,
-  quarantine: WorkspaceTree,
+  publish: WorkspaceScopedTrees,
+  archive: WorkspaceScopedTrees,
+  quarantine: WorkspaceScopedTrees,
 }))

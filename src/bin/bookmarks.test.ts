@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { copyChromeBookmarksFixture } from "../lib/test-fixtures.js"
@@ -37,7 +37,7 @@ const runGit = async (cwd: string, ...args: string[]) => {
   return result
 }
 
-const writeChromeBookmarks = async (path: string): Promise<void> => {
+const writeChromeBookmarks = async (path: string, title = "Top Link", url = "https://top.example"): Promise<void> => {
   await Bun.write(path, JSON.stringify({
     checksum: "",
     version: 1,
@@ -52,8 +52,8 @@ const writeChromeBookmarks = async (path: string): Promise<void> => {
         children: [
           {
             type: "url",
-            name: "Top Link",
-            url: "https://top.example",
+            name: title,
+            url,
             id: "2",
             guid: "top-link",
             date_added: "0",
@@ -83,15 +83,43 @@ const writeChromeBookmarks = async (path: string): Promise<void> => {
   }, null, 2))
 }
 
+const writeChromeDataDir = async (
+  chromeDataDir: string,
+  profiles: readonly { readonly directory: string; readonly title: string; readonly url: string }[],
+): Promise<void> => {
+  await mkdir(chromeDataDir, { recursive: true })
+  await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+    profile: {
+      info_cache: Object.fromEntries(profiles.map((profile) => [profile.directory, {}])),
+    },
+  }))
+
+  for (const profile of profiles) {
+    const bookmarksPath = join(chromeDataDir, profile.directory, "Bookmarks")
+    await mkdir(join(chromeDataDir, profile.directory), { recursive: true })
+    await writeChromeBookmarks(bookmarksPath, profile.title, profile.url)
+  }
+}
+
 describe("bookmarks CLI", () => {
   test("status and sync --dry-run work against temp git repos and fixture browser files", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-"))
     const yamlPath = join(dir, "bookmarks.yaml")
     const schemaPath = join(dir, "bookmarks.schema.json")
-    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
+    const safariPath = join(dir, "Safari", "Bookmarks.plist")
 
     try {
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true })
       await copyChromeBookmarksFixture(chromePath)
+      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+        profile: {
+          info_cache: {
+            Default: {},
+          },
+        },
+      }))
 
       const config = BookmarksConfig.make({
         targets: {
@@ -114,7 +142,11 @@ describe("bookmarks CLI", () => {
       await runGit(dir, "add", "bookmarks.yaml")
       await runGit(dir, "commit", "-m", "baseline")
 
-      const cliEnv = { BOOKMARKS_YAML_PATH: yamlPath }
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+      }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
 
       const status = await runCommand(dir, [process.execPath, cliPath, "status"], cliEnv)
@@ -171,12 +203,22 @@ describe("bookmarks CLI", () => {
   test("sync --json reports automatic backups for managed mutations", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-"))
     const yamlPath = join(dir, "bookmarks.yaml")
-    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
+    const safariPath = join(dir, "Safari", "Bookmarks.plist")
 
     try {
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true })
       await copyChromeBookmarksFixture(chromePath)
+      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+        profile: {
+          info_cache: {
+            Default: {},
+          },
+        },
+      }))
 
       const config = BookmarksConfig.make({
         targets: {
@@ -199,6 +241,8 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_YAML_PATH: yamlPath,
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
 
@@ -230,12 +274,16 @@ describe("bookmarks CLI", () => {
     const workspacePath = join(dir, "workspace.yaml")
     const importLockPath = join(dir, "import.lock.json")
     const publishPlanPath = join(dir, "publish.plan.json")
-    const chromePath = join(dir, "Chrome-Bookmarks.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
     const backupDir = join(dir, "backups")
     const runtimeDir = join(dir, "runtime")
+    const safariPath = join(dir, "Safari", "Bookmarks.plist")
 
     try {
-      await writeChromeBookmarks(chromePath)
+      await writeChromeDataDir(chromeDataDir, [
+        { directory: "Default", title: "Top Link", url: "https://top.example" },
+      ])
 
       const config = BookmarksConfig.make({
         targets: {
@@ -255,6 +303,8 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
       }
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
 
@@ -279,7 +329,7 @@ describe("bookmarks CLI", () => {
         throw new Error("Expected imported bookmark in favorites_bar")
       }
       workspace.inbox = {}
-      workspace.canonical = {
+      workspace.publish.profiles["chrome/default"] = {
         favorites_bar: [{ ...importedNode, title: "CLI Curated Link" }],
       }
       await run(Workspace.save(workspacePath, workspace))
@@ -309,6 +359,59 @@ describe("bookmarks CLI", () => {
         readonly state: string
       }
       expect(parsedNextDone.state).toBe("done")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("import defaults to all discovered profiles and exact profile typos fail clearly", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-targets-"))
+    const yamlPath = join(dir, "bookmarks.yaml")
+    const workspacePath = join(dir, "workspace.yaml")
+    const importLockPath = join(dir, "import.lock.json")
+    const publishPlanPath = join(dir, "publish.plan.json")
+    const chromeDataDir = join(dir, "Chrome")
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
+    const safariPath = join(dir, "Safari", "Bookmarks.plist")
+
+    try {
+      await writeChromeDataDir(chromeDataDir, [
+        { directory: "Default", title: "Top Link", url: "https://top.example" },
+        { directory: "Profile 1", title: "Work Link", url: "https://work.example" },
+      ])
+
+      const config = BookmarksConfig.make({
+        targets: {
+          chrome: {
+            default: TargetProfile.make({ path: chromePath }),
+          },
+        },
+        base: new BookmarkTree({}),
+      })
+
+      await run(YamlModule.save(yamlPath, config))
+
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_WORKSPACE_PATH: workspacePath,
+        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
+        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+      }
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts")
+
+      const imported = await runCommand(dir, [process.execPath, cliPath, "import", "--json"], cliEnv)
+      expect(imported.exitCode).toBe(0)
+      const parsedImport = JSON.parse(imported.stdout) as {
+        readonly targets: readonly string[]
+      }
+      expect(parsedImport.targets).toEqual(["chrome/default", "chrome/profile-1"])
+
+      const typo = await runCommand(dir, [process.execPath, cliPath, "import", "chrome/defualt", "--json"], cliEnv)
+      expect(typo.exitCode).toBe(1)
+      const parsedTypo = JSON.parse(typo.stderr) as { readonly error: string }
+      expect(parsedTypo.error).toContain('Unknown target selector "chrome/defualt"')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

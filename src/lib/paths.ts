@@ -41,10 +41,10 @@ export const defaultSyncQueuePath = (): string =>
   join(defaultRuntimeDir(), "sync.queue.json")
 
 export const defaultSafariPlistPath = (): string =>
-  join(homedir(), "Library/Safari/Bookmarks.plist")
+  process.env["BOOKMARKS_SAFARI_PLIST_PATH"] ?? join(homedir(), "Library/Safari/Bookmarks.plist")
 
 export const defaultChromeDataDir = (): string =>
-  join(homedir(), "Library/Application Support/Google/Chrome")
+  process.env["BOOKMARKS_CHROME_DATA_DIR"] ?? join(homedir(), "Library/Application Support/Google/Chrome")
 
 export const defaultChromeBookmarksPath = (): string =>
-  join(defaultChromeDataDir(), "Default", "Bookmarks")
+  process.env["BOOKMARKS_CHROME_BOOKMARKS_PATH"] ?? join(defaultChromeDataDir(), "Default", "Bookmarks")

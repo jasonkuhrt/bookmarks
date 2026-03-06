@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Chrome from "./chrome.js"
@@ -19,6 +19,8 @@ const ENV_KEYS = [
   "BOOKMARKS_PUBLISH_PLAN_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
+  "BOOKMARKS_SAFARI_PLIST_PATH",
+  "BOOKMARKS_CHROME_DATA_DIR",
 ] as const
 
 const ORIGINAL_ENV = Object.fromEntries(
@@ -27,7 +29,7 @@ const ORIGINAL_ENV = Object.fromEntries(
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
 
-const writeChromeBookmarks = async (path: string): Promise<void> => {
+const writeChromeBookmarks = async (path: string, title = "Top Link", url = "https://top.example"): Promise<void> => {
   await Bun.write(path, JSON.stringify({
     checksum: "",
     version: 1,
@@ -42,8 +44,8 @@ const writeChromeBookmarks = async (path: string): Promise<void> => {
         children: [
           {
             type: "url",
-            name: "Top Link",
-            url: "https://top.example",
+            name: title,
+            url,
             id: "2",
             guid: "top-link",
             date_added: "0",
@@ -73,7 +75,7 @@ const writeChromeBookmarks = async (path: string): Promise<void> => {
   }, null, 2))
 }
 
-const setupWorkspaceEnv = async () => {
+const setupWorkspaceEnv = async (profiles = [{ directory: "Default", title: "Top Link", url: "https://top.example" }]) => {
   const dir = await mkdtemp(join(tmpdir(), "bookmarks-workspace-"))
   const yamlPath = join(dir, "bookmarks.yaml")
   const workspacePath = join(dir, "workspace.yaml")
@@ -81,7 +83,9 @@ const setupWorkspaceEnv = async () => {
   const publishPlanPath = join(dir, "publish.plan.json")
   const backupDir = join(dir, "backups")
   const runtimeDir = join(dir, "runtime")
-  const chromePath = join(dir, "Chrome-Bookmarks.json")
+  const chromeDataDir = join(dir, "Chrome")
+  const chromePath = join(chromeDataDir, "Default", "Bookmarks")
+  const safariPath = join(dir, "Safari", "Bookmarks.plist")
 
   process.env["BOOKMARKS_YAML_PATH"] = yamlPath
   process.env["BOOKMARKS_WORKSPACE_PATH"] = workspacePath
@@ -89,8 +93,21 @@ const setupWorkspaceEnv = async () => {
   process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] = publishPlanPath
   process.env["BOOKMARKS_BACKUP_DIR"] = backupDir
   process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir
+  process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = safariPath
+  process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
 
-  await writeChromeBookmarks(chromePath)
+  await mkdir(chromeDataDir, { recursive: true })
+  await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
+    profile: {
+      info_cache: Object.fromEntries(profiles.map((profile) => [profile.directory, {}])),
+    },
+  }))
+
+  for (const profile of profiles) {
+    const bookmarksPath = join(chromeDataDir, profile.directory, "Bookmarks")
+    await mkdir(join(chromeDataDir, profile.directory), { recursive: true })
+    await writeChromeBookmarks(bookmarksPath, profile.title, profile.url)
+  }
 
   const config = BookmarksConfig.make({
     targets: {
@@ -115,6 +132,7 @@ const setupWorkspaceEnv = async () => {
     publishPlanPath,
     backupDir,
     runtimeDir,
+    chromeDataDir,
     chromePath,
   }
 }
@@ -158,7 +176,7 @@ describe("workspace workflow", () => {
 
       const workspace = await run(Workspace.load(env.workspacePath))
       expect(workspace.inbox["chrome/default"]?.favorites_bar?.[0]?.kind).toBe("bookmark")
-      expect(workspace.canonical.favorites_bar).toBeUndefined()
+      expect(workspace.publish.global.favorites_bar).toBeUndefined()
 
       const validation = await run(Workspace.validate())
       expect(validation.valid).toBe(true)
@@ -187,7 +205,7 @@ describe("workspace workflow", () => {
       }
 
       workspace.inbox = {}
-      workspace.canonical = {
+      workspace.publish.profiles["chrome/default"] = {
         favorites_bar: [
           {
             ...importedNode,
@@ -215,6 +233,52 @@ describe("workspace workflow", () => {
       const next = await run(Workspace.next())
       expect(next.state).toBe("done")
       expect(next.nextAction.kind).toBe("done")
+    } finally {
+      await rm(env.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("import without selectors discovers all profiles and only global bookmarks span profiles", async () => {
+    const env = await setupWorkspaceEnv([
+      { directory: "Default", title: "Shared Candidate", url: "https://shared.example" },
+      { directory: "Profile 1", title: "Work Link", url: "https://work.example" },
+    ])
+
+    try {
+      const imported = await run(Workspace.importState([]))
+      expect(imported.targets).toEqual(["chrome/default", "chrome/profile-1"])
+
+      const workspace = await run(Workspace.load(env.workspacePath))
+      const sharedNode = workspace.inbox["chrome/default"]?.favorites_bar?.[0]
+      const workNode = workspace.inbox["chrome/profile-1"]?.favorites_bar?.[0]
+
+      expect(sharedNode?.kind).toBe("bookmark")
+      expect(workNode?.kind).toBe("bookmark")
+      if (!sharedNode || sharedNode.kind !== "bookmark" || !workNode || workNode.kind !== "bookmark") {
+        throw new Error("Expected imported bookmarks for both Chrome profiles")
+      }
+
+      workspace.inbox = {}
+      workspace.publish.global = {
+        favorites_bar: [{ ...sharedNode, title: "Shared Everywhere" }],
+      }
+      workspace.publish.profiles["chrome/profile-1"] = {
+        favorites_bar: [{ ...workNode, title: "Profile One Only" }],
+      }
+
+      await run(Workspace.save(env.workspacePath, workspace))
+
+      const published = await run(Workspace.publish())
+      expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"])
+
+      const defaultTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")))
+      expect(defaultTree.favorites_bar?.map((node) => node.name)).toEqual(["Shared Everywhere"])
+
+      const profileTree = await run(Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")))
+      expect(profileTree.favorites_bar?.map((node) => node.name)).toEqual([
+        "Shared Everywhere",
+        "Profile One Only",
+      ])
     } finally {
       await rm(env.dir, { recursive: true, force: true })
     }

@@ -431,6 +431,7 @@ const applyOne = (tree: BookmarkTree, patch: Patch.BookmarkPatch): BookmarkTree 
 export interface SyncConfig {
   readonly yamlPath: string
   readonly dryRun?: boolean
+  readonly requestedTargets?: readonly string[]
   /** Max age for graveyard entries before GC removes them. Default: 90 days. */
   readonly graveyardMaxAge?: Duration.Duration
   /** Optional YAML config override for one-way workflows such as `pull`. */
@@ -443,14 +444,45 @@ export interface BackupConfig {
   readonly yamlOverride?: BookmarksConfig
 }
 
-const defaultTargets = () => ({
-  safari: {
-    default: TargetProfile.make({ path: Paths.defaultSafariPlistPath() }),
-  },
-})
+const toConfigTargets = (
+  targets: readonly Targets.TargetDescriptor[],
+): BookmarksConfig["targets"] => {
+  const configTargets: Record<string, Record<string, TargetProfile>> = {}
+  for (const target of targets) {
+    const profiles = configTargets[target.browser] ?? {}
+    profiles[target.profile] = TargetProfile.make({
+      path: target.path,
+      enabled: target.enabled,
+    })
+    configTargets[target.browser] = profiles
+  }
+  return configTargets
+}
+
+const mergeTargets = (
+  discoveredTargets: BookmarksConfig["targets"],
+  configuredTargets: BookmarksConfig["targets"],
+): BookmarksConfig["targets"] => {
+  const merged: Record<string, Record<string, TargetProfile>> = structuredClone(discoveredTargets)
+
+  for (const [browser, profiles] of Object.entries(configuredTargets)) {
+    const nextProfiles = merged[browser] ?? {}
+    for (const [profile, target] of Object.entries(profiles)) {
+      nextProfiles[profile] = target
+    }
+    merged[browser] = nextProfiles
+  }
+
+  return merged
+}
+
+const discoverDefaultTargets = (): Effect.Effect<BookmarksConfig["targets"], Error> =>
+  Targets.discoverTargets().pipe(
+    Effect.map(toConfigTargets),
+  )
 
 const emptyConfig = (
-  targets: BookmarksConfig["targets"] = defaultTargets(),
+  targets: BookmarksConfig["targets"] = {},
 ): BookmarksConfig =>
   BookmarksConfig.make({
     targets,
@@ -461,13 +493,36 @@ const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =
   config.yamlOverride
     ? Effect.succeed(config.yamlOverride)
     : Effect.gen(function* () {
+        const discoveredTargets = yield* discoverDefaultTargets()
         const exists = yield* Effect.tryPromise({
           try: () => Fs.access(config.yamlPath).then(() => true, () => false),
           catch: (e) => new Error(`Failed to inspect ${config.yamlPath}: ${e}`),
         })
-        if (!exists) return emptyConfig()
-        return yield* YamlModule.load(config.yamlPath)
+        if (!exists) return emptyConfig(discoveredTargets)
+
+        const loaded = yield* YamlModule.load(config.yamlPath)
+        return BookmarksConfig.make({
+          ...loaded,
+          targets: mergeTargets(discoveredTargets, loaded.targets),
+        })
       })
+
+const resolveSelectedTargets = (
+  config: BookmarksConfig,
+  requestedTargets: readonly string[] = [],
+): Effect.Effect<readonly Targets.TargetDescriptor[], Error> =>
+  Effect.gen(function* () {
+    const resolvedTargets = yield* Targets.resolveTargetSelectors(Targets.listTargets(config), requestedTargets)
+    const explicitlyRequestedDisabled = resolvedTargets.filter((target) =>
+      requestedTargets.length > 0 && !target.enabled
+    )
+    if (explicitlyRequestedDisabled.length > 0) {
+      return yield* Effect.fail(new Error(
+        `Requested target(s) are disabled: ${explicitlyRequestedDisabled.map(Targets.keyOf).join(", ")}.`,
+      ))
+    }
+    return resolvedTargets.filter((target) => target.enabled)
+  })
 
 const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =>
   orchestration
@@ -485,19 +540,18 @@ const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =
 
 const ensurePermanentMutationSafety = (
   yamlConfig: BookmarksConfig,
+  targets: readonly Targets.TargetDescriptor[],
 ): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const enabledTargets = Targets.listEnabledTargets(yamlConfig)
-
-    if (enabledTargets.some((target) => Targets.requiresFullDiskAccess(target))) {
+    if (targets.some((target) => Targets.requiresFullDiskAccess(target))) {
       yield* Permissions.requireFullDiskAccess()
     }
 
-    for (const target of enabledTargets) {
+    for (const target of targets) {
       yield* Permissions.requireTargetAvailable(Targets.displayNameOf(target), target.path)
     }
 
-    for (const target of enabledTargets) {
+    for (const target of targets) {
       const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
       yield* ensureMutationSupported(yamlTree, `yaml profile ${Targets.displayNameOf(target)}`)
       const browserTree = yield* Targets.readTree(target)
@@ -506,14 +560,12 @@ const ensurePermanentMutationSafety = (
   })
 
 const ensureTemporaryMutationSafety = (
-  yamlConfig: BookmarksConfig,
+  targets: readonly Targets.TargetDescriptor[],
 ): Effect.Effect<void, Orchestration.TemporarySyncBlocker> =>
   Effect.gen(function* () {
-    const enabledTargets = Targets.listEnabledTargets(yamlConfig)
-
     const runningBrowsers: string[] = []
 
-    for (const browser of new Set(enabledTargets.map((target) => Targets.processNameOf(target.browser)))) {
+    for (const browser of new Set(targets.map((target) => Targets.processNameOf(target.browser)))) {
       if (yield* Permissions.checkBrowserRunning(browser)) {
         runningBrowsers.push(browser)
       }
@@ -544,8 +596,9 @@ const runManagedOperation = (
     (operation) =>
       Effect.gen(function* () {
         const yamlConfig = yield* loadConfig(config)
-        yield* ensurePermanentMutationSafety(yamlConfig)
-        yield* ensureTemporaryMutationSafety(yamlConfig)
+        const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
+        yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets)
+        yield* ensureTemporaryMutationSafety(selectedTargets)
         const mutationBackup = yield* createMutationBackup(config, yamlConfig)
 
         const nextConfig = { ...config, yamlOverride: yamlConfig }
@@ -870,12 +923,13 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       ?? emptyConfig(yamlConfig.targets)
     const maxAge = config.graveyardMaxAge ?? Duration.days(90)
     const targetResults: TargetResult[] = []
+    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
     const resolvedTrees = yield* resolveProfileTrees(
       yamlConfig,
       Targets.listConfiguredProfileKeys(yamlConfig),
     )
 
-    for (const target of Targets.listEnabledTargets(yamlConfig)) {
+    for (const target of selectedTargets) {
       yield* Effect.log(`Syncing ${Targets.displayNameOf(target)}...`)
       const baselineTree = yield* YamlModule.resolveProfile(baselineConfig, Targets.keyOf(target))
       const yamlTree = resolvedTrees[Targets.keyOf(target)] ?? BookmarkTree.make({})
@@ -907,9 +961,10 @@ const runPull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
     const profileKeys = Targets.listConfiguredProfileKeys(yamlConfig)
+    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
     const resolvedTrees = yield* resolveProfileTrees(yamlConfig, profileKeys)
 
-    for (const target of Targets.listEnabledTargets(yamlConfig)) {
+    for (const target of selectedTargets) {
       yield* Effect.log(`Pulling ${Targets.displayNameOf(target)}...`)
       const targetPull = yield* pullTarget(
         target,
@@ -935,8 +990,9 @@ const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetResults: TargetResult[] = []
+    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
 
-    for (const target of Targets.listEnabledTargets(yamlConfig)) {
+    for (const target of selectedTargets) {
       yield* Effect.log(`Pushing ${Targets.displayNameOf(target)}...`)
       const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
       targetResults.push(
@@ -970,8 +1026,9 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config)
     const targetStatuses: StatusTargetResult[] = []
+    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
 
-    for (const target of Targets.listEnabledTargets(yamlConfig)) {
+    for (const target of selectedTargets) {
       const yamlTree = yield* YamlModule.resolveProfile(yamlConfig, Targets.keyOf(target))
       const browserTree = yield* Targets.readTree(target)
       targetStatuses.push({
@@ -1040,6 +1097,7 @@ const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const maxAge = config.graveyardMaxAge ?? Duration.days(90)
     const targetResults: TargetResult[] = []
     const profileKeys = Targets.listConfiguredProfileKeys(yamlConfig)
+    const selectedTargets = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets)
     const currentResolvedTrees = yield* resolveProfileTrees(yamlConfig, profileKeys)
     const cleanedResolvedTrees: Record<string, BookmarkTree> = {}
 
@@ -1050,7 +1108,7 @@ const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       )
     }
 
-    for (const target of Targets.listEnabledTargets(yamlConfig)) {
+    for (const target of selectedTargets) {
       const cleanedTree = cleanedResolvedTrees[Targets.keyOf(target)] ?? BookmarkTree.make({})
       targetResults.push(
         yield* pushTarget(target, cleanedTree, config.dryRun ?? false),

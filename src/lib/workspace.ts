@@ -14,6 +14,7 @@ import {
   WorkspaceFile as WorkspaceFileSchema,
   type WorkspaceFile,
   type WorkspaceNode,
+  type WorkspaceScopedTrees,
   type WorkspaceTarget,
   type WorkspaceTree,
 } from "./schema/workspace.js"
@@ -59,6 +60,7 @@ const WORKSPACE_MODELINE = "# bookmarks-workspace: version=1\n"
 const sectionKeys = ["favorites_bar", "other", "reading_list", "mobile"] as const
 
 const emptyTree = (): WorkspaceTree => ({})
+const emptyScopedTrees = (): WorkspaceScopedTrees => ({ global: {}, profiles: {} })
 
 const exists = (path: string): Effect.Effect<boolean, Error> =>
   Effect.tryPromise({
@@ -90,6 +92,15 @@ const sanitizeTree = (tree: WorkspaceTree): WorkspaceTree => {
   return next
 }
 
+const sanitizeScopedTrees = (scopedTrees: WorkspaceScopedTrees): WorkspaceScopedTrees => ({
+  global: sanitizeTree(scopedTrees.global),
+  profiles: Object.fromEntries(
+    Object.entries(scopedTrees.profiles)
+      .map(([targetId, tree]) => [targetId, sanitizeTree(tree)] as const)
+      .filter(([, tree]) => countNodes(tree) > 0),
+  ),
+})
+
 const countNodes = (tree: WorkspaceTree): number => {
   const countSection = (nodes: readonly WorkspaceNode[] | undefined): number =>
     (nodes ?? []).reduce((total, node) =>
@@ -99,6 +110,10 @@ const countNodes = (tree: WorkspaceTree): number => {
 
 const countInboxNodes = (inbox: Readonly<Record<string, WorkspaceTree>>): number =>
   Object.values(inbox).reduce((total, tree) => total + countNodes(tree), 0)
+
+const countScopedNodes = (scopedTrees: WorkspaceScopedTrees): number =>
+  countNodes(scopedTrees.global)
+  + Object.values(scopedTrees.profiles).reduce((total, tree) => total + countNodes(tree), 0)
 
 const workspaceFiles = () => ({
   workspacePath: Paths.defaultWorkspacePath(),
@@ -133,6 +148,38 @@ const targetToDescriptor = (target: WorkspaceTarget): Targets.TargetDescriptor =
   enabled: target.enabled ?? true,
 })
 
+const normalizeWorkspaceDocument = (value: unknown): Effect.Effect<unknown, Error> =>
+  Effect.try({
+    try: () => {
+      if (value == null || typeof value !== "object") return value
+      if ("publish" in value) return value
+      if (!("canonical" in value)) return value
+
+      const legacy = value as {
+        version: 1
+        snapshotId: string
+        importedAt: string
+        targets: Record<string, WorkspaceTarget>
+        inbox: Record<string, WorkspaceTree>
+        canonical: WorkspaceTree
+        archive: WorkspaceTree
+        quarantine: WorkspaceTree
+      }
+
+      return {
+        version: legacy.version,
+        snapshotId: legacy.snapshotId,
+        importedAt: legacy.importedAt,
+        targets: legacy.targets,
+        inbox: legacy.inbox,
+        publish: { global: legacy.canonical ?? {}, profiles: {} },
+        archive: { global: legacy.archive ?? {}, profiles: {} },
+        quarantine: { global: legacy.quarantine ?? {}, profiles: {} },
+      } satisfies WorkspaceFile
+    },
+    catch: (e) => new Error(`Failed to normalize workspace document: ${e}`),
+  })
+
 const makeSnapshotId = (): string =>
   `snap_${DateTime.formatIso(DateTime.unsafeNow()).replaceAll(/[:.-]/g, "")}`
 
@@ -149,14 +196,26 @@ export const load = (path = Paths.defaultWorkspacePath()): Effect.Effect<Workspa
       try: () => Yaml.parse(raw) as unknown,
       catch: (e) => new Error(`Failed to parse ${path}: ${e}`),
     })
-    return yield* Schema.decodeUnknown(WorkspaceFileSchema)(parsed).pipe(
+    const normalized = yield* normalizeWorkspaceDocument(parsed)
+    return yield* Schema.decodeUnknown(WorkspaceFileSchema)(normalized).pipe(
       Effect.mapError((e) => new Error(`Workspace validation failed: ${e.message}`)),
     )
   })
 
 export const save = (path: string, workspace: WorkspaceFile): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const encoded = yield* Schema.encode(WorkspaceFileSchema)(workspace).pipe(
+    const normalizedWorkspace: WorkspaceFile = {
+      ...workspace,
+      inbox: Object.fromEntries(
+        Object.entries(workspace.inbox)
+          .map(([targetId, tree]) => [targetId, sanitizeTree(tree)] as const)
+          .filter(([, tree]) => countNodes(tree) > 0),
+      ),
+      publish: sanitizeScopedTrees(workspace.publish),
+      archive: sanitizeScopedTrees(workspace.archive),
+      quarantine: sanitizeScopedTrees(workspace.quarantine),
+    }
+    const encoded = yield* Schema.encode(WorkspaceFileSchema)(normalizedWorkspace).pipe(
       Effect.mapError((e) => new Error(`Failed to encode workspace: ${e.message}`)),
     )
     const yaml = WORKSPACE_MODELINE + Yaml.stringify(encoded, { indent: 2 })
@@ -319,6 +378,16 @@ const walkTree = (
   for (const key of sectionKeys) walkSection(tree[key], [key])
 }
 
+const walkScopedTrees = (
+  scopedTrees: WorkspaceScopedTrees,
+  visit: (node: WorkspaceNode, path: readonly string[]) => void,
+): void => {
+  walkTree(scopedTrees.global, (node, path) => visit(node, ["global", ...path]))
+  for (const [targetId, tree] of Object.entries(scopedTrees.profiles)) {
+    walkTree(tree, (node, path) => visit(node, ["profiles", targetId, ...path]))
+  }
+}
+
 const validateAgainstImportLock = (
   workspace: WorkspaceFile,
   importLock: ImportLock,
@@ -332,6 +401,14 @@ const validateAgainstImportLock = (
   for (const targetId of Object.keys(workspace.inbox)) {
     if (!workspace.targets[targetId]) {
       errors.push(`Inbox target ${targetId} is not present in workspace.targets`)
+    }
+  }
+
+  for (const collection of [workspace.publish, workspace.archive, workspace.quarantine]) {
+    for (const targetId of Object.keys(collection.profiles)) {
+      if (!workspace.targets[targetId]) {
+        errors.push(`Scoped tree target ${targetId} is not present in workspace.targets`)
+      }
     }
   }
 
@@ -354,9 +431,26 @@ const validateAgainstImportLock = (
   for (const [targetId, tree] of Object.entries(workspace.inbox)) {
     validateTree(tree, `inbox/${targetId}`)
   }
-  validateTree(workspace.canonical, "canonical")
-  validateTree(workspace.archive, "archive")
-  validateTree(workspace.quarantine, "quarantine")
+
+  const validateScoped = (scopedTrees: WorkspaceScopedTrees, label: string) => {
+    walkScopedTrees(scopedTrees, (node, path) => {
+      if (seenNodeIds.has(node.id)) {
+        errors.push(`Duplicate workspace node id ${node.id} at ${label}/${path.join("/")}`)
+      } else {
+        seenNodeIds.add(node.id)
+      }
+
+      for (const source of node.sources ?? []) {
+        if (!allOccurrences.has(source)) {
+          errors.push(`Unknown source occurrence ${source} referenced at ${label}/${path.join("/")}`)
+        }
+      }
+    })
+  }
+
+  validateScoped(workspace.publish, "publish")
+  validateScoped(workspace.archive, "archive")
+  validateScoped(workspace.quarantine, "quarantine")
 
   return errors
 }
@@ -374,11 +468,22 @@ export const validate = (): Effect.Effect<WorkspaceValidationResult, Error> =>
     }
   })
 
+const mergeBookmarkTrees = (base: BookmarkTree, overlay: BookmarkTree): BookmarkTree =>
+  BookmarkTree.make({
+    favorites_bar: nonEmptyOrUndefined([...(base.favorites_bar ?? []), ...(overlay.favorites_bar ?? [])]),
+    other: nonEmptyOrUndefined([...(base.other ?? []), ...(overlay.other ?? [])]),
+    reading_list: nonEmptyOrUndefined([...(base.reading_list ?? []), ...(overlay.reading_list ?? [])]),
+    mobile: nonEmptyOrUndefined([...(base.mobile ?? []), ...(overlay.mobile ?? [])]),
+  })
+
 const convertTreeForPublish = (
   tree: WorkspaceTree,
-): { readonly tree: BookmarkTree; readonly blockers: readonly WorkspacePlanBlocker[] } => {
+  locationRoot: readonly string[],
+  targetId?: string,
+  seededUrls = new Map<string, string>(),
+): { readonly tree: BookmarkTree; readonly blockers: readonly WorkspacePlanBlocker[]; readonly seenUrls: ReadonlyMap<string, string> } => {
   const blockers: WorkspacePlanBlocker[] = []
-  const seenUrls = new Map<string, string>()
+  const seenUrls = new Map(seededUrls)
 
   const convertSection = (
     nodes: WorkspaceNode[] | undefined,
@@ -400,7 +505,8 @@ const convertTreeForPublish = (
             blockers.push({
               code: "duplicate-url",
               location,
-              message: `Duplicate URL "${node.url}" also appears at canonical/${first}.`,
+              message: `Duplicate URL "${node.url}" also appears at ${first}.`,
+              ...(targetId ? { targetId } : {}),
             })
             continue
           }
@@ -420,6 +526,7 @@ const convertTreeForPublish = (
             code: "unsupported-node",
             location,
             message: "Separators are imported for review but cannot be published yet.",
+            ...(targetId ? { targetId } : {}),
           })
           continue
         case "raw":
@@ -427,6 +534,7 @@ const convertTreeForPublish = (
             code: "unsupported-node",
             location,
             message: `Raw node "${node.title}" must be resolved before publish.`,
+            ...(targetId ? { targetId } : {}),
           })
           continue
       }
@@ -436,13 +544,13 @@ const convertTreeForPublish = (
   }
 
   const bookmarkTree = BookmarkTree.make({
-    favorites_bar: nonEmptyOrUndefined(convertSection(tree.favorites_bar, ["canonical", "favorites_bar"])),
-    other: nonEmptyOrUndefined(convertSection(tree.other, ["canonical", "other"])),
-    reading_list: nonEmptyOrUndefined(convertSection(tree.reading_list, ["canonical", "reading_list"])),
-    mobile: nonEmptyOrUndefined(convertSection(tree.mobile, ["canonical", "mobile"])),
+    favorites_bar: nonEmptyOrUndefined(convertSection(tree.favorites_bar, [...locationRoot, "favorites_bar"])),
+    other: nonEmptyOrUndefined(convertSection(tree.other, [...locationRoot, "other"])),
+    reading_list: nonEmptyOrUndefined(convertSection(tree.reading_list, [...locationRoot, "reading_list"])),
+    mobile: nonEmptyOrUndefined(convertSection(tree.mobile, [...locationRoot, "mobile"])),
   })
 
-  return { tree: bookmarkTree, blockers }
+  return { tree: bookmarkTree, blockers, seenUrls }
 }
 
 const planSummary = (
@@ -451,9 +559,9 @@ const planSummary = (
   targets: WorkspacePlan["targets"],
 ): WorkspacePlan["summary"] => ({
   inboxItems: countInboxNodes(workspace.inbox),
-  canonicalItems: countNodes(workspace.canonical),
-  archiveItems: countNodes(workspace.archive),
-  quarantineItems: countNodes(workspace.quarantine),
+  canonicalItems: countScopedNodes(workspace.publish),
+  archiveItems: countScopedNodes(workspace.archive),
+  quarantineItems: countScopedNodes(workspace.quarantine),
   targetCount: targets.length,
   readyTargetCount: targets.filter((target) => target.status === "ready").length,
   blockerCount: blockers.length,
@@ -464,7 +572,7 @@ const buildPlan = (
   workspacePath: string,
   workspaceHashValue: string,
   requestedTargetIds: readonly string[],
-): Effect.Effect<{ readonly plan: WorkspacePlan; readonly canonicalTree: BookmarkTree }, Error> =>
+): Effect.Effect<{ readonly plan: WorkspacePlan; readonly publishTrees: Readonly<Record<string, BookmarkTree>> }, Error> =>
   Effect.gen(function* () {
     const blockers: WorkspacePlanBlocker[] = []
     const inboxItems = countInboxNodes(workspace.inbox)
@@ -475,7 +583,7 @@ const buildPlan = (
       })
     }
 
-    const quarantineItems = countNodes(workspace.quarantine)
+    const quarantineItems = countScopedNodes(workspace.quarantine)
     if (quarantineItems > 0) {
       blockers.push({
         code: "review-quarantine",
@@ -483,8 +591,8 @@ const buildPlan = (
       })
     }
 
-    const converted = convertTreeForPublish(workspace.canonical)
-    blockers.push(...converted.blockers)
+    const convertedGlobal = convertTreeForPublish(workspace.publish.global, ["publish", "global"])
+    blockers.push(...convertedGlobal.blockers)
 
     const selectedTargets = yield* Targets.resolveTargetSelectors(
       Object.values(workspace.targets).map(targetToDescriptor),
@@ -492,12 +600,24 @@ const buildPlan = (
     )
 
     const targets: WorkspacePlanTarget[] = []
+    const publishTrees: Record<string, BookmarkTree> = {}
     for (const descriptor of selectedTargets) {
       const targetId = Targets.keyOf(descriptor)
       const target = workspace.targets[targetId]!
       const targetBlockers: WorkspacePlanBlocker[] = []
       const targetEnabled = target.enabled ?? true
-      if ((target.enabled ?? true) && !(yield* exists(target.path))) {
+      if (targetEnabled) {
+        const convertedProfile = convertTreeForPublish(
+          workspace.publish.profiles[targetId] ?? emptyTree(),
+          ["publish", "profiles", targetId],
+          targetId,
+          new Map(convertedGlobal.seenUrls),
+        )
+        targetBlockers.push(...convertedProfile.blockers)
+        publishTrees[targetId] = mergeBookmarkTrees(convertedGlobal.tree, convertedProfile.tree)
+      }
+
+      if (targetEnabled && !(yield* exists(target.path))) {
         targetBlockers.push({
           code: "target-unavailable",
           targetId,
@@ -506,7 +626,7 @@ const buildPlan = (
         })
       }
 
-      if ((target.enabled ?? true) && Targets.requiresFullDiskAccess(targetToDescriptor(target))) {
+      if (targetEnabled && Targets.requiresFullDiskAccess(targetToDescriptor(target))) {
         const fullDiskAccess = yield* Permissions.checkFullDiskAccess()
         if (!fullDiskAccess) {
           targetBlockers.push({
@@ -518,7 +638,7 @@ const buildPlan = (
         }
       }
 
-      if ((target.enabled ?? true) && (yield* Permissions.checkBrowserRunning(Targets.processNameOf(target.browser)))) {
+      if (targetEnabled && (yield* Permissions.checkBrowserRunning(Targets.processNameOf(target.browser)))) {
         targetBlockers.push({
           code: "browser-running",
           targetId,
@@ -555,7 +675,7 @@ const buildPlan = (
       targets,
     }
 
-    return { plan, canonicalTree: converted.tree }
+    return { plan, publishTrees }
   })
 
 export const plan = (): Effect.Effect<WorkspacePlan, Error> =>
@@ -625,10 +745,11 @@ export const publishTo = (requestedTargetIds: readonly string[]): Effect.Effect<
 
     const publishedTargets: string[] = []
     for (const target of built.plan.targets.filter((target) => target.status === "ready")) {
+      const publishTree = built.publishTrees[target.targetId]!
       const descriptor = targetToDescriptor(workspace.targets[target.targetId]!)
-      yield* Targets.writeTree(descriptor, built.canonicalTree)
+      yield* Targets.writeTree(descriptor, publishTree)
       const readBack = yield* Targets.readTree(descriptor)
-      const verified = yield* plansEqual(readBack, built.canonicalTree)
+      const verified = yield* plansEqual(readBack, publishTree)
       if (!verified) {
         return yield* Effect.fail(new Error(`Post-publish verification failed for ${target.targetId}`))
       }
@@ -683,9 +804,9 @@ export const importState = (
       importedAt,
       targets,
       inbox,
-      canonical: emptyTree(),
-      archive: emptyTree(),
-      quarantine: emptyTree(),
+      publish: emptyScopedTrees(),
+      archive: emptyScopedTrees(),
+      quarantine: emptyScopedTrees(),
     }
 
     const importLock: ImportLock = {
@@ -739,9 +860,9 @@ export const next = (): Effect.Effect<WorkspaceNextResult, Error> =>
     const validation = yield* validate()
     const summaryBase = {
       inboxItems: countInboxNodes(workspace.inbox),
-      canonicalItems: countNodes(workspace.canonical),
-      archiveItems: countNodes(workspace.archive),
-      quarantineItems: countNodes(workspace.quarantine),
+      canonicalItems: countScopedNodes(workspace.publish),
+      archiveItems: countScopedNodes(workspace.archive),
+      quarantineItems: countScopedNodes(workspace.quarantine),
       targetCount: Object.keys(workspace.targets).length,
       readyTargetCount: 0,
       blockerCount: validation.errors.length,

@@ -51,13 +51,13 @@ Usage:
 
 Commands:
   bookmarks import [target...] [--json]      browsers -> workspace files
-  bookmarks push [--dry-run] [--json]    YAML -> browsers
-  bookmarks pull [--dry-run] [--json]    browsers -> YAML
-  bookmarks sync [--dry-run] [--json]    bidirectional (pull then push)
-  bookmarks plan [--json]                workspace -> publish plan
-  bookmarks publish [--json]             workspace -> browsers
+  bookmarks push [target...] [--dry-run] [--json]    YAML -> browsers
+  bookmarks pull [target...] [--dry-run] [--json]    browsers -> YAML
+  bookmarks sync [target...] [--dry-run] [--json]    bidirectional (pull then push)
+  bookmarks plan [target...] [--json]                workspace -> publish plan
+  bookmarks publish [target...] [--json]             workspace -> browsers
   bookmarks next [--json]                guided workflow router
-  bookmarks status [--json]              show current state
+  bookmarks status [target...] [--json]  show current state
   bookmarks backup [--json]              timestamped backups
   bookmarks gc [--max-age=90d] [--json]  clean graveyard
   bookmarks daemon start|stop|status     launchd lifecycle
@@ -491,11 +491,12 @@ const program = Effect.gen(function* () {
     case "push": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
       const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath })
+        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
         : undefined
       const pushResult = yield* SyncModule.push({
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
+        requestedTargets: positional,
       })
       if (flags.json) {
         yield* printJson({
@@ -511,11 +512,12 @@ const program = Effect.gen(function* () {
     case "pull": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
       const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath })
+        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
         : undefined
       const pullResult = yield* SyncModule.pull({
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
+        requestedTargets: positional,
       })
       if (flags.json) {
         yield* printJson({
@@ -531,11 +533,12 @@ const program = Effect.gen(function* () {
     case "sync": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
       const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath })
+        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
         : undefined
       const syncResult = yield* SyncModule.sync({
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
+        requestedTargets: positional,
       })
       if (flags.json) {
         yield* printJson({
@@ -552,6 +555,7 @@ const program = Effect.gen(function* () {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath())
       const status = yield* SyncModule.status({
         yamlPath: managed.yamlPath,
+        requestedTargets: positional,
       })
       if (flags.json) {
         yield* printJson(serializeStatus(status))
@@ -579,6 +583,7 @@ const program = Effect.gen(function* () {
       const gcResult = yield* SyncModule.gc({
         yamlPath: managed.yamlPath,
         graveyardMaxAge: maxAge,
+        requestedTargets: positional,
       })
       if (flags.json) {
         yield* printJson(serializeSyncResult("gc", managed.yamlPath, false, gcResult))

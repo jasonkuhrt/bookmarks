@@ -15,6 +15,9 @@ const ENV_KEYS = [
   "BOOKMARKS_PUBLISH_PLAN_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
+  "BOOKMARKS_SAFARI_PLIST_PATH",
+  "BOOKMARKS_CHROME_DATA_DIR",
+  "BOOKMARKS_CHROME_BOOKMARKS_PATH",
 ] as const
 
 const ORIGINAL_ENV = Object.fromEntries(
@@ -47,6 +50,7 @@ describe("paths", () => {
     expect(Paths.defaultRuntimeDir()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime"))
     expect(Paths.defaultSyncLockPath()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.lock.json"))
     expect(Paths.defaultSyncQueuePath()).toBe(join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.queue.json"))
+    expect(Paths.defaultSafariPlistPath()).toBe(join(homedir(), "Library/Safari/Bookmarks.plist"))
     expect(Paths.defaultChromeDataDir()).toBe(join(homedir(), "Library/Application Support/Google/Chrome"))
     expect(Paths.defaultChromeBookmarksPath()).toBe(join(homedir(), "Library/Application Support/Google/Chrome", "Default", "Bookmarks"))
   })
@@ -84,6 +88,9 @@ describe("paths", () => {
     process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] = "/tmp/publish.plan.json"
     process.env["BOOKMARKS_BACKUP_DIR"] = "/tmp/custom-backups"
     process.env["BOOKMARKS_RUNTIME_DIR"] = "/tmp/custom-runtime"
+    process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = "/tmp/Safari/Bookmarks.plist"
+    process.env["BOOKMARKS_CHROME_DATA_DIR"] = "/tmp/Chrome"
+    process.env["BOOKMARKS_CHROME_BOOKMARKS_PATH"] = "/tmp/Chrome/Profile 7/Bookmarks"
 
     expect(Paths.defaultYamlPath()).toBe("/tmp/custom.yaml")
     expect(Paths.defaultSchemaPath()).toBe("/tmp/custom.schema.json")
@@ -94,5 +101,8 @@ describe("paths", () => {
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime")
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json")
     expect(Paths.defaultSyncQueuePath()).toBe("/tmp/custom-runtime/sync.queue.json")
+    expect(Paths.defaultSafariPlistPath()).toBe("/tmp/Safari/Bookmarks.plist")
+    expect(Paths.defaultChromeDataDir()).toBe("/tmp/Chrome")
+    expect(Paths.defaultChromeBookmarksPath()).toBe("/tmp/Chrome/Profile 7/Bookmarks")
   })
 })

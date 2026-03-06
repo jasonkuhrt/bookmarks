@@ -83,6 +83,13 @@ base:
       url: https://docs.example
 ```
 
+Target selection rules:
+
+- omit selectors to operate on all discovered profiles
+- pass a bare browser selector like `chrome` to operate on every discovered Chrome profile
+- pass an exact selector like `chrome/profile-1` to scope literally
+- exact typos fail clearly instead of silently falling back
+
 ## Workspace Workflow
 
 The default workflow is file-first and agent-friendly:
@@ -102,6 +109,12 @@ What each file does:
 - `import.lock.json` is the machine-owned record of imported browser occurrences
 - `publish.plan.json` is the generated write plan with blockers and target status
 
+The curated publish tree is split explicitly:
+
+- `publish.global` contains bookmarks that should span every selected profile
+- `publish.profiles.<target-id>` contains bookmarks that stay local to one profile
+- `archive` and `quarantine` follow the same `global + profiles` shape so profile-local items do not cross by accident
+
 `bookmarks next` is the guided router. It inspects the current state and points to the next useful step instead of making you remember the workflow.
 
 Git is optional. If you want history, branch review, or rollback on your config changes, commit these files. If you do not use git, the CLI still keeps immutable imports, publish plans, receipts, and automatic backups.
@@ -112,13 +125,13 @@ Core commands:
 
 ```bash
 bookmarks next
-bookmarks import
+bookmarks import [target...]
 bookmarks validate
-bookmarks plan
-bookmarks publish
-bookmarks status
-bookmarks sync
-bookmarks sync --dry-run
+bookmarks plan [target...]
+bookmarks publish [target...]
+bookmarks status [target...]
+bookmarks sync [target...]
+bookmarks sync [target...] --dry-run
 bookmarks status --json
 bookmarks doctor --json
 ```
@@ -126,6 +139,8 @@ bookmarks doctor --json
 Notes:
 
 - `import` captures current browser state into workspace files without mutating browsers.
+- `import`, `status`, `pull`, `push`, `sync`, `plan`, and `publish` all accept optional target selectors.
+- omitting selectors means all discovered profiles for the addressed browsers.
 - `validate` validates `workspace.yaml` when it exists, otherwise it falls back to `bookmarks.yaml`.
 - `plan` generates the exact publish plan and fails clearly when review or environment blockers remain.
 - `publish` always creates backups before writing target files, then rereads and verifies the result.
