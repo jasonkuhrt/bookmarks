@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Chrome from "./chrome.ts";
+import * as Safari from "./safari.ts";
 import {
   BookmarkLeaf,
   BookmarksConfig,
@@ -12,6 +13,7 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
 } from "./schema/__.ts";
+import { writeSafariBookmarksFixture } from "./test-fixtures.ts";
 import * as Workspace from "./workspace.ts";
 import * as YamlModule from "./yaml.ts";
 
@@ -99,6 +101,7 @@ const writeChromeBookmarks = async (
 
 const setupWorkspaceEnv = async (
   profiles = [{ directory: "Default", title: "Top Link", url: "https://top.example" }],
+  options: { readonly safariFixture?: boolean } = {},
 ) => {
   const dir = await mkdtemp(join(tmpdir(), "bookmarks-workspace-"));
   const yamlPath = join(dir, "bookmarks.yaml");
@@ -139,6 +142,11 @@ const setupWorkspaceEnv = async (
     await writeChromeBookmarks(bookmarksPath, profile.title, profile.url);
   }
 
+  if (options.safariFixture) {
+    await mkdir(join(dir, "Safari"), { recursive: true });
+    await writeSafariBookmarksFixture(safariPath);
+  }
+
   const config = BookmarksConfig.make({
     all: new BookmarkTree({
       bar: [new BookmarkLeaf({ name: "Docs", url: "https://docs.example" })],
@@ -162,6 +170,7 @@ const setupWorkspaceEnv = async (
     runtimeDir,
     chromeDataDir,
     chromePath,
+    safariPath,
   };
 };
 
@@ -246,33 +255,27 @@ describe("workspace workflow", () => {
 
       const plan = await run(Workspace.plan());
       expect(plan.targets).toHaveLength(1);
+      expect(plan.blockers).toEqual([]);
+      expect(plan.targets[0]?.status).toBe("ready");
 
-      if (plan.blockers.length === 0) {
-        expect(plan.targets[0]?.status).toBe("ready");
+      const published = await run(Workspace.publish());
+      expect(published.publishedTargets).toEqual(["chrome/default"]);
+      expect(published.plan.publishedAt).not.toBeNull();
+      expect(published.backup.files).toHaveLength(4);
 
-        const published = await run(Workspace.publish());
-        expect(published.publishedTargets).toEqual(["chrome/default"]);
-        expect(published.plan.publishedAt).not.toBeNull();
-        expect(published.backup).not.toBeNull();
-        expect(published.backup?.files).toHaveLength(4);
+      const tree = await run(Chrome.readBookmarks(env.chromePath));
+      const first = tree.bar?.[0];
+      expect(first?.name).toBe("Curated Link");
 
-        const tree = await run(Chrome.readBookmarks(env.chromePath));
-        const first = tree.bar?.[0];
-        expect(first?.name).toBe("Curated Link");
-
-        const next = await run(Workspace.next());
-        expect(next.state).toBe("done");
-        expect(next.nextAction.kind).toBe("done");
-      } else {
-        expect(plan.blockers.some((blocker) => blocker.code === "browser-running")).toBe(true);
-        expect(plan.targets[0]?.status).toBe("blocked");
-      }
+      const next = await run(Workspace.next());
+      expect(next.state).toBe("done");
+      expect(next.nextAction.kind).toBe("done");
     } finally {
       await rm(env.dir, { recursive: true, force: true });
     }
   });
 
-  test("plan stays publishable while browser blockers queue workspace publish", async () => {
+  test("publish proceeds even when browsers are reported as running", async () => {
     const env = await setupWorkspaceEnv();
 
     try {
@@ -301,25 +304,96 @@ describe("workspace workflow", () => {
 
       const plan = await run(Workspace.plan());
       expect(plan.blockers).toEqual([]);
-      expect(plan.targets[0]?.status).toBe("blocked");
-      expect(plan.targets[0]?.blockers.some((blocker) => blocker.code === "browser-running")).toBe(
-        true,
-      );
-
-      const queued = await run(Workspace.publish());
-      expect(queued.orchestration?.state).toBe("queued");
-      expect(queued.orchestration?.operation).toBe("publish");
-      expect(queued.publishedTargets).toEqual([]);
-      expect(queued.backup).toBeNull();
-
-      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+      expect(plan.targets[0]?.status).toBe("ready");
+      expect(plan.targets[0]?.blockers).toEqual([]);
 
       const published = await run(Workspace.publish());
-      expect(published.orchestration).toBeUndefined();
       expect(published.publishedTargets).toEqual(["chrome/default"]);
 
       const tree = await run(Chrome.readBookmarks(env.chromePath));
       expect(tree.bar?.[0]?.name).toBe("Queued Link");
+    } finally {
+      await rm(env.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("plan blocks unsupported profile-only sections for Chrome", async () => {
+    const env = await setupWorkspaceEnv();
+
+    try {
+      await run(Workspace.importState(["chrome/default"]));
+
+      const workspace = await run(Workspace.load(env.workspacePath));
+      workspace.inbox = {};
+      workspace.publish.profiles["chrome/default"] = {
+        reading_list: [
+          {
+            kind: "bookmark",
+            id: "manual_chrome_reading_item",
+            title: "Should Block",
+            url: "https://blocked.example",
+          },
+        ],
+      };
+
+      await run(Workspace.save(env.workspacePath, workspace));
+
+      const plan = await run(Workspace.plan());
+      expect(plan.summary.blockerCount).toBe(1);
+      expect(plan.targets[0]?.status).toBe("blocked");
+      expect(plan.blockers).toContainEqual({
+        code: "unsupported-node",
+        targetId: "chrome/default",
+        location: "publish/profiles/chrome/default/reading_list",
+        message: 'Section "reading_list" is not supported for chrome/default.',
+      });
+    } finally {
+      await rm(env.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("publish projects global reading_list to Safari only", async () => {
+    const env = await setupWorkspaceEnv(undefined, { safariFixture: true });
+
+    try {
+      const imported = await run(Workspace.importState([]));
+      expect(imported.targets).toEqual(["safari", "chrome/default"]);
+
+      const workspace = await run(Workspace.load(env.workspacePath));
+      const safariReadingNode = workspace.inbox["safari"]?.reading_list?.find(
+        (node) => node.kind === "bookmark",
+      );
+      const chromeBarNode = workspace.inbox["chrome/default"]?.bar?.find(
+        (node) => node.kind === "bookmark",
+      );
+
+      if (!safariReadingNode || !chromeBarNode) {
+        throw new Error("Expected Safari reading list and Chrome bar bookmarks");
+      }
+
+      workspace.inbox = {};
+      workspace.publish.global = {
+        reading_list: [{ ...safariReadingNode, title: "Global Reading Item" }],
+      };
+      workspace.publish.profiles["chrome/default"] = {
+        bar: [{ ...chromeBarNode, title: "Chrome Local Link" }],
+      };
+
+      await run(Workspace.save(env.workspacePath, workspace));
+
+      const plan = await run(Workspace.plan());
+      expect(plan.blockers).toEqual([]);
+      expect(plan.targets.map((target) => target.status)).toEqual(["ready", "ready"]);
+
+      const published = await run(Workspace.publish());
+      expect(published.publishedTargets).toEqual(["safari", "chrome/default"]);
+
+      const chromeTree = await run(Chrome.readBookmarks(env.chromePath));
+      expect(chromeTree.reading_list).toBeUndefined();
+      expect(chromeTree.bar?.map((node) => node.name)).toEqual(["Chrome Local Link"]);
+
+      const safariTree = await run(Safari.readBookmarks(env.safariPath));
+      expect(safariTree.reading_list?.map((node) => node.name)).toContain("Global Reading Item");
     } finally {
       await rm(env.dir, { recursive: true, force: true });
     }
@@ -356,25 +430,22 @@ describe("workspace workflow", () => {
       await run(Workspace.save(env.workspacePath, workspace));
 
       const plan = await run(Workspace.plan());
-      if (plan.blockers.length === 0) {
-        const published = await run(Workspace.publish());
-        expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"]);
+      expect(plan.blockers).toEqual([]);
+      const published = await run(Workspace.publish());
+      expect(published.publishedTargets).toEqual(["chrome/default", "chrome/profile-1"]);
 
-        const defaultTree = await run(
-          Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")),
-        );
-        expect(defaultTree.bar?.map((node) => node.name)).toEqual(["Shared Everywhere"]);
+      const defaultTree = await run(
+        Chrome.readBookmarks(join(env.chromeDataDir, "Default", "Bookmarks")),
+      );
+      expect(defaultTree.bar?.map((node) => node.name)).toEqual(["Shared Everywhere"]);
 
-        const profileTree = await run(
-          Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")),
-        );
-        expect(profileTree.bar?.map((node) => node.name)).toEqual([
-          "Shared Everywhere",
-          "Profile One Only",
-        ]);
-      } else {
-        expect(plan.blockers.some((blocker) => blocker.code === "browser-running")).toBe(true);
-      }
+      const profileTree = await run(
+        Chrome.readBookmarks(join(env.chromeDataDir, "Profile 1", "Bookmarks")),
+      );
+      expect(profileTree.bar?.map((node) => node.name)).toEqual([
+        "Shared Everywhere",
+        "Profile One Only",
+      ]);
     } finally {
       await rm(env.dir, { recursive: true, force: true });
     }

@@ -6,7 +6,6 @@ import { DateTime, Effect, Schema } from "effect";
 import * as Yaml from "yaml";
 import * as Chrome from "./chrome.ts";
 import * as ManagedPaths from "./managed-paths.ts";
-import * as Orchestration from "./orchestration.ts";
 import * as Patch from "./patch.ts";
 import * as Paths from "./paths.ts";
 import * as Permissions from "./permissions.ts";
@@ -60,16 +59,58 @@ export interface WorkspaceValidationResult {
 
 export interface WorkspacePublishResult {
   readonly plan: WorkspacePlan;
-  readonly backup: WorkspaceBackupResult | null;
+  readonly backup: WorkspaceBackupResult;
   readonly publishedTargets: readonly string[];
-  readonly orchestration?: Orchestration.WorkspacePublishNotice;
 }
 
 const WORKSPACE_MODELINE = "# bookmarks-workspace: version=1\n";
 const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
+const supportedSectionsByBrowser: Record<string, readonly (typeof sectionKeys)[number][]> = {
+  safari: ["bar", "menu", "reading_list"],
+  chrome: ["bar", "menu", "mobile"],
+};
 
 const emptyTree = (): WorkspaceTree => ({});
 const emptyScopedTrees = (): WorkspaceScopedTrees => ({ global: {}, profiles: {} });
+
+const supportedSectionsForBrowser = (browser: string): ReadonlySet<(typeof sectionKeys)[number]> =>
+  new Set(supportedSectionsByBrowser[browser] ?? sectionKeys);
+
+const projectWorkspaceTreeForBrowser = (tree: WorkspaceTree, browser: string): WorkspaceTree => {
+  const supportedSections = supportedSectionsForBrowser(browser);
+  const next: WorkspaceTree = {};
+
+  for (const key of sectionKeys) {
+    if (!supportedSections.has(key)) continue;
+    const nodes = tree[key];
+    if (nodes && nodes.length > 0) next[key] = nodes;
+  }
+
+  return next;
+};
+
+const unsupportedWorkspaceSectionsForBrowser = (
+  tree: WorkspaceTree,
+  browser: string,
+  locationRoot: readonly string[],
+  targetId: string,
+): readonly WorkspacePlanBlocker[] => {
+  const supportedSections = supportedSectionsForBrowser(browser);
+  const blockers: WorkspacePlanBlocker[] = [];
+
+  for (const key of sectionKeys) {
+    if (supportedSections.has(key)) continue;
+    if ((tree[key]?.length ?? 0) === 0) continue;
+    blockers.push({
+      code: "unsupported-node",
+      targetId,
+      location: [...locationRoot, key].join("/"),
+      message: `Section "${key}" is not supported for ${targetId}.`,
+    });
+  }
+
+  return blockers;
+};
 
 const exists = (path: string): Effect.Effect<boolean, Error> =>
   Effect.tryPromise({
@@ -632,16 +673,6 @@ const planSummary = (
   blockerCount: blockers.length,
 });
 
-const planBrowserBlockers = (plan: WorkspacePlan): readonly string[] => [
-  ...new Set(
-    plan.targets.flatMap((target) =>
-      target.enabled && target.blockers.some((blocker) => blocker.code === "browser-running")
-        ? [Targets.processNameOf(target.browser)]
-        : [],
-    ),
-  ),
-];
-
 const buildPlan = (
   workspace: WorkspaceFile,
   workspacePath: string,
@@ -669,9 +700,6 @@ const buildPlan = (
       });
     }
 
-    const convertedGlobal = convertTreeForPublish(workspace.publish.global, ["publish", "global"]);
-    blockers.push(...convertedGlobal.blockers);
-
     const selectedTargets = yield* Targets.resolveTargetSelectors(
       Object.values(workspace.targets).map(targetToDescriptor),
       requestedTargetIds,
@@ -685,8 +713,28 @@ const buildPlan = (
       const targetBlockers: WorkspacePlanBlocker[] = [];
       const targetEnabled = target.enabled ?? true;
       if (targetEnabled) {
+        const projectedGlobalTree = projectWorkspaceTreeForBrowser(
+          workspace.publish.global,
+          target.browser,
+        );
+        const convertedGlobal = convertTreeForPublish(
+          projectedGlobalTree,
+          ["publish", "global"],
+          targetId,
+        );
+        targetBlockers.push(...convertedGlobal.blockers);
+
+        const profileTree = workspace.publish.profiles[targetId] ?? emptyTree();
+        targetBlockers.push(
+          ...unsupportedWorkspaceSectionsForBrowser(
+            profileTree,
+            target.browser,
+            ["publish", "profiles", targetId],
+            targetId,
+          ),
+        );
         const convertedProfile = convertTreeForPublish(
-          workspace.publish.profiles[targetId] ?? emptyTree(),
+          projectWorkspaceTreeForBrowser(profileTree, target.browser),
           ["publish", "profiles", targetId],
           targetId,
           new Map(convertedGlobal.seenUrls),
@@ -716,18 +764,7 @@ const buildPlan = (
         }
       }
 
-      if (
-        targetEnabled &&
-        (yield* Permissions.checkBrowserRunning(Targets.processNameOf(target.browser)))
-      ) {
-        targetBlockers.push({
-          code: "browser-running",
-          targetId,
-          message: `${Targets.processNameOf(target.browser)} is currently running.`,
-        });
-      }
-
-      blockers.push(...targetBlockers.filter((blocker) => blocker.code !== "browser-running"));
+      blockers.push(...targetBlockers);
       targets.push({
         targetId,
         browser: target.browser,
@@ -812,90 +849,54 @@ export const publishTo = (
       return yield* Effect.fail(new Error(validation.errors.join("\n")));
     }
 
-    const initialBuilt = yield* buildPlan(
+    const built = yield* buildPlan(
       workspace,
       workspacePath,
       workspaceHash(rawWorkspace),
       requestedTargetIds,
     );
-    yield* savePlan(planPath, initialBuilt.plan);
-
-    let latestBuilt = initialBuilt;
-
-    const publishResult = yield* Orchestration.withOrchestratedWorkspacePublish(
-      workspacePath,
-      requestedTargetIds,
-      (effectiveTargetIds) =>
-        Effect.gen(function* () {
-          const built = yield* buildPlan(
-            workspace,
-            workspacePath,
-            workspaceHash(rawWorkspace),
-            effectiveTargetIds,
-          );
-          latestBuilt = built;
-          yield* savePlan(planPath, built.plan);
-
-          if (built.plan.blockers.length > 0) {
-            return yield* Effect.fail(
-              new Error(built.plan.blockers.map((blocker) => blocker.message).join("\n")),
-            );
-          }
-
-          const browserBlockers = planBrowserBlockers(built.plan);
-          if (browserBlockers.length > 0) {
-            return yield* Effect.fail(
-              new Orchestration.TemporarySyncBlocker({ blockers: browserBlockers }),
-            );
-          }
-
-          const backup = yield* backupArtifacts("workspace-publish", [
-            { label: "workspace", path: workspacePath },
-            { label: "import-lock", path: importLockPath },
-            { label: "publish-plan", path: planPath },
-            ...built.plan.targets
-              .filter((target) => target.status === "ready")
-              .map((target) => ({ label: target.targetId, path: target.path })),
-          ]);
-
-          const publishedTargets: string[] = [];
-          for (const target of built.plan.targets.filter((target) => target.status === "ready")) {
-            const publishTree = built.publishTrees[target.targetId]!;
-            const descriptor = targetToDescriptor(workspace.targets[target.targetId]!);
-            yield* Targets.writeTree(descriptor, publishTree);
-            const readBack = yield* Targets.readTree(descriptor);
-            const verified = yield* plansEqual(readBack, publishTree);
-            if (!verified) {
-              return yield* Effect.fail(
-                new Error(`Post-publish verification failed for ${target.targetId}`),
-              );
-            }
-            publishedTargets.push(target.targetId);
-          }
-
-          const publishedPlan: WorkspacePlan = {
-            ...built.plan,
-            publishedAt: DateTime.formatIso(DateTime.unsafeNow()),
-          };
-          yield* savePlan(planPath, publishedPlan);
-
-          return {
-            plan: publishedPlan,
-            backup,
-            publishedTargets,
-          };
-        }),
-    );
-
-    if (publishResult._tag === "completed") {
-      return publishResult.value;
+    if (built.plan.blockers.length > 0) {
+      return yield* Effect.fail(
+        new Error(built.plan.blockers.map((blocker) => blocker.message).join("\n")),
+      );
     }
 
+    yield* savePlan(planPath, built.plan);
+
+    const backup = yield* backupArtifacts("workspace-publish", [
+      { label: "workspace", path: workspacePath },
+      { label: "import-lock", path: importLockPath },
+      { label: "publish-plan", path: planPath },
+      ...built.plan.targets
+        .filter((target) => target.status === "ready")
+        .map((target) => ({ label: target.targetId, path: target.path })),
+    ]);
+
+    const publishedTargets: string[] = [];
+    for (const target of built.plan.targets.filter((target) => target.status === "ready")) {
+      const publishTree = built.publishTrees[target.targetId]!;
+      const descriptor = targetToDescriptor(workspace.targets[target.targetId]!);
+      yield* Targets.writeTree(descriptor, publishTree);
+      const readBack = yield* Targets.readTree(descriptor);
+      const verified = yield* plansEqual(readBack, publishTree);
+      if (!verified) {
+        return yield* Effect.fail(
+          new Error(`Post-publish verification failed for ${target.targetId}`),
+        );
+      }
+      publishedTargets.push(target.targetId);
+    }
+
+    const publishedPlan: WorkspacePlan = {
+      ...built.plan,
+      publishedAt: DateTime.formatIso(DateTime.unsafeNow()),
+    };
+    yield* savePlan(planPath, publishedPlan);
+
     return {
-      plan: latestBuilt.plan,
-      backup: null,
-      publishedTargets: [],
-      orchestration: publishResult.notice,
+      plan: publishedPlan,
+      backup,
+      publishedTargets,
     };
   });
 

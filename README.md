@@ -113,11 +113,10 @@ What each file does:
 - `import.lock.json` is the machine-owned record of imported browser occurrences
 - `publish.plan.json` is the generated write plan with blockers and target status
 
-Workspace publish now treats open browsers as a temporary runtime condition instead of a hard failure:
+Workspace publish no longer requires Safari or Chrome to be closed:
 
-- `bookmarks plan` still succeeds and shows browser-running blockers on the affected targets
-- `bookmarks publish` queues the publish when Safari or Chrome are open
-- the queued publish replays on the next `bookmarks publish` after those browsers close
+- `bookmarks plan` focuses on structural and permission blockers
+- `bookmarks publish` always backs up, attempts the write, then rereads and verifies the result
 
 The curated publish tree is split explicitly:
 
@@ -152,7 +151,7 @@ Notes:
 - `import`, `status`, `pull`, `push`, `sync`, `plan`, and `publish` all accept optional target selectors.
 - omitting selectors means all discovered profiles for the addressed browsers.
 - `validate` validates `workspace.yaml` when it exists, otherwise it falls back to `bookmarks.yaml`.
-- `plan` generates the exact publish plan and fails clearly when review or environment blockers remain.
+- `plan` generates the exact publish plan and fails clearly when review, target, or permission blockers remain.
 - `publish` always creates backups before writing target files, then rereads and verifies the result.
 - `next` supports `--json` for agents and scripts.
 - `status` shows pending changes in both directions and now includes patch previews.
@@ -160,7 +159,7 @@ Notes:
 - non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
 - the explicit `bookmarks backup` command is still available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
-- runtime orchestration serializes active sync runs and queues temporary browser-open blockers instead of forcing manual retry loops.
+- runtime orchestration still serializes active sync runs for the legacy sync path.
 
 ## Global Install Notes
 

@@ -443,7 +443,7 @@ describe("bookmarks CLI", () => {
     }
   });
 
-  test("workspace publish queues instead of failing when browsers are open", async () => {
+  test("workspace publish succeeds even when browsers are open", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-workspace-queue-"));
     const yamlPath = join(dir, "bookmarks.yaml");
     const workspacePath = join(dir, "workspace.yaml");
@@ -517,43 +517,20 @@ describe("bookmarks CLI", () => {
         }>;
       };
       expect(parsedPlan.summary.blockerCount).toBe(0);
-      expect(parsedPlan.targets[0]?.status).toBe("blocked");
-      expect(
-        parsedPlan.targets[0]?.blockers.some((blocker) => blocker.code === "browser-running"),
-      ).toBe(true);
+      expect(parsedPlan.targets[0]?.status).toBe("ready");
+      expect(parsedPlan.targets[0]?.blockers).toEqual([]);
 
-      const queued = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], {
+      const published = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], {
         ...cliEnv,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
       });
-      expect(queued.exitCode).toBe(0);
-      const parsedQueued = JSON.parse(queued.stdout) as {
-        readonly publishedTargets: readonly string[];
-        readonly backup: null;
-        readonly orchestration: {
-          readonly state: string;
-          readonly operation: string;
-          readonly blockers: readonly string[];
-        };
-      };
-      expect(parsedQueued.publishedTargets).toEqual([]);
-      expect(parsedQueued.backup).toBeNull();
-      expect(parsedQueued.orchestration.state).toBe("queued");
-      expect(parsedQueued.orchestration.operation).toBe("publish");
-      expect(parsedQueued.orchestration.blockers).toEqual(["Google Chrome"]);
-
-      const published = await runCommand(
-        dir,
-        [process.execPath, cliPath, "publish", "--json"],
-        cliEnv,
-      );
       expect(published.exitCode).toBe(0);
       const parsedPublished = JSON.parse(published.stdout) as {
         readonly publishedTargets: readonly string[];
-        readonly orchestration?: unknown;
+        readonly backup: { readonly files: readonly string[] };
       };
-      expect(parsedPublished.orchestration).toBeUndefined();
       expect(parsedPublished.publishedTargets).toEqual(["chrome/default"]);
+      expect(parsedPublished.backup.files.length).toBeGreaterThan(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
