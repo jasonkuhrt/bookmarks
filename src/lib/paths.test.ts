@@ -1,4 +1,3 @@
-/* oxlint-disable no-unsafe-type-assertion */
 import { afterEach, describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -11,9 +10,7 @@ const ENV_KEYS = [
   "BOOKMARKS_STATE_DIR",
   "BOOKMARKS_YAML_PATH",
   "BOOKMARKS_SCHEMA_PATH",
-  "BOOKMARKS_WORKSPACE_PATH",
-  "BOOKMARKS_IMPORT_LOCK_PATH",
-  "BOOKMARKS_PUBLISH_PLAN_PATH",
+  "BOOKMARKS_SYNC_BASELINE_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
   "BOOKMARKS_SAFARI_PLIST_PATH",
@@ -22,10 +19,21 @@ const ENV_KEYS = [
   "BOOKMARKS_CHROME_BOOKMARKS_PATH",
 ] as const;
 
-const ORIGINAL_ENV = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as Record<
-  (typeof ENV_KEYS)[number],
-  string | undefined
->;
+const ORIGINAL_ENV: Record<(typeof ENV_KEYS)[number], string | undefined> = {
+  XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"],
+  XDG_STATE_HOME: process.env["XDG_STATE_HOME"],
+  BOOKMARKS_CONFIG_DIR: process.env["BOOKMARKS_CONFIG_DIR"],
+  BOOKMARKS_STATE_DIR: process.env["BOOKMARKS_STATE_DIR"],
+  BOOKMARKS_YAML_PATH: process.env["BOOKMARKS_YAML_PATH"],
+  BOOKMARKS_SCHEMA_PATH: process.env["BOOKMARKS_SCHEMA_PATH"],
+  BOOKMARKS_SYNC_BASELINE_PATH: process.env["BOOKMARKS_SYNC_BASELINE_PATH"],
+  BOOKMARKS_BACKUP_DIR: process.env["BOOKMARKS_BACKUP_DIR"],
+  BOOKMARKS_RUNTIME_DIR: process.env["BOOKMARKS_RUNTIME_DIR"],
+  BOOKMARKS_SAFARI_PLIST_PATH: process.env["BOOKMARKS_SAFARI_PLIST_PATH"],
+  BOOKMARKS_SAFARI_TABS_DB_PATH: process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"],
+  BOOKMARKS_CHROME_DATA_DIR: process.env["BOOKMARKS_CHROME_DATA_DIR"],
+  BOOKMARKS_CHROME_BOOKMARKS_PATH: process.env["BOOKMARKS_CHROME_BOOKMARKS_PATH"],
+};
 
 afterEach(() => {
   for (const key of ENV_KEYS) {
@@ -48,14 +56,8 @@ describe("paths", () => {
     expect(Paths.defaultSchemaPath()).toBe(
       join(homedir(), ".config", "bookmarks", "bookmarks.schema.json"),
     );
-    expect(Paths.defaultWorkspacePath()).toBe(
-      join(homedir(), ".local", "state", "bookmarks", "workspace.yaml"),
-    );
-    expect(Paths.defaultImportLockPath()).toBe(
-      join(homedir(), ".local", "state", "bookmarks", "import.lock.json"),
-    );
-    expect(Paths.defaultPublishPlanPath()).toBe(
-      join(homedir(), ".local", "state", "bookmarks", "publish.plan.json"),
+    expect(Paths.defaultSyncBaselinePath()).toBe(
+      join(homedir(), ".local", "state", "bookmarks", "sync-baseline.yaml"),
     );
     expect(Paths.defaultBackupDir()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "backups"),
@@ -86,9 +88,7 @@ describe("paths", () => {
     expect(Paths.defaultStateDir()).toBe("/tmp/bookmarks-state");
     expect(Paths.defaultYamlPath()).toBe("/tmp/bookmarks-config/bookmarks.yaml");
     expect(Paths.defaultSchemaPath()).toBe("/tmp/bookmarks-config/bookmarks.schema.json");
-    expect(Paths.defaultWorkspacePath()).toBe("/tmp/bookmarks-state/workspace.yaml");
-    expect(Paths.defaultImportLockPath()).toBe("/tmp/bookmarks-state/import.lock.json");
-    expect(Paths.defaultPublishPlanPath()).toBe("/tmp/bookmarks-state/publish.plan.json");
+    expect(Paths.defaultSyncBaselinePath()).toBe("/tmp/bookmarks-state/sync-baseline.yaml");
     expect(Paths.defaultBackupDir()).toBe("/tmp/bookmarks-state/backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/bookmarks-state/runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/bookmarks-state/runtime/sync.lock.json");
@@ -105,9 +105,7 @@ describe("paths", () => {
   test("file-specific env vars override derived paths", () => {
     process.env["BOOKMARKS_YAML_PATH"] = "/tmp/custom.yaml";
     process.env["BOOKMARKS_SCHEMA_PATH"] = "/tmp/custom.schema.json";
-    process.env["BOOKMARKS_WORKSPACE_PATH"] = "/tmp/workspace.yaml";
-    process.env["BOOKMARKS_IMPORT_LOCK_PATH"] = "/tmp/import.lock.json";
-    process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] = "/tmp/publish.plan.json";
+    process.env["BOOKMARKS_SYNC_BASELINE_PATH"] = "/tmp/sync-baseline.yaml";
     process.env["BOOKMARKS_BACKUP_DIR"] = "/tmp/custom-backups";
     process.env["BOOKMARKS_RUNTIME_DIR"] = "/tmp/custom-runtime";
     process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = "/tmp/Safari/Bookmarks.plist";
@@ -117,9 +115,7 @@ describe("paths", () => {
 
     expect(Paths.defaultYamlPath()).toBe("/tmp/custom.yaml");
     expect(Paths.defaultSchemaPath()).toBe("/tmp/custom.schema.json");
-    expect(Paths.defaultWorkspacePath()).toBe("/tmp/workspace.yaml");
-    expect(Paths.defaultImportLockPath()).toBe("/tmp/import.lock.json");
-    expect(Paths.defaultPublishPlanPath()).toBe("/tmp/publish.plan.json");
+    expect(Paths.defaultSyncBaselinePath()).toBe("/tmp/sync-baseline.yaml");
     expect(Paths.defaultBackupDir()).toBe("/tmp/custom-backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json");

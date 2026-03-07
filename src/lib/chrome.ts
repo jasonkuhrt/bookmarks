@@ -12,10 +12,8 @@ import { rename } from "node:fs/promises";
 import * as Patch from "./patch.ts";
 import type { BookmarkNode, BookmarkSection } from "./schema/__.ts";
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
-import type { WorkspaceNode, WorkspaceTree } from "./schema/workspace.ts";
 import { separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.ts";
 import type { BookmarkIssue } from "./unsupported.ts";
-import type { ImportedOccurrence, ImportedTargetSnapshot } from "./workspace-types.ts";
 
 // -- Chrome JSON type aliases --
 
@@ -219,124 +217,6 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
       menu: sections.menu,
       mobile: sections.mobile,
     });
-  });
-
-export const importBookmarks = (
-  bookmarksPath: string,
-  targetId: string,
-): Effect.Effect<ImportedTargetSnapshot, Error> =>
-  Effect.gen(function* () {
-    const text = yield* Effect.tryPromise({
-      try: () => Bun.file(bookmarksPath).text(),
-      catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
-    });
-
-    const file = JSON.parse(text) as ChromeBookmarksFile;
-    const { roots } = file;
-    const occurrences: ImportedOccurrence[] = [];
-    const targetToken = targetId.replaceAll("/", "__").replaceAll(/[^a-zA-Z0-9_]/g, "_");
-    let nextNodeId = 1;
-    let nextOccurrenceId = 1;
-
-    const allocateNodeId = () => `node_${targetToken}_${nextNodeId++}`;
-    const allocateOccurrenceId = () => `occ_${targetToken}_${nextOccurrenceId++}`;
-
-    const importNodes = (children: ChromeNode[], parentPath: readonly string[]): WorkspaceNode[] =>
-      children.map((child, index) => {
-        const occurrenceId = allocateOccurrenceId();
-        const fallbackTitle = child.name || `[${index + 1}]`;
-        const itemPath = [...parentPath, fallbackTitle];
-
-        switch (child.type) {
-          case "url": {
-            occurrences.push({
-              id: occurrenceId,
-              targetId,
-              nativeId: child.id,
-              kind: "bookmark",
-              title: child.name,
-              ...(child.url === undefined ? {} : { url: child.url }),
-              path: itemPath,
-              nativeKinds: [child.type],
-            });
-            return {
-              kind: "bookmark" as const,
-              id: allocateNodeId(),
-              title: child.name,
-              url: child.url ?? "",
-              sources: [occurrenceId],
-            };
-          }
-          case "folder": {
-            occurrences.push({
-              id: occurrenceId,
-              targetId,
-              nativeId: child.id,
-              kind: "folder",
-              title: child.name,
-              path: itemPath,
-              nativeKinds: [child.type],
-            });
-            return {
-              kind: "folder" as const,
-              id: allocateNodeId(),
-              title: child.name,
-              children: importNodes(child.children ?? [], itemPath) ?? [],
-              sources: [occurrenceId],
-            };
-          }
-          case "separator": {
-            occurrences.push({
-              id: occurrenceId,
-              targetId,
-              nativeId: child.id,
-              kind: "separator",
-              title: fallbackTitle,
-              path: itemPath,
-              nativeKinds: [child.type],
-              payload: JSON.parse(JSON.stringify(child)),
-            });
-            return {
-              kind: "separator" as const,
-              id: allocateNodeId(),
-              sources: [occurrenceId],
-              note: "Imported from Chrome separator",
-            };
-          }
-          default: {
-            occurrences.push({
-              id: occurrenceId,
-              targetId,
-              nativeId: child.id,
-              kind: "raw",
-              title: fallbackTitle,
-              ...(child.url === undefined ? {} : { url: child.url }),
-              path: itemPath,
-              nativeKinds: [child.type],
-              payload: JSON.parse(JSON.stringify(child)),
-            });
-            return {
-              kind: "raw" as const,
-              id: allocateNodeId(),
-              title: fallbackTitle,
-              nativeKinds: [child.type],
-              sources: [occurrenceId],
-              note: `Imported unsupported Chrome node type "${child.type}"`,
-            };
-          }
-        }
-      });
-
-    const tree: WorkspaceTree = {};
-
-    for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
-      const rootNode = roots[chromeKey as keyof ChromeRoot];
-      if (rootNode?.children && rootNode.children.length > 0) {
-        tree[sectionKey] = importNodes(rootNode.children, [sectionKey]);
-      }
-    }
-
-    return { tree, occurrences };
   });
 
 // -- applyPatches --

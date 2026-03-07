@@ -12,6 +12,4 @@ export * as Schema from "#lib/schema/__";
 export * as Sync from "#lib/sync";
 export * as Targets from "#lib/targets";
 export * as Unsupported from "#lib/unsupported";
-export * as Workspace from "#lib/workspace";
-export * as WorkspaceTypes from "#lib/workspace-types";
 export * as Yaml from "#lib/yaml";

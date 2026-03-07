@@ -19,14 +19,8 @@ export const defaultYamlPath = (): string =>
 export const defaultSchemaPath = (): string =>
   process.env["BOOKMARKS_SCHEMA_PATH"] ?? join(defaultConfigDir(), "bookmarks.schema.json");
 
-export const defaultWorkspacePath = (): string =>
-  process.env["BOOKMARKS_WORKSPACE_PATH"] ?? join(defaultStateDir(), "workspace.yaml");
-
-export const defaultImportLockPath = (): string =>
-  process.env["BOOKMARKS_IMPORT_LOCK_PATH"] ?? join(defaultStateDir(), "import.lock.json");
-
-export const defaultPublishPlanPath = (): string =>
-  process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] ?? join(defaultStateDir(), "publish.plan.json");
+export const defaultSyncBaselinePath = (): string =>
+  process.env["BOOKMARKS_SYNC_BASELINE_PATH"] ?? join(defaultStateDir(), "sync-baseline.yaml");
 
 export const defaultBackupDir = (): string =>
   process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultStateDir(), "backups");

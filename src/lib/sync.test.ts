@@ -1,4 +1,3 @@
-/* oxlint-disable await-thenable, no-confusing-void-expression, no-non-null-assertion, no-unsafe-argument, no-unsafe-type-assertion */
 import { describe, expect, test } from "bun:test";
 import { DateTime, Effect } from "effect";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -8,6 +7,7 @@ import * as Chrome from "./chrome.ts";
 import {
   BookmarkFolder,
   BookmarkLeaf,
+  type BookmarkNode,
   BookmarksConfig,
   BookmarkTree,
   ChromeBookmarks,
@@ -26,9 +26,23 @@ const folder = (name: string, children: Array<BookmarkLeaf | BookmarkFolder>) =>
 
 const emptyTree = () => new BookmarkTree({});
 
-type SafariInput = Parameters<typeof SafariBookmarks.make>[0];
-type ChromeProfileInput = Parameters<typeof ChromeProfileBookmarks.make>[0];
-type ChromeInput = Omit<Parameters<typeof ChromeBookmarks.make>[0], "profiles"> & {
+type SafariInput = {
+  readonly enabled?: boolean;
+  readonly bar?: readonly BookmarkNode[];
+  readonly menu?: readonly BookmarkNode[];
+  readonly reading_list?: readonly BookmarkNode[];
+};
+type ChromeProfileInput = {
+  readonly enabled?: boolean;
+  readonly bar?: readonly BookmarkNode[];
+  readonly menu?: readonly BookmarkNode[];
+  readonly mobile?: readonly BookmarkNode[];
+};
+type ChromeInput = {
+  readonly enabled?: boolean;
+  readonly bar?: readonly BookmarkNode[];
+  readonly menu?: readonly BookmarkNode[];
+  readonly mobile?: readonly BookmarkNode[];
   readonly profiles?: Readonly<Record<string, ChromeProfileInput>>;
 };
 
@@ -64,6 +78,63 @@ const makeConfig = (
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
 
 const makeDate = (iso: string): DateTime.Utc => DateTime.unsafeMake(iso);
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const expectSection = (
+  value: readonly BookmarkNode[] | undefined,
+  message: string,
+): readonly BookmarkNode[] => expectDefined(value, message);
+
+const expectLeaf = (value: BookmarkNode | undefined, message: string): BookmarkLeaf => {
+  const node = expectDefined(value, message);
+  expect(BookmarkLeaf.is(node)).toBe(true);
+  if (!BookmarkLeaf.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectFolder = (value: BookmarkNode | undefined, message: string): BookmarkFolder => {
+  const node = expectDefined(value, message);
+  expect(BookmarkFolder.is(node)).toBe(true);
+  if (!BookmarkFolder.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectRejects = async (promise: Promise<unknown>, message: string): Promise<void> => {
+  try {
+    await promise;
+    throw new Error(`Expected rejection containing "${message}"`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) {
+      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
+    }
+    expect(error.message).toContain(message);
+  }
+};
+
+const expectAnyRejection = async (promise: Promise<unknown>): Promise<void> => {
+  let rejected = false;
+  try {
+    await promise;
+  } catch {
+    rejected = true;
+  }
+  expect(rejected).toBe(true);
+  if (!rejected) {
+    throw new Error("Expected promise to reject");
+  }
+};
 
 const runGit = async (cwd: string, ...args: string[]): Promise<void> => {
   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -131,9 +202,11 @@ const setupDiscoveryEnv = async (
   readonly restore: () => void;
 }> => {
   const chromeDataDir = join(dir, "Chrome");
+  const syncBaselinePath = join(dir, "state", "sync-baseline.yaml");
   const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
   const originalSafariPlistPath = process.env["BOOKMARKS_SAFARI_PLIST_PATH"];
   const originalSafariTabsDbPath = process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"];
+  const originalSyncBaselinePath = process.env["BOOKMARKS_SYNC_BASELINE_PATH"];
 
   await mkdir(chromeDataDir, { recursive: true });
   await Bun.write(
@@ -148,6 +221,7 @@ const setupDiscoveryEnv = async (
   process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
   process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = join(dir, "Safari", "Missing-Bookmarks.plist");
   process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = join(dir, "Safari", "Missing-SafariTabs.db");
+  process.env["BOOKMARKS_SYNC_BASELINE_PATH"] = syncBaselinePath;
 
   return {
     chromeDataDir,
@@ -161,6 +235,12 @@ const setupDiscoveryEnv = async (
       if (originalSafariTabsDbPath === undefined)
         delete process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"];
       else process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = originalSafariTabsDbPath;
+
+      if (originalSyncBaselinePath === undefined) {
+        delete process.env["BOOKMARKS_SYNC_BASELINE_PATH"];
+      } else {
+        process.env["BOOKMARKS_SYNC_BASELINE_PATH"] = originalSyncBaselinePath;
+      }
     },
   };
 };
@@ -197,12 +277,12 @@ describe("resolveConflicts", () => {
     expect(result.graveyard.length).toBe(1);
 
     // Browser is newer → browser wins
-    const applied = result.apply[0]!;
+    const applied = expectDefined(result.apply[0], "expected applied conflict winner");
     expect(Patch.$is("Add")(applied)).toBe(true);
     if (Patch.$is("Add")(applied)) {
       expect(applied.name).toBe("Browser Version");
     }
-    const graveyarded = result.graveyard[0]!;
+    const graveyarded = expectDefined(result.graveyard[0], "expected graveyarded conflict loser");
     if (Patch.$is("Add")(graveyarded)) {
       expect(graveyarded.name).toBe("YAML Version");
     }
@@ -221,7 +301,7 @@ describe("resolveConflicts", () => {
     const result = await run(Sync.resolveConflicts(yamlPatches, browserPatches));
     expect(result.apply.length).toBe(1);
     expect(result.graveyard.length).toBe(1);
-    const applied = result.apply[0]!;
+    const applied = expectDefined(result.apply[0], "expected applied tie-break winner");
     if (Patch.$is("Add")(applied)) {
       expect(applied.name).toBe("YAML");
     }
@@ -253,9 +333,9 @@ describe("applyPatches", () => {
       Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
-    expect(result.bar).toBeDefined();
-    expect(result.bar!.length).toBe(1);
-    const node = result.bar![0] as BookmarkLeaf;
+    const bar = expectSection(result.bar, "expected bookmarks bar section");
+    expect(bar.length).toBe(1);
+    const node = expectLeaf(bar[0], "expected added bookmark leaf");
     expect(node.name).toBe("A");
     expect(node.url).toBe("https://a.com");
   });
@@ -271,22 +351,20 @@ describe("applyPatches", () => {
       }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
-    expect(result.bar).toBeDefined();
+    const bar = expectSection(result.bar, "expected bookmarks bar section");
 
-    const aiFolder = result.bar!.find(
-      (n) => BookmarkFolder.is(n) && n.name === "AI",
-    ) as BookmarkFolder;
-    expect(aiFolder).toBeDefined();
-
-    const toolsFolder = aiFolder.children.find(
-      (n) => BookmarkFolder.is(n) && n.name === "Tools",
-    ) as BookmarkFolder;
-    expect(toolsFolder).toBeDefined();
-
-    const gpt = toolsFolder.children.find(
-      (n) => BookmarkLeaf.is(n) && n.url === "https://gpt.com",
-    ) as BookmarkLeaf;
-    expect(gpt).toBeDefined();
+    const aiFolder = expectFolder(
+      bar.find((node) => BookmarkFolder.is(node) && node.name === "AI"),
+      'expected "AI" folder',
+    );
+    const toolsFolder = expectFolder(
+      aiFolder.children.find((node) => BookmarkFolder.is(node) && node.name === "Tools"),
+      'expected "Tools" folder',
+    );
+    const gpt = expectLeaf(
+      toolsFolder.children.find((node) => BookmarkLeaf.is(node) && node.url === "https://gpt.com"),
+      "expected ChatGPT bookmark",
+    );
     expect(gpt.name).toBe("ChatGPT");
   });
 
@@ -298,9 +376,9 @@ describe("applyPatches", () => {
       Patch.Remove({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
-    expect(result.bar).toBeDefined();
-    expect(result.bar!.length).toBe(1);
-    const remaining = result.bar![0] as BookmarkLeaf;
+    const bar = expectSection(result.bar, "expected remaining bar section");
+    expect(bar.length).toBe(1);
+    const remaining = expectLeaf(bar[0], "expected remaining bookmark");
     expect(remaining.url).toBe("https://b.com");
   });
 
@@ -331,11 +409,11 @@ describe("applyPatches", () => {
       }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
-    expect(result.bar).toBeDefined();
-    const node = result.bar!.find(
-      (n) => BookmarkLeaf.is(n) && n.url === "https://a.com",
-    ) as BookmarkLeaf;
-    expect(node).toBeDefined();
+    const bar = expectSection(result.bar, "expected bookmarks bar section");
+    const node = expectLeaf(
+      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com"),
+      "expected renamed bookmark",
+    );
     expect(node.name).toBe("New Name");
   });
 
@@ -354,11 +432,11 @@ describe("applyPatches", () => {
     ];
     const result = await run(Sync.applyPatches(tree, patches));
     expect(result.bar).toBeUndefined();
-    expect(result.menu).toBeDefined();
-    const node = result.menu!.find(
-      (n) => BookmarkLeaf.is(n) && n.url === "https://a.com",
-    ) as BookmarkLeaf;
-    expect(node).toBeDefined();
+    const menu = expectSection(result.menu, "expected menu section after move");
+    const node = expectLeaf(
+      menu.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com"),
+      "expected moved bookmark",
+    );
     expect(node.name).toBe("A");
   });
 
@@ -383,17 +461,20 @@ describe("applyPatches", () => {
       Patch.Add({ url: "https://new.com", name: "New", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
-    expect(result.bar).toBeDefined();
+    const bar = expectSection(result.bar, "expected bookmarks bar section");
 
-    const urls = result.bar!.filter((n): n is BookmarkLeaf => BookmarkLeaf.is(n)).map((n) => n.url);
+    const urls = bar
+      .filter((node): node is BookmarkLeaf => BookmarkLeaf.is(node))
+      .map((node) => node.url);
 
     expect(urls).toContain("https://rename.com");
     expect(urls).toContain("https://new.com");
     expect(urls).not.toContain("https://remove.com");
 
-    const renamed = result.bar!.find(
-      (n) => BookmarkLeaf.is(n) && n.url === "https://rename.com",
-    ) as BookmarkLeaf;
+    const renamed = expectLeaf(
+      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://rename.com"),
+      "expected renamed bookmark",
+    );
     expect(renamed.name).toBe("Renamed");
   });
 
@@ -402,8 +483,8 @@ describe("applyPatches", () => {
       bar: [leaf("A", "https://a.com")],
     });
     const result = await run(Sync.applyPatches(tree, []));
-    expect(result.bar).toBeDefined();
-    expect(result.bar!.length).toBe(1);
+    const bar = expectSection(result.bar, "expected bookmarks bar section");
+    expect(bar.length).toBe(1);
   });
 
   test("empty patches preserve sibling ordering and empty folders", async () => {
@@ -472,12 +553,12 @@ describe("decomposeResolvedTrees", () => {
       },
     );
 
-    expect(config.all.bar).toBeDefined();
-    const sharedFolder = config.all.bar!.find(
-      (node): node is BookmarkFolder => BookmarkFolder.is(node) && node.name === "Shared",
+    const allBar = expectSection(config.all.bar, "expected shared all.bar section");
+    const sharedFolder = expectFolder(
+      allBar.find((node) => BookmarkFolder.is(node) && node.name === "Shared"),
+      'expected shared "Shared" folder',
     );
-    expect(sharedFolder).toBeDefined();
-    expect(sharedFolder!.children.length).toBe(1);
+    expect(sharedFolder.children.length).toBe(1);
 
     expect(config.safari?.bar).toBeDefined();
     expect(config.chrome?.bar).toBeDefined();
@@ -508,8 +589,8 @@ describe("decomposeResolvedTrees", () => {
       },
     );
 
-    expect(config.all.menu).toBeDefined();
-    expect(config.all.menu!.length).toBe(1);
+    const allMenu = expectSection(config.all.menu, "expected shared all.menu section");
+    expect(allMenu.length).toBe(1);
     expect(config.safari?.menu).toBeUndefined();
     expect(config.chrome?.profiles?.["default"]?.menu).toBeUndefined();
   });
@@ -655,15 +736,16 @@ describe("push", () => {
         },
       });
 
-      await expect(
+      await expectRejects(
         run(
           Sync.push({
             yamlPath: join(dir, "bookmarks.yaml"),
             yamlOverride: config,
           }),
         ),
-      ).rejects.toThrow('Duplicate URL "https://dup.example"');
-      await expect(readdir(backupDir)).rejects.toThrow();
+        'Duplicate URL "https://dup.example"',
+      );
+      await expectAnyRejection(readdir(backupDir));
     } finally {
       discovery.restore();
       if (originalBackupDir === undefined) {
@@ -699,14 +781,15 @@ describe("push", () => {
         },
       });
 
-      await expect(
+      await expectRejects(
         run(
           Sync.push({
             yamlPath: join(dir, "bookmarks.yaml"),
             yamlOverride: config,
           }),
         ),
-      ).rejects.toThrow('Configured Chrome profile "default" was not discovered on this machine.');
+        'Configured Chrome profile "default" was not discovered on this machine.',
+      );
     } finally {
       discovery.restore();
       if (originalRuntimeDir === undefined) {
@@ -735,7 +818,7 @@ describe("push", () => {
         JSON.stringify({
           pid: process.pid,
           operation: "sync",
-          yamlPath: join(dir, "bookmarks.yaml"),
+          resourcePath: join(dir, "bookmarks.yaml"),
           acquiredAt: "2026-01-01T00:00:00.000Z",
         }),
       );
@@ -781,7 +864,7 @@ describe("git baseline helpers", () => {
     try {
       expect(await run(Sync.readGitBaselineConfig(yamlPath))).toBeNull();
       expect(await run(Sync.readGitBaseline(yamlPath))).toEqual(BookmarkTree.make({}));
-      await expect(run(Sync.gitAutoCommit(yamlPath))).resolves.toBeUndefined();
+      await run(Sync.gitAutoCommit(yamlPath));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -889,7 +972,7 @@ describe("pull", () => {
         },
       });
 
-      await expect(
+      await expectRejects(
         run(
           Sync.pull({
             yamlPath: join(dir, "bookmarks.yaml"),
@@ -897,7 +980,8 @@ describe("pull", () => {
             dryRun: true,
           }),
         ),
-      ).rejects.toThrow("Bookmark separators are not supported");
+        "Bookmark separators are not supported",
+      );
     } finally {
       discovery.restore();
       await rm(dir, { recursive: true, force: true });
@@ -983,15 +1067,16 @@ describe("sync", () => {
         },
       });
 
-      await expect(
+      await expectRejects(
         run(
           Sync.sync({
             yamlPath: join(dir, "bookmarks.yaml"),
             yamlOverride: config,
           }),
         ),
-      ).rejects.toThrow('Duplicate URL "https://dup.example"');
-      await expect(readdir(backupDir)).rejects.toThrow();
+        'Duplicate URL "https://dup.example"',
+      );
+      await expectAnyRejection(readdir(backupDir));
     } finally {
       discovery.restore();
       if (originalBackupDir === undefined) {
@@ -1050,6 +1135,93 @@ describe("sync", () => {
         delete process.env["BOOKMARKS_RUNTIME_DIR"];
       } else {
         process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("outside git, managed sync baseline keeps later structural syncs on the fast path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-managed-baseline-"));
+    const backupDir = join(dir, "backups");
+    const runtimeDir = join(dir, "runtime");
+    const syncBaselinePath = join(dir, "state", "sync-baseline.yaml");
+    const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"];
+    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"];
+    const originalSyncBaselinePath = process.env["BOOKMARKS_SYNC_BASELINE_PATH"];
+    const discovery = await setupDiscoveryEnv(dir);
+    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks");
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const initialBrowserTree = BookmarkTree.make({
+      bar: [folder("Existing Empty", []), leaf("Imported", "https://imported.example")],
+    });
+    const updatedConfig = makeConfig({
+      all: BookmarkTree.make({
+        bar: [
+          folder("Existing Empty", []),
+          leaf("Imported", "https://imported.example"),
+          folder("_Sync Test", [
+            leaf("Test Link 1", "https://example.com/?bookmarks-sync-test=1"),
+            leaf("Test Link 2", "https://example.com/?bookmarks-sync-test=2"),
+            leaf("Test Link 3", "https://example.com/?bookmarks-sync-test=3"),
+          ]),
+        ],
+      }),
+    });
+
+    try {
+      process.env["BOOKMARKS_BACKUP_DIR"] = backupDir;
+      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
+      process.env["BOOKMARKS_SYNC_BASELINE_PATH"] = syncBaselinePath;
+      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true });
+      await writeChromeFixture(chromePath, []);
+      await run(Chrome.writeTree(chromePath, initialBrowserTree));
+
+      await run(
+        Sync.sync({
+          yamlPath,
+        }),
+      );
+
+      expect(await Bun.file(syncBaselinePath).exists()).toBe(true);
+      const initialBaseline = await run(YamlModule.load(syncBaselinePath));
+      expect(initialBaseline.all.bar?.map((node) => node.name)).toEqual([
+        "Existing Empty",
+        "Imported",
+      ]);
+
+      await run(YamlModule.save(yamlPath, updatedConfig));
+
+      const result = await run(
+        Sync.sync({
+          yamlPath,
+        }),
+      );
+
+      expect(result.targets).toHaveLength(1);
+      expect(result.targets[0]?.target.profile).toBe("default");
+      expect(result.targets[0]?.writeMode).toBe("patches");
+
+      const browserTree = await run(Chrome.readBookmarks(chromePath));
+      expect(browserTree).toEqual(updatedConfig.all);
+
+      const managedBaseline = await run(YamlModule.load(syncBaselinePath));
+      expect(managedBaseline).toEqual(updatedConfig);
+    } finally {
+      discovery.restore();
+      if (originalBackupDir === undefined) {
+        delete process.env["BOOKMARKS_BACKUP_DIR"];
+      } else {
+        process.env["BOOKMARKS_BACKUP_DIR"] = originalBackupDir;
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env["BOOKMARKS_RUNTIME_DIR"];
+      } else {
+        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir;
+      }
+      if (originalSyncBaselinePath === undefined) {
+        delete process.env["BOOKMARKS_SYNC_BASELINE_PATH"];
+      } else {
+        process.env["BOOKMARKS_SYNC_BASELINE_PATH"] = originalSyncBaselinePath;
       }
       await rm(dir, { recursive: true, force: true });
     }

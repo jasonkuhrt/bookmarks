@@ -8,17 +8,11 @@
  *
  * Commands:
  *   sync        browsers <-> YAML fast path
- *   import      browsers -> workspace files
- *   push        YAML -> browsers
- *   pull        browsers -> YAML
- *   plan        workspace -> publish plan
- *   publish     workspace -> browsers
- *   next        guided workflow router
  *   status      show current state
  *   backup      timestamped backups
  *   gc          clean graveyard
  *   daemon      launchd lifecycle
- *   validate    validate workspace or YAML
+ *   validate    validate bookmarks.yaml
  */
 
 import type { DateTime } from "effect";
@@ -39,8 +33,6 @@ import * as Paths from "../lib/paths.ts";
 import * as SyncModule from "../lib/sync.ts";
 import * as Targets from "../lib/targets.ts";
 import { UnsupportedBookmarks } from "../lib/unsupported.ts";
-import * as Workspace from "../lib/workspace.ts";
-import type { WorkspaceNextResult, WorkspacePlan } from "../lib/workspace-types.ts";
 import * as YamlModule from "../lib/yaml.ts";
 
 const JSON_OUTPUT = process.argv.includes("--json");
@@ -60,18 +52,12 @@ Usage:
 
 Commands:
   bookmarks sync [target...] [--dry-run] [--json]    browsers <-> YAML fast path
-  bookmarks import [target...] [--json]      browsers -> workspace files
-  bookmarks push [target...] [--dry-run] [--json]    YAML -> browsers
-  bookmarks pull [target...] [--dry-run] [--json]    browsers -> YAML
-  bookmarks plan [target...] [--json]                workspace -> publish plan
-  bookmarks publish [target...] [--json]             workspace -> browsers
-  bookmarks next [--json]                guided workflow router
   bookmarks status [target...] [--json]  show current state
   bookmarks backup [--json]              timestamped backups
   bookmarks gc [--max-age=90d] [--json]  clean graveyard
   bookmarks daemon start|stop|status     launchd lifecycle
   bookmarks doctor [--json]              pre-flight diagnostics
-  bookmarks validate [--json]            validate workspace or YAML
+  bookmarks validate [--json]            validate bookmarks.yaml
 `.trim();
 
 interface CliFlags {
@@ -248,15 +234,15 @@ const printPatchPreview = (label: string, patches: readonly BookmarkPatch[]) =>
     }
   });
 
-const printDryRunPreview = (command: "push" | "pull" | "sync", status: SyncModule.StatusResult) =>
+const printDryRunPreview = (status: SyncModule.StatusResult) =>
   Effect.gen(function* () {
     if (status.targets.length === 0) return;
 
     yield* Console.log("  dry-run preview:");
 
     for (const targetStatus of status.targets) {
-      const showBrowser = command !== "pull" && targetStatus.yamlPatches.length > 0;
-      const showYaml = command !== "push" && targetStatus.browserPatches.length > 0;
+      const showBrowser = targetStatus.yamlPatches.length > 0;
+      const showYaml = targetStatus.browserPatches.length > 0;
 
       if (!showBrowser && !showYaml) continue;
 
@@ -374,139 +360,6 @@ const printBackupSummary = (result: SyncModule.BackupResult) =>
     }
   });
 
-const printWorkspaceImportSummary = (result: Workspace.WorkspaceImportResult) =>
-  Effect.gen(function* () {
-    yield* Console.log(`Workspace import complete: ${result.snapshotId}`);
-    yield* Console.log(`  workspace: ${result.workspacePath}`);
-    yield* Console.log(`  import lock: ${result.importLockPath}`);
-    yield* Console.log(`  targets: ${result.targets.join(", ")}`);
-    if (result.backup) {
-      yield* Console.log(`  backup: ${result.backup.backupDir}`);
-      for (const file of result.backup.files) {
-        yield* Console.log(`    wrote ${file}`);
-      }
-      for (const skipped of result.backup.skipped) {
-        yield* Console.log(`    skipped ${skipped}`);
-      }
-    }
-  });
-
-type SyncCommandOutcome =
-  | { readonly kind: "sync"; readonly result: SyncModule.SyncResult }
-  | { readonly kind: "workspace_fallback" };
-
-const shouldFallbackToWorkspace = (error: Error): boolean =>
-  UnsupportedBookmarks.is(error) ||
-  error.message.includes("Cannot safely merge divergent structural bookmark changes");
-
-const emitSyncWorkspaceFallback = (
-  requestedTargets: readonly string[],
-  json: boolean,
-  error: Error,
-): Effect.Effect<SyncCommandOutcome, Error> =>
-  Effect.gen(function* () {
-    const workspaceFallback = yield* Workspace.importState(requestedTargets);
-
-    if (json) {
-      yield* printJson({
-        command: "sync",
-        status: "workspace_fallback",
-        error: error.message,
-        type: UnsupportedBookmarks.is(error) ? error._tag : "UnsafeSync",
-        workspaceFallback,
-      });
-    } else {
-      yield* Console.error(error.message);
-      yield* Console.log("");
-      yield* Console.log(
-        "Sync stopped before mutation. Imported current browser state into a workspace for manual review.",
-      );
-      yield* printWorkspaceImportSummary(workspaceFallback);
-    }
-
-    return { kind: "workspace_fallback" } as const;
-  });
-
-const printWorkspaceValidation = (result: Workspace.WorkspaceValidationResult) =>
-  Effect.gen(function* () {
-    if (result.valid) {
-      yield* Console.log(`Workspace is valid: ${result.workspacePath}`);
-      return;
-    }
-
-    yield* Console.error(`Workspace validation failed: ${result.workspacePath}`);
-    for (const error of result.errors) {
-      yield* Console.error(`  - ${error}`);
-    }
-  });
-
-const printWorkspacePlan = (plan: WorkspacePlan) =>
-  Effect.gen(function* () {
-    yield* Console.log(`Plan generated: ${plan.generatedAt}`);
-    yield* Console.log(`  workspace: ${plan.workspacePath}`);
-    yield* Console.log(`  snapshot:  ${plan.snapshotId}`);
-    yield* Console.log(`  blockers:  ${plan.summary.blockerCount}`);
-    yield* Console.log(`  inbox:     ${plan.summary.inboxItems}`);
-    yield* Console.log(`  archive:   ${plan.summary.archiveItems}`);
-    yield* Console.log(`  quarantine:${plan.summary.quarantineItems}`);
-
-    for (const blocker of plan.blockers) {
-      const target = blocker.targetId ? ` [${blocker.targetId}]` : "";
-      const location = blocker.location ? ` (${blocker.location})` : "";
-      yield* Console.log(`  blocker${target}: ${blocker.message}${location}`);
-    }
-
-    for (const target of plan.targets) {
-      yield* Console.log(`  ${target.targetId}: ${target.status} (${target.writeMode})`);
-      for (const blocker of target.blockers) {
-        yield* Console.log(`    blocker: ${blocker.message}`);
-      }
-    }
-  });
-
-const printWorkspacePublishSummary = (result: Workspace.WorkspacePublishResult) =>
-  Effect.gen(function* () {
-    yield* Console.log(`Publish complete: ${result.publishedTargets.length} target(s) updated`);
-    yield* Console.log(`  generated at: ${result.plan.generatedAt}`);
-    yield* Console.log(`  published at: ${result.plan.publishedAt}`);
-    yield* Console.log(`  backup: ${result.backup.backupDir}`);
-    for (const file of result.backup.files) {
-      yield* Console.log(`    wrote ${file}`);
-    }
-    for (const skipped of result.backup.skipped) {
-      yield* Console.log(`    skipped ${skipped}`);
-    }
-    for (const targetId of result.publishedTargets) {
-      yield* Console.log(`  published: ${targetId}`);
-    }
-  });
-
-const printWorkspaceNext = (result: WorkspaceNextResult) =>
-  Effect.gen(function* () {
-    yield* Console.log(`Next: ${result.state}`);
-    yield* Console.log(
-      `  summary: inbox=${result.summary.inboxItems}, canonical=${result.summary.canonicalItems}, archive=${result.summary.archiveItems}, quarantine=${result.summary.quarantineItems}, blockers=${result.summary.blockerCount}`,
-    );
-    for (const blocker of result.blockers) {
-      const target = blocker.targetId ? ` [${blocker.targetId}]` : "";
-      const location = blocker.location ? ` (${blocker.location})` : "";
-      yield* Console.log(`  blocker${target}: ${blocker.message}${location}`);
-    }
-
-    switch (result.nextAction.kind) {
-      case "run_command":
-        yield* Console.log(`  run: ${result.nextAction.command}`);
-        break;
-      case "edit_file":
-      case "inspect_file":
-        yield* Console.log(`  file: ${result.nextAction.path}`);
-        break;
-      case "done":
-        break;
-    }
-    yield* Console.log(`  message: ${result.nextAction.message}`);
-  });
-
 const program = Effect.gen(function* () {
   const [command, ...args] = process.argv.slice(2);
 
@@ -518,111 +371,16 @@ const program = Effect.gen(function* () {
   const { flags, positional } = parseArgs(args);
 
   switch (command) {
-    case "import": {
-      const importResult = yield* Workspace.importState(positional);
-      if (flags.json) {
-        yield* printJson(importResult);
-      } else {
-        yield* printWorkspaceImportSummary(importResult);
-      }
-      break;
-    }
-    case "plan": {
-      const workspacePlan = yield* Workspace.planFor(positional);
-      if (flags.json) {
-        yield* printJson(workspacePlan);
-      } else {
-        yield* printWorkspacePlan(workspacePlan);
-      }
-      if (workspacePlan.blockers.length > 0) {
-        return yield* Effect.fail(new CliExitError());
-      }
-      break;
-    }
-    case "publish": {
-      const publishResult = yield* Workspace.publishTo(positional);
-      if (flags.json) {
-        yield* printJson(publishResult);
-      } else {
-        yield* printWorkspacePublishSummary(publishResult);
-      }
-      break;
-    }
-    case "next": {
-      const nextResult = yield* Workspace.next();
-      if (flags.json) {
-        yield* printJson(nextResult);
-      } else {
-        yield* printWorkspaceNext(nextResult);
-      }
-      if (nextResult.state === "has_blockers") {
-        return yield* Effect.fail(new CliExitError());
-      }
-      break;
-    }
-    case "push": {
-      const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
-      const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
-        : undefined;
-      const pushResult = yield* SyncModule.push({
-        yamlPath: managed.yamlPath,
-        dryRun: flags.dryRun,
-        requestedTargets: positional,
-      });
-      if (flags.json) {
-        yield* printJson({
-          ...serializeSyncResult("push", managed.yamlPath, flags.dryRun, pushResult),
-          preview: preview ? serializeStatus(preview) : null,
-        });
-      } else {
-        yield* printSyncSummary("Push", pushResult, { showDetails: false });
-        if (preview) yield* printDryRunPreview("push", preview);
-      }
-      break;
-    }
-    case "pull": {
-      const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
-      const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
-        : undefined;
-      const pullResult = yield* SyncModule.pull({
-        yamlPath: managed.yamlPath,
-        dryRun: flags.dryRun,
-        requestedTargets: positional,
-      });
-      if (flags.json) {
-        yield* printJson({
-          ...serializeSyncResult("pull", managed.yamlPath, flags.dryRun, pullResult),
-          preview: preview ? serializeStatus(preview) : null,
-        });
-      } else {
-        yield* printSyncSummary("Pull", pullResult, { showDetails: false });
-        if (preview) yield* printDryRunPreview("pull", preview);
-      }
-      break;
-    }
     case "sync": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
       const preview = flags.dryRun
         ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
         : undefined;
-      const syncOutcome = yield* SyncModule.sync({
+      const syncResult = yield* SyncModule.sync({
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
         requestedTargets: positional,
-      }).pipe(
-        Effect.map((result) => ({ kind: "sync", result }) as const),
-        Effect.catchAll((error) =>
-          !flags.dryRun && shouldFallbackToWorkspace(error)
-            ? emitSyncWorkspaceFallback(positional, flags.json, error)
-            : Effect.fail(error),
-        ),
-      );
-
-      if (syncOutcome.kind === "workspace_fallback") break;
-
-      const syncResult = syncOutcome.result;
+      });
       if (flags.json) {
         yield* printJson({
           ...serializeSyncResult("sync", managed.yamlPath, flags.dryRun, syncResult),
@@ -630,7 +388,7 @@ const program = Effect.gen(function* () {
         });
       } else {
         yield* printSyncSummary("Sync", syncResult, { showDetails: false });
-        if (preview) yield* printDryRunPreview("sync", preview);
+        if (preview) yield* printDryRunPreview(preview);
       }
       break;
     }
@@ -737,33 +495,16 @@ const program = Effect.gen(function* () {
       break;
     }
     case "validate": {
-      const workspacePath = Paths.defaultWorkspacePath();
-      if (yield* pathExists(workspacePath)) {
-        const result = yield* Workspace.validate();
-        if (flags.json) {
-          yield* printJson(result);
-        } else {
-          yield* printWorkspaceValidation(result);
-        }
-        if (!result.valid) {
-          return yield* Effect.fail(new CliExitError());
-        }
-        break;
-      }
-
       const yamlPath = Paths.defaultYamlPath();
       if (!(yield* pathExists(yamlPath))) {
-        return yield* emitCliError(
-          `No workspace found at ${workspacePath} and no bookmarks.yaml found at ${yamlPath}.`,
-          flags.json,
-        );
+        return yield* emitCliError(`No bookmarks.yaml found at ${yamlPath}.`, flags.json);
       }
 
       const managed = yield* ensureManagedFiles(yamlPath);
       yield* YamlModule.load(managed.yamlPath).pipe(
         Effect.flatMap(() =>
           flags.json
-            ? printJson({ path: managed.yamlPath, kind: "yaml", valid: true })
+            ? printJson({ path: managed.yamlPath, valid: true })
             : Console.log("bookmarks.yaml is valid"),
         ),
         Effect.catchAll((e) =>
@@ -771,7 +512,6 @@ const program = Effect.gen(function* () {
             if (flags.json) {
               yield* printJson({
                 path: managed.yamlPath,
-                kind: "yaml",
                 valid: false,
                 error: e.message,
               });

@@ -1,4 +1,3 @@
-/* oxlint-disable no-await-in-loop, no-unsafe-type-assertion */
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { serialize } from "@plist/binary.serialize";
@@ -14,7 +13,6 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
 } from "../lib/schema/__.ts";
-import * as Workspace from "../lib/workspace.ts";
 import * as YamlModule from "../lib/yaml.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
@@ -45,6 +43,113 @@ const runGit = async (cwd: string, ...args: string[]) => {
   const result = await runCommand(cwd, ["git", ...args]);
   expect(result.exitCode).toBe(0);
   return result;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const parseJsonObject = (text: string): Record<string, unknown> => {
+  const parsed: unknown = JSON.parse(text);
+  if (!isRecord(parsed)) {
+    throw new Error("Expected CLI JSON output to be an object");
+  }
+  return parsed;
+};
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const expectPresent = <T>(value: T | null | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  expect(value).not.toBeNull();
+  if (value === undefined || value === null) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const withCliEnv = (dir: string, env: Record<string, string>): Record<string, string> => ({
+  ...env,
+  BOOKMARKS_SYNC_BASELINE_PATH: join(dir, "state", "sync-baseline.yaml"),
+});
+
+const readObject = (record: Record<string, unknown>, key: string): Record<string, unknown> => {
+  const value = record[key];
+  if (!isRecord(value)) {
+    throw new Error(`Expected "${key}" to be an object`);
+  }
+  return value;
+};
+
+const readNullableObject = (
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null => {
+  const value = record[key];
+  if (value === null) return null;
+  if (!isRecord(value)) {
+    throw new Error(`Expected "${key}" to be an object or null`);
+  }
+  return value;
+};
+
+const readOptionalNullableObject = (
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null | undefined => {
+  const value = record[key];
+  if (value === undefined || value === null) return value;
+  if (!isRecord(value)) {
+    throw new Error(`Expected "${key}" to be an object, null, or undefined`);
+  }
+  return value;
+};
+
+const readString = (record: Record<string, unknown>, key: string): string => {
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw new Error(`Expected "${key}" to be a string`);
+  }
+  return value;
+};
+
+const readBoolean = (record: Record<string, unknown>, key: string): boolean => {
+  const value = record[key];
+  if (typeof value !== "boolean") {
+    throw new Error(`Expected "${key}" to be a boolean`);
+  }
+  return value;
+};
+
+const readArray = (record: Record<string, unknown>, key: string): readonly unknown[] => {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    throw new Error(`Expected "${key}" to be an array`);
+  }
+  return value;
+};
+
+const readStringArray = (record: Record<string, unknown>, key: string): readonly string[] => {
+  const value = readArray(record, key);
+  return value.map((item) => {
+    if (typeof item !== "string") {
+      throw new Error(`Expected "${key}" to contain only strings`);
+    }
+    return item;
+  });
+};
+
+const readFirstObject = (items: readonly unknown[], label: string): Record<string, unknown> => {
+  const first = expectDefined(items[0], `Expected ${label}[0]`);
+  if (!isRecord(first)) {
+    throw new Error(`Expected ${label}[0] to be an object`);
+  }
+  return first;
 };
 
 const writeChromeBookmarks = async (
@@ -118,11 +223,13 @@ const writeChromeDataDir = async (
     }),
   );
 
-  for (const profile of profiles) {
-    const bookmarksPath = join(chromeDataDir, profile.directory, "Bookmarks");
-    await mkdir(join(chromeDataDir, profile.directory), { recursive: true });
-    await writeChromeBookmarks(bookmarksPath, profile.title, profile.url);
-  }
+  await Promise.all(
+    profiles.map(async (profile) => {
+      const bookmarksPath = join(chromeDataDir, profile.directory, "Bookmarks");
+      await mkdir(join(chromeDataDir, profile.directory), { recursive: true });
+      await writeChromeBookmarks(bookmarksPath, profile.title, profile.url);
+    }),
+  );
 };
 
 describe("bookmarks CLI", () => {
@@ -168,13 +275,13 @@ describe("bookmarks CLI", () => {
       await runGit(dir, "add", "bookmarks.yaml");
       await runGit(dir, "commit", "-m", "baseline");
 
-      const cliEnv = {
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_YAML_PATH: yamlPath,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
       const status = await runCommand(dir, [bunBinary, cliPath, "status"], cliEnv);
@@ -186,16 +293,11 @@ describe("bookmarks CLI", () => {
 
       const statusJson = await runCommand(dir, [bunBinary, cliPath, "status", "--json"], cliEnv);
       expect(statusJson.exitCode).toBe(0);
-      const parsedStatus = JSON.parse(statusJson.stdout) as {
-        readonly yamlPath: string;
-        readonly targets: Array<{
-          readonly target: { readonly browser: string; readonly profile: string };
-          readonly pendingToYaml: readonly unknown[];
-        }>;
-      };
-      expect(parsedStatus.yamlPath).toBe(yamlPath);
-      expect(parsedStatus.targets[0]?.target.browser).toBe("chrome");
-      expect(parsedStatus.targets[0]?.pendingToYaml.length).toBeGreaterThan(0);
+      const parsedStatus = parseJsonObject(statusJson.stdout);
+      expect(readString(parsedStatus, "yamlPath")).toBe(yamlPath);
+      const firstStatusTarget = readFirstObject(readArray(parsedStatus, "targets"), "targets");
+      expect(readString(readObject(firstStatusTarget, "target"), "browser")).toBe("chrome");
+      expect(readArray(firstStatusTarget, "pendingToYaml").length).toBeGreaterThan(0);
 
       const sync = await runCommand(dir, [bunBinary, cliPath, "sync", "--dry-run"], cliEnv);
       expect(sync.exitCode).toBe(0);
@@ -209,18 +311,12 @@ describe("bookmarks CLI", () => {
         cliEnv,
       );
       expect(syncJson.exitCode).toBe(0);
-      const parsedSync = JSON.parse(syncJson.stdout) as {
-        readonly command: string;
-        readonly dryRun: boolean;
-        readonly preview: {
-          readonly targets: Array<{
-            readonly pendingToYaml: readonly unknown[];
-          }>;
-        } | null;
-      };
-      expect(parsedSync.command).toBe("sync");
-      expect(parsedSync.dryRun).toBe(true);
-      expect(parsedSync.preview?.targets[0]?.pendingToYaml.length).toBeGreaterThan(0);
+      const parsedSync = parseJsonObject(syncJson.stdout);
+      expect(readString(parsedSync, "command")).toBe("sync");
+      expect(readBoolean(parsedSync, "dryRun")).toBe(true);
+      const preview = expectPresent(readNullableObject(parsedSync, "preview"), "Expected preview");
+      const firstPreviewTarget = readFirstObject(readArray(preview, "targets"), "preview.targets");
+      expect(readArray(firstPreviewTarget, "pendingToYaml").length).toBeGreaterThan(0);
 
       const schema = await readFile(schemaPath, "utf-8");
       expect(schema).toContain('"$schema"');
@@ -256,7 +352,7 @@ describe("bookmarks CLI", () => {
         }),
       );
 
-      const cliEnv = {
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_YAML_PATH: yamlPath,
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
@@ -264,22 +360,17 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
       const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
       expect(syncJson.exitCode).toBe(0);
 
-      const parsedSync = JSON.parse(syncJson.stdout) as {
-        readonly command: string;
-        readonly backup: {
-          readonly files: readonly string[];
-          readonly skipped: readonly string[];
-        } | null;
-      };
-      expect(parsedSync.command).toBe("sync");
-      expect(parsedSync.backup?.files).toHaveLength(1);
-      expect(parsedSync.backup?.skipped).toEqual(["yaml"]);
+      const parsedSync = parseJsonObject(syncJson.stdout);
+      expect(readString(parsedSync, "command")).toBe("sync");
+      const backup = expectPresent(readNullableObject(parsedSync, "backup"), "Expected backup");
+      expect(readStringArray(backup, "files")).toHaveLength(1);
+      expect(readStringArray(backup, "skipped")).toEqual(["yaml"]);
 
       const yamlAfter = await readFile(yamlPath, "utf-8");
       expect(yamlAfter).toContain("Top Link");
@@ -329,7 +420,7 @@ describe("bookmarks CLI", () => {
       await runGit(dir, "add", "bookmarks.yaml");
       await runGit(dir, "commit", "-m", "baseline");
 
-      const cliEnv = {
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_YAML_PATH: yamlPath,
         BOOKMARKS_BACKUP_DIR: backupDir,
         BOOKMARKS_RUNTIME_DIR: runtimeDir,
@@ -337,28 +428,18 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
       const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
       expect(syncJson.exitCode).toBe(0);
 
-      const parsedSync = JSON.parse(syncJson.stdout) as {
-        readonly orchestration?: {
-          readonly state: string;
-          readonly blockers?: readonly string[];
-        } | null;
-        readonly backup: {
-          readonly backupDir: string;
-          readonly files: readonly string[];
-          readonly skipped: readonly string[];
-        } | null;
-      };
-
-      expect(parsedSync.orchestration).toBeNull();
-      expect(parsedSync.backup?.backupDir).toBe(backupDir);
-      expect(parsedSync.backup?.files).toHaveLength(2);
-      expect(parsedSync.backup?.skipped).toHaveLength(0);
+      const parsedSync = parseJsonObject(syncJson.stdout);
+      expect(readOptionalNullableObject(parsedSync, "orchestration")).toBeNull();
+      const backup = expectPresent(readNullableObject(parsedSync, "backup"), "Expected backup");
+      expect(readString(backup, "backupDir")).toBe(backupDir);
+      expect(readStringArray(backup, "files")).toHaveLength(2);
+      expect(readStringArray(backup, "skipped")).toHaveLength(0);
 
       const yamlAfter = await readFile(yamlPath, "utf-8");
       expect(yamlAfter).toContain("Top Link");
@@ -367,12 +448,9 @@ describe("bookmarks CLI", () => {
     }
   });
 
-  test("sync falls back to a workspace import when browser state is not safely representable", async () => {
+  test("sync fails clearly when browser state is not safely representable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-fallback-"));
     const yamlPath = join(dir, "bookmarks.yaml");
-    const workspacePath = join(dir, "workspace.yaml");
-    const importLockPath = join(dir, "import.lock.json");
-    const publishPlanPath = join(dir, "publish.plan.json");
     const chromeDataDir = join(dir, "Chrome");
     const chromePath = join(chromeDataDir, "Default", "Bookmarks");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
@@ -460,249 +538,75 @@ describe("bookmarks CLI", () => {
       await runGit(dir, "add", "bookmarks.yaml");
       await runGit(dir, "commit", "-m", "baseline");
 
-      const cliEnv = {
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_YAML_PATH: yamlPath,
-        BOOKMARKS_WORKSPACE_PATH: workspacePath,
-        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
-        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
       const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
-      expect(syncJson.exitCode).toBe(0);
+      expect(syncJson.exitCode).toBe(1);
 
-      const parsedSync = JSON.parse(syncJson.stdout) as {
-        readonly command: string;
-        readonly status: string;
-        readonly error: string;
-        readonly workspaceFallback: {
-          readonly workspacePath: string;
-          readonly importLockPath: string;
-          readonly targets: readonly string[];
-        };
-      };
-
-      expect(parsedSync.command).toBe("sync");
-      expect(parsedSync.status).toBe("workspace_fallback");
-      expect(parsedSync.error).toContain("Bookmark separators are not supported");
-      expect(parsedSync.workspaceFallback.workspacePath).toBe(workspacePath);
-      expect(parsedSync.workspaceFallback.importLockPath).toBe(importLockPath);
-      expect(parsedSync.workspaceFallback.targets).toEqual(["chrome/default"]);
+      const parsedSync = parseJsonObject(syncJson.stderr);
+      expect(readString(parsedSync, "error")).toContain("Bookmark separators are not supported");
+      expect(readString(parsedSync, "type")).toBe("UnsupportedBookmarks");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("import, next, plan, publish, and validate drive the workspace workflow", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-workspace-"));
-    const yamlPath = join(dir, "bookmarks.yaml");
-    const workspacePath = join(dir, "workspace.yaml");
-    const importLockPath = join(dir, "import.lock.json");
-    const publishPlanPath = join(dir, "publish.plan.json");
-    const chromeDataDir = join(dir, "Chrome");
-    const backupDir = join(dir, "backups");
-    const runtimeDir = join(dir, "runtime");
-    const safariPath = join(dir, "Safari", "Bookmarks.plist");
-    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
-
+  test("removed workflow commands fail clearly as unknown commands", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-removed-workflow-"));
     try {
-      await writeChromeDataDir(chromeDataDir, [
-        { directory: "Default", title: "Top Link", url: "https://top.example" },
-      ]);
-
-      const config = BookmarksConfig.make({
-        all: new BookmarkTree({}),
-        chrome: ChromeBookmarks.make({
-          profiles: {
-            default: ChromeProfileBookmarks.make({}),
-          },
-        }),
-      });
-
-      await run(YamlModule.save(yamlPath, config));
-
-      const cliEnv = {
-        BOOKMARKS_YAML_PATH: yamlPath,
-        BOOKMARKS_WORKSPACE_PATH: workspacePath,
-        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
-        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
-        BOOKMARKS_BACKUP_DIR: backupDir,
-        BOOKMARKS_RUNTIME_DIR: runtimeDir,
-        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
-        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
-        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
-        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const imported = await runCommand(
-        dir,
-        [bunBinary, cliPath, "import", "chrome/default", "--json"],
-        cliEnv,
+      const results = await Promise.all(
+        ["import", "plan", "publish", "next", "push", "pull"].map(async (command) => ({
+          command,
+          result: await runCommand(dir, [bunBinary, cliPath, command, "--json"]),
+        })),
       );
-      expect(imported.exitCode).toBe(0);
-      const parsedImport = JSON.parse(imported.stdout) as {
-        readonly targets: readonly string[];
-      };
-      expect(parsedImport.targets).toEqual(["chrome/default"]);
 
-      const nextNeedsReview = await runCommand(dir, [bunBinary, cliPath, "next", "--json"], cliEnv);
-      expect(nextNeedsReview.exitCode).toBe(0);
-      const parsedNextNeedsReview = JSON.parse(nextNeedsReview.stdout) as {
-        readonly state: string;
-      };
-      expect(parsedNextNeedsReview.state).toBe("needs_review");
-
-      const workspace = await run(Workspace.load(workspacePath));
-      const importedNode = workspace.inbox["chrome/default"]?.bar?.[0];
-      expect(importedNode?.kind).toBe("bookmark");
-      if (importedNode?.kind !== "bookmark") {
-        throw new Error("Expected imported bookmark in bar");
+      for (const { command, result } of results) {
+        expect(result.exitCode).toBe(1);
+        const parsed = parseJsonObject(result.stdout || result.stderr);
+        expect(readString(parsed, "error")).toContain(`Unknown command: ${command}`);
       }
-      workspace.inbox = {};
-      workspace.publish.profiles["chrome/default"] = {
-        bar: [{ ...importedNode, title: "CLI Curated Link" }],
-      };
-      await run(Workspace.save(workspacePath, workspace));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("validate only validates bookmarks.yaml", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-validate-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+
+    try {
+      const config = BookmarksConfig.make({
+        all: new BookmarkTree({}),
+      });
+      await run(YamlModule.save(yamlPath, config));
+
+      const cliEnv = withCliEnv(dir, {
+        BOOKMARKS_YAML_PATH: yamlPath,
+      });
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
       const validated = await runCommand(dir, [bunBinary, cliPath, "validate", "--json"], cliEnv);
       expect(validated.exitCode).toBe(0);
-      const parsedValidation = JSON.parse(validated.stdout) as { readonly valid: boolean };
-      expect(parsedValidation.valid).toBe(true);
-
-      const planned = await runCommand(dir, [bunBinary, cliPath, "plan", "--json"], cliEnv);
-      const parsedPlan = JSON.parse(planned.stdout) as {
-        readonly summary: { readonly blockerCount: number };
-        readonly blockers?: ReadonlyArray<{ readonly code: string; readonly targetId?: string }>;
-        readonly targets: ReadonlyArray<{
-          readonly status: string;
-          readonly blockers: ReadonlyArray<{ readonly code: string }>;
-        }>;
-      };
-      expect(planned.exitCode).toBe(0);
-      expect(parsedPlan.summary.blockerCount).toBe(0);
-
-      const published = await runCommand(dir, [bunBinary, cliPath, "publish", "--json"], cliEnv);
-      expect(published.exitCode).toBe(0);
-      const parsedPublish = JSON.parse(published.stdout) as {
-        readonly publishedTargets: readonly string[];
-      };
-      expect(parsedPublish.publishedTargets).toEqual(["chrome/default"]);
-
-      const nextDone = await runCommand(dir, [bunBinary, cliPath, "next", "--json"], cliEnv);
-      expect(nextDone.exitCode).toBe(0);
-      const parsedNextDone = JSON.parse(nextDone.stdout) as {
-        readonly state: string;
-      };
-      expect(parsedNextDone.state).toBe("done");
+      const parsedValidation = parseJsonObject(validated.stdout);
+      expect(readBoolean(parsedValidation, "valid")).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("workspace publish succeeds even when browsers are open", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-workspace-queue-"));
-    const yamlPath = join(dir, "bookmarks.yaml");
-    const workspacePath = join(dir, "workspace.yaml");
-    const importLockPath = join(dir, "import.lock.json");
-    const publishPlanPath = join(dir, "publish.plan.json");
-    const chromeDataDir = join(dir, "Chrome");
-    const backupDir = join(dir, "backups");
-    const runtimeDir = join(dir, "runtime");
-    const safariPath = join(dir, "Safari", "Bookmarks.plist");
-    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
-
-    try {
-      await writeChromeDataDir(chromeDataDir, [
-        { directory: "Default", title: "Top Link", url: "https://top.example" },
-      ]);
-
-      const config = BookmarksConfig.make({
-        all: new BookmarkTree({}),
-        chrome: ChromeBookmarks.make({
-          profiles: {
-            default: ChromeProfileBookmarks.make({}),
-          },
-        }),
-      });
-
-      await run(YamlModule.save(yamlPath, config));
-
-      const cliEnv = {
-        BOOKMARKS_YAML_PATH: yamlPath,
-        BOOKMARKS_WORKSPACE_PATH: workspacePath,
-        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
-        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
-        BOOKMARKS_BACKUP_DIR: backupDir,
-        BOOKMARKS_RUNTIME_DIR: runtimeDir,
-        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
-        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
-        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
-        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
-      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
-
-      const imported = await runCommand(
-        dir,
-        [bunBinary, cliPath, "import", "chrome/default", "--json"],
-        cliEnv,
-      );
-      expect(imported.exitCode).toBe(0);
-
-      const workspace = await run(Workspace.load(workspacePath));
-      const importedNode = workspace.inbox["chrome/default"]?.bar?.[0];
-      expect(importedNode?.kind).toBe("bookmark");
-      if (importedNode?.kind !== "bookmark") {
-        throw new Error("Expected imported bookmark in bar");
-      }
-      workspace.inbox = {};
-      workspace.publish.profiles["chrome/default"] = {
-        bar: [{ ...importedNode, title: "Queued CLI Link" }],
-      };
-      await run(Workspace.save(workspacePath, workspace));
-
-      const planned = await runCommand(dir, [bunBinary, cliPath, "plan", "--json"], {
-        ...cliEnv,
-        BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
-      });
-      expect(planned.exitCode).toBe(0);
-      const parsedPlan = JSON.parse(planned.stdout) as {
-        readonly summary: { readonly blockerCount: number };
-        readonly targets: ReadonlyArray<{
-          readonly status: string;
-          readonly blockers: ReadonlyArray<{ readonly code: string }>;
-        }>;
-      };
-      expect(parsedPlan.summary.blockerCount).toBe(0);
-      expect(parsedPlan.targets[0]?.status).toBe("ready");
-      expect(parsedPlan.targets[0]?.blockers).toEqual([]);
-
-      const published = await runCommand(dir, [bunBinary, cliPath, "publish", "--json"], {
-        ...cliEnv,
-        BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
-      });
-      expect(published.exitCode).toBe(0);
-      const parsedPublished = JSON.parse(published.stdout) as {
-        readonly publishedTargets: readonly string[];
-        readonly backup: { readonly files: readonly string[] };
-      };
-      expect(parsedPublished.publishedTargets).toEqual(["chrome/default"]);
-      expect(parsedPublished.backup.files.length).toBeGreaterThan(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("import defaults to all discovered profiles and exact profile typos fail clearly", async () => {
+  test("status discovers all profiles and exact profile typos fail clearly", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-targets-"));
     const yamlPath = join(dir, "bookmarks.yaml");
-    const workspacePath = join(dir, "workspace.yaml");
-    const importLockPath = join(dir, "import.lock.json");
-    const publishPlanPath = join(dir, "publish.plan.json");
     const chromeDataDir = join(dir, "Chrome");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
     const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
@@ -724,43 +628,44 @@ describe("bookmarks CLI", () => {
 
       await run(YamlModule.save(yamlPath, config));
 
-      const cliEnv = {
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_YAML_PATH: yamlPath,
-        BOOKMARKS_WORKSPACE_PATH: workspacePath,
-        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
-        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const imported = await runCommand(dir, [bunBinary, cliPath, "import", "--json"], cliEnv);
-      expect(imported.exitCode).toBe(0);
-      const parsedImport = JSON.parse(imported.stdout) as {
-        readonly targets: readonly string[];
-      };
-      expect(parsedImport.targets).toEqual(["chrome/default", "chrome/profile-1"]);
+      const status = await runCommand(dir, [bunBinary, cliPath, "status", "--json"], cliEnv);
+      expect(status.exitCode).toBe(0);
+      const parsedStatus = parseJsonObject(status.stdout);
+      const targets = readArray(parsedStatus, "targets").map((item) => {
+        if (!isRecord(item)) {
+          throw new Error("Expected status target entry to be an object");
+        }
+        const target = readObject(item, "target");
+        const browser = readString(target, "browser");
+        const profile = target["profile"];
+        return typeof profile === "string" ? `${browser}/${profile}` : browser;
+      });
+      expect(targets).toEqual(["chrome/default", "chrome/profile-1"]);
 
       const typo = await runCommand(
         dir,
-        [bunBinary, cliPath, "import", "chrome/defualt", "--json"],
+        [bunBinary, cliPath, "status", "chrome/defualt", "--json"],
         cliEnv,
       );
       expect(typo.exitCode).toBe(1);
-      const parsedTypo = JSON.parse(typo.stderr) as { readonly error: string };
-      expect(parsedTypo.error).toContain('Unknown target selector "chrome/defualt"');
+      const parsedTypo = parseJsonObject(typo.stderr);
+      expect(readString(parsedTypo, "error")).toContain('Unknown target selector "chrome/defualt"');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("import succeeds when Safari profiles share one favorites scope because Safari bookmarks are shared", async () => {
+  test("status succeeds when Safari profiles share one favorites scope because Safari bookmarks are shared", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-safari-targets-"));
-    const workspacePath = join(dir, "workspace.yaml");
-    const importLockPath = join(dir, "import.lock.json");
-    const publishPlanPath = join(dir, "publish.plan.json");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
     const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
 
@@ -810,21 +715,21 @@ describe("bookmarks CLI", () => {
         db.close();
       }
 
-      const cliEnv = {
-        BOOKMARKS_WORKSPACE_PATH: workspacePath,
-        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
-        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
+      const cliEnv = withCliEnv(dir, {
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: join(dir, "Chrome"),
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
-      };
+      });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const imported = await runCommand(dir, [bunBinary, cliPath, "import", "--json"], cliEnv);
-      expect(imported.exitCode).toBe(0);
-      const parsedImport = JSON.parse(imported.stdout) as { readonly targets: readonly string[] };
-      expect(parsedImport.targets).toEqual(["safari"]);
+      const status = await runCommand(dir, [bunBinary, cliPath, "status", "--json"], cliEnv);
+      expect(status.exitCode).toBe(0);
+      const parsedStatus = parseJsonObject(status.stdout);
+      const targets = readArray(parsedStatus, "targets");
+      expect(targets).toHaveLength(1);
+      const firstTarget = readObject(readFirstObject(targets, "targets"), "target");
+      expect(readString(firstTarget, "browser")).toBe("safari");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

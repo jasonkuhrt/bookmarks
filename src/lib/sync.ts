@@ -1,9 +1,9 @@
-/* oxlint-disable no-non-null-assertion, no-unsafe-type-assertion, restrict-template-expressions */
 /**
  * Core sync engine.
  *
- * Pipeline: git baseline -> three-way diff -> resolve conflicts -> apply -> save -> auto-commit.
- * Git is the state store: the committed bookmarks.yaml IS the baseline for both sides.
+ * Pipeline: sync baseline -> three-way diff -> resolve conflicts -> apply -> save -> baseline advance.
+ * When bookmarks.yaml is tracked by git, HEAD is the sync baseline. Otherwise we keep
+ * a managed sync baseline in state storage so sync remains incremental outside git.
  * Produces graveyard entries for conflict losers.
  */
 
@@ -69,21 +69,59 @@ export interface BackupResult {
   readonly skipped: readonly string[];
 }
 
+interface ResolvedGitTarget {
+  readonly repoRoot: string;
+  readonly relPath: string;
+}
+
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const fileExists = (path: string): Effect.Effect<boolean, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        await Fs.access(path);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    catch: (error) => new Error(`Failed to inspect ${path}: ${messageFromUnknown(error)}`),
+  });
+
+const hasChromeProfile = (
+  target: Pick<Targets.TargetDescriptor, "browser" | "profile">,
+): target is Pick<Targets.TargetDescriptor, "browser"> & { readonly profile: string } =>
+  target.browser === "chrome" && typeof target.profile === "string";
+
+const recordFromEntries = <K extends string, V>(
+  entries: Iterable<readonly [K, V]>,
+): Record<K, V> => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.fromEntries preserves the supplied entry pairs but widens their key/value types.
+  return Object.fromEntries(entries) as Record<K, V>;
+};
+
+const targetTree = <V>(trees: Readonly<Record<string, V>>, targetId: string): V =>
+  expectDefined(trees[targetId], `Missing resolved tree for ${targetId}`);
+
 // -- Git baseline --
 
 /**
  * Read the last-committed version of bookmarks.yaml from git.
  * Returns empty BookmarkTree if the file has never been committed.
  */
-export const readGitBaselineConfig = (
-  yamlPath: string,
+const readGitBaselineConfigAt = (
+  resolvedGitTarget: ResolvedGitTarget,
 ): Effect.Effect<BookmarksConfig | null, Error> =>
   Effect.gen(function* () {
-    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
-    if (!resolvedGitTarget) {
-      yield* Effect.log("bookmarks.yaml is not inside a git repo — using empty baseline");
-      return null;
-    }
     const { repoRoot, relPath } = resolvedGitTarget;
 
     const raw = yield* Effect.tryPromise({
@@ -105,10 +143,24 @@ export const readGitBaselineConfig = (
     // Parse and validate the committed YAML
     const parsed = yield* Effect.try({
       try: () => Yaml.parse(raw) as unknown,
-      catch: (e) => new Error(`Failed to parse committed bookmarks.yaml: ${e}`),
+      catch: (error) =>
+        new Error(`Failed to parse committed bookmarks.yaml: ${messageFromUnknown(error)}`),
     });
     const config = yield* YamlModule.decodeDocument(parsed, "committed bookmarks.yaml");
     return config;
+  });
+
+export const readGitBaselineConfig = (
+  yamlPath: string,
+): Effect.Effect<BookmarksConfig | null, Error> =>
+  Effect.gen(function* () {
+    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
+    if (!resolvedGitTarget) {
+      yield* Effect.log("bookmarks.yaml is not inside a git repo — using empty baseline");
+      return null;
+    }
+
+    return yield* readGitBaselineConfigAt(resolvedGitTarget);
   });
 
 export const readGitBaseline = (yamlPath: string): Effect.Effect<BookmarkTree, Error> =>
@@ -131,17 +183,16 @@ const gitRepoRoot = (filePath: string): Effect.Effect<string, Error> =>
           },
         );
       }),
-    catch: (e) => new Error(`Failed to find git repo root: ${e}`),
+    catch: (error) => new Error(`Failed to find git repo root: ${messageFromUnknown(error)}`),
   });
 
 /** Resolve a possibly symlinked home path to the repo-relative file path git expects. */
-const resolveGitTarget = (
-  filePath: string,
-): Effect.Effect<{ repoRoot: string; relPath: string } | undefined, Error> =>
+const resolveGitTarget = (filePath: string): Effect.Effect<ResolvedGitTarget | undefined, Error> =>
   Effect.gen(function* () {
     const realDir = yield* Effect.tryPromise({
       try: () => Fs.realpath(Path.dirname(filePath)),
-      catch: (e) => new Error(`Failed to resolve real path for ${filePath}: ${e}`),
+      catch: (error) =>
+        new Error(`Failed to resolve real path for ${filePath}: ${messageFromUnknown(error)}`),
     }).pipe(Effect.catchAll(() => Effect.succeed(Path.dirname(filePath))));
     const canonicalPath = Path.join(realDir, Path.basename(filePath));
     const repoRoot = yield* gitRepoRoot(canonicalPath).pipe(
@@ -152,6 +203,43 @@ const resolveGitTarget = (
       repoRoot,
       relPath: Path.relative(repoRoot, canonicalPath),
     };
+  });
+
+const readManagedBaselineConfig = (): Effect.Effect<BookmarksConfig | null, Error> =>
+  Effect.gen(function* () {
+    const baselinePath = Paths.defaultSyncBaselinePath();
+    const exists = yield* fileExists(baselinePath);
+
+    if (!exists) {
+      yield* Effect.log(`No managed sync baseline found at ${baselinePath} — using empty baseline`);
+      return null;
+    }
+
+    yield* Effect.log(`Using managed sync baseline from ${baselinePath}`);
+    return yield* YamlModule.load(baselinePath);
+  });
+
+const readSyncBaselineConfig = (yamlPath: string): Effect.Effect<BookmarksConfig | null, Error> =>
+  Effect.gen(function* () {
+    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
+    if (resolvedGitTarget) {
+      return yield* readGitBaselineConfigAt(resolvedGitTarget);
+    }
+
+    return yield* readManagedBaselineConfig();
+  });
+
+const advanceSyncBaseline = (
+  yamlPath: string,
+  config: BookmarksConfig,
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
+    if (resolvedGitTarget) return;
+
+    const baselinePath = Paths.defaultSyncBaselinePath();
+    yield* Effect.log(`Saving managed sync baseline to ${baselinePath}...`);
+    yield* YamlModule.save(baselinePath, config);
   });
 
 /** Auto-commit bookmarks.yaml so the committed version becomes the new baseline. */
@@ -173,7 +261,7 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
             else resolve();
           });
         }),
-      catch: (e) => new Error(`git add failed: ${e}`),
+      catch: (error) => new Error(`git add failed: ${messageFromUnknown(error)}`),
     });
 
     // Check if there are staged changes to commit
@@ -192,7 +280,7 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
             },
           );
         }),
-      catch: (e) => new Error(`git diff --cached failed: ${e}`),
+      catch: (error) => new Error(`git diff --cached failed: ${messageFromUnknown(error)}`),
     });
 
     if (!hasStagedChanges) {
@@ -214,7 +302,7 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
             },
           );
         }),
-      catch: (e) => new Error(`git commit failed: ${e}`),
+      catch: (error) => new Error(`git commit failed: ${messageFromUnknown(error)}`),
     });
 
     yield* Effect.log("Auto-committed bookmarks.yaml (new baseline)");
@@ -264,10 +352,9 @@ export const resolveConflicts = (
 
 /** Find the maximum date among a group of patches. */
 const maxDate = (patches: readonly Patch.BookmarkPatch[]): DateTime.Utc =>
-  patches.reduce<DateTime.Utc>(
-    (max, p) => (DateTime.greaterThan(p.date, max) ? p.date : max),
-    patches[0]!.date,
-  );
+  patches.reduce<DateTime.Utc>((max, patch) => {
+    return DateTime.greaterThan(patch.date, max) ? patch.date : max;
+  }, expectDefined(patches[0], "maxDate requires at least one patch").date);
 
 // -- applyPatches --
 
@@ -319,7 +406,7 @@ const resolvedTargetOf = (
     : { browser: target.browser };
 
 const browserOfTargetId = (targetId: string): string =>
-  targetId === "safari" ? "safari" : targetId.split("/", 1)[0]!;
+  targetId === "safari" ? "safari" : (targetId.split("/")[0] ?? targetId);
 
 const profileOfTargetId = (targetId: string): string | undefined => {
   const slashIndex = targetId.indexOf("/");
@@ -336,7 +423,12 @@ const resolvedTargetOfId = (
 };
 
 const asMutableTree = (tree: BookmarkTree): MutableBookmarkTree =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Patch application mutates an internal working copy before re-materializing an immutable tree.
   tree as unknown as MutableBookmarkTree;
+
+const asMutableSection = (nodes: BookmarkSection): MutableBookmarkSection =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Folder children arrays are mutated only while assembling a new tree instance.
+  nodes as MutableBookmarkSection;
 
 const cloneNode = (node: BookmarkNode): BookmarkNode =>
   BookmarkLeaf.is(node)
@@ -355,9 +447,9 @@ const normalizeSection = (nodes: BookmarkSection | undefined): BookmarkSection |
 const setSection = (
   tree: BookmarkTree,
   sectionKey: SectionKey,
-  nodes: BookmarkSection | undefined,
+  nodes: MutableBookmarkSection | undefined,
 ): void => {
-  asMutableTree(tree)[sectionKey] = nodes as MutableBookmarkSection | undefined;
+  asMutableTree(tree)[sectionKey] = nodes;
 };
 
 const ensureSection = (tree: BookmarkTree, sectionKey: SectionKey): MutableBookmarkSection => {
@@ -381,13 +473,13 @@ const ensureFolderPath = (
     );
 
     if (existing) {
-      current = existing.children as MutableBookmarkSection;
+      current = asMutableSection(existing.children);
       continue;
     }
 
     const created = BookmarkFolder.make({ name: folderName, children: [] });
     current.push(created);
-    current = created.children as MutableBookmarkSection;
+    current = asMutableSection(created.children);
   }
 
   return current;
@@ -414,14 +506,15 @@ const findLeafLocationInSection = (
   url: string,
 ): { readonly children: MutableBookmarkSection; readonly index: number } | undefined => {
   for (let index = 0; index < nodes.length; index++) {
-    const node = nodes[index]!;
+    const node = nodes[index];
+    if (!node) continue;
 
     if (BookmarkLeaf.is(node) && node.url === url) {
       return { children: nodes, index };
     }
 
     if (BookmarkFolder.is(node)) {
-      const found = findLeafLocationInSection(node.children as MutableBookmarkSection, url);
+      const found = findLeafLocationInSection(asMutableSection(node.children), url);
       if (found) return found;
     }
   }
@@ -521,14 +614,7 @@ const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =
   config.yamlOverride
     ? Effect.succeed(config.yamlOverride)
     : Effect.gen(function* () {
-        const exists = yield* Effect.tryPromise({
-          try: () =>
-            Fs.access(config.yamlPath).then(
-              () => true,
-              () => false,
-            ),
-          catch: (e) => new Error(`Failed to inspect ${config.yamlPath}: ${e}`),
-        });
+        const exists = yield* fileExists(config.yamlPath);
         if (!exists) return emptyConfig();
 
         return yield* YamlModule.load(config.yamlPath);
@@ -540,9 +626,7 @@ const validateConfiguredChromeProfiles = (
 ): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     const discoveredChromeProfiles = new Set(
-      discoveredTargets
-        .filter((target) => target.browser === "chrome" && target.profile)
-        .map((target) => `chrome/${target.profile!}`),
+      discoveredTargets.filter(hasChromeProfile).map((target) => `chrome/${target.profile}`),
     );
 
     for (const configuredProfile of YamlModule.configuredChromeProfiles(config)) {
@@ -704,7 +788,9 @@ const sectionsEqual = (
   if (normalizedLeft.length !== normalizedRight.length) return false;
 
   for (let index = 0; index < normalizedLeft.length; index++) {
-    if (!nodesEqual(normalizedLeft[index]!, normalizedRight[index]!)) return false;
+    const leftNode = normalizedLeft[index];
+    const rightNode = normalizedRight[index];
+    if (!leftNode || !rightNode || !nodesEqual(leftNode, rightNode)) return false;
   }
 
   return true;
@@ -714,12 +800,20 @@ const longestCommonPrefix = (
   sections: readonly (BookmarkSection | undefined)[],
 ): BookmarkSection | undefined => {
   const normalizedSections = sections.map((section) => normalizeSection(section) ?? []);
+  const firstSection = normalizedSections[0] ?? [];
   const prefixLength = Math.min(...normalizedSections.map((section) => section.length));
   const prefix: BookmarkNode[] = [];
 
   for (let index = 0; index < prefixLength; index++) {
-    const candidate = normalizedSections[0]![index]!;
-    if (!normalizedSections.every((section) => nodesEqual(section[index]!, candidate))) break;
+    const candidate = firstSection[index];
+    if (!candidate) break;
+    if (
+      !normalizedSections.every((section) => {
+        const sectionNode = section[index];
+        return sectionNode !== undefined && nodesEqual(sectionNode, candidate);
+      })
+    )
+      break;
     prefix.push(cloneNode(candidate));
   }
 
@@ -782,24 +876,24 @@ export const decomposeResolvedTrees = (
   const targetIds = Object.keys(resolvedTrees);
   if (targetIds.length === 0) return emptyConfig();
 
-  const allSections = Object.fromEntries(
+  const allSections = recordFromEntries(
     sectionKeys.map((sectionKey) => {
       const supportedTargetIds = supportedTargetIdsForSection(targetIds, sectionKey);
       const prefix =
         supportedTargetIds.length === 0
           ? undefined
           : longestCommonPrefix(
-              supportedTargetIds.map((targetId) => resolvedTrees[targetId]![sectionKey]),
+              supportedTargetIds.map((targetId) => targetTree(resolvedTrees, targetId)[sectionKey]),
             );
       return [sectionKey, prefix];
     }),
-  ) as Record<SectionKey, BookmarkSection | undefined>;
+  );
 
-  const afterAll = Object.fromEntries(
+  const afterAll = recordFromEntries(
     targetIds.map((targetId) => [
       targetId,
       treeFromSections(
-        Object.fromEntries(
+        recordFromEntries(
           sectionKeys.map((sectionKey) => {
             const supported = sectionKeysForBrowser(browserOfTargetId(targetId)).includes(
               sectionKey,
@@ -808,28 +902,30 @@ export const decomposeResolvedTrees = (
               sectionKey,
               supported
                 ? sectionSuffix(
-                    resolvedTrees[targetId]![sectionKey],
+                    targetTree(resolvedTrees, targetId)[sectionKey],
                     allSections[sectionKey]?.length ?? 0,
                   )
                 : undefined,
             ];
           }),
-        ) as Partial<Record<SectionKey, BookmarkSection | undefined>>,
+        ),
       ),
     ]),
-  ) as Record<string, BookmarkTree>;
+  );
 
   const chromeTargetIds = targetIds.filter((targetId) => browserOfTargetId(targetId) === "chrome");
-  const chromeSections = Object.fromEntries(
+  const chromeSections = recordFromEntries(
     sectionKeys.map((sectionKey) => {
       const supported = sectionKeysForBrowser("chrome").includes(sectionKey);
       const prefix =
         !supported || chromeTargetIds.length === 0
           ? undefined
-          : longestCommonPrefix(chromeTargetIds.map((targetId) => afterAll[targetId]![sectionKey]));
+          : longestCommonPrefix(
+              chromeTargetIds.map((targetId) => targetTree(afterAll, targetId)[sectionKey]),
+            );
       return [sectionKey, prefix];
     }),
-  ) as Record<SectionKey, BookmarkSection | undefined>;
+  );
 
   const safariOverlay = afterAll["safari"]
     ? treeFromSections({
@@ -846,7 +942,11 @@ export const decomposeResolvedTrees = (
   });
 
   const profileNames = new Set([
-    ...chromeTargetIds.map((targetId) => profileOfTargetId(targetId)!).filter(Boolean),
+    ...chromeTargetIds
+      .filter((targetId) => profileOfTargetId(targetId) !== undefined)
+      .map((targetId) =>
+        expectDefined(profileOfTargetId(targetId), `Missing Chrome profile for ${targetId}`),
+      ),
     ...Object.keys(currentConfig.chrome?.profiles ?? {}),
   ]);
 
@@ -856,9 +956,18 @@ export const decomposeResolvedTrees = (
       const overlayTree =
         targetId in afterAll
           ? treeFromSections({
-              bar: sectionSuffix(afterAll[targetId]!.bar, chromeSections.bar?.length ?? 0),
-              menu: sectionSuffix(afterAll[targetId]!.menu, chromeSections.menu?.length ?? 0),
-              mobile: sectionSuffix(afterAll[targetId]!.mobile, chromeSections.mobile?.length ?? 0),
+              bar: sectionSuffix(
+                targetTree(afterAll, targetId).bar,
+                chromeSections.bar?.length ?? 0,
+              ),
+              menu: sectionSuffix(
+                targetTree(afterAll, targetId).menu,
+                chromeSections.menu?.length ?? 0,
+              ),
+              mobile: sectionSuffix(
+                targetTree(afterAll, targetId).mobile,
+                chromeSections.mobile?.length ?? 0,
+              ),
             })
           : emptyTree();
       const existingProfile = currentConfig.chrome?.profiles?.[profile];
@@ -918,6 +1027,7 @@ const saveConfig = (yamlPath: string, config: BookmarksConfig): Effect.Effect<vo
     yield* YamlModule.save(yamlPath, config);
     yield* Effect.log("Auto-committing bookmarks.yaml...");
     yield* gitAutoCommit(yamlPath);
+    yield* advanceSyncBaseline(yamlPath, config);
   });
 
 const resolveTargetTrees = (
@@ -1120,11 +1230,11 @@ const gcTree = (
 /**
  * Run a full bidirectional sync.
  *
- * Git is the state store. The committed bookmarks.yaml is the baseline for
- * three-way diff. After sync, bookmarks.yaml is auto-committed so the
- * committed version becomes the new baseline.
+ * The sync baseline comes from git when bookmarks.yaml is tracked. Outside git
+ * we persist a managed baseline in state storage so three-way sync remains
+ * incremental across runs.
  *
- * Fresh sync (no committed bookmarks.yaml): baseline is empty tree,
+ * Fresh sync (no baseline yet): baseline is empty tree,
  * every Safari bookmark becomes an Add patch, YAML is populated from scratch.
  *
  * Incremental sync: three-way diff between committed YAML (baseline),
@@ -1134,7 +1244,7 @@ const gcTree = (
 const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config);
-    const baselineConfig = (yield* readGitBaselineConfig(config.yamlPath)) ?? emptyConfig();
+    const baselineConfig = (yield* readSyncBaselineConfig(config.yamlPath)) ?? emptyConfig();
     const maxAge = config.graveyardMaxAge ?? Duration.days(90);
     const targetResults: TargetResult[] = [];
     const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(
@@ -1227,6 +1337,10 @@ const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       targetResults.push(yield* pushTarget(target, yamlTree, config.dryRun ?? false));
     }
 
+    if (!config.dryRun) {
+      yield* advanceSyncBaseline(config.yamlPath, yamlConfig);
+    }
+
     return {
       applied: targetResults.flatMap((result) => result.applied),
       graveyarded: [],
@@ -1306,12 +1420,18 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
     for (const candidate of candidates) {
       const destination = Path.join(backupDir, candidate.filename);
       const exists = yield* Effect.tryPromise({
-        try: () =>
-          Fs.access(candidate.path).then(
-            () => true,
-            () => false,
+        try: async () => {
+          try {
+            await Fs.access(candidate.path);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        catch: (error) =>
+          new Error(
+            `Failed to inspect backup candidate ${candidate.path}: ${messageFromUnknown(error)}`,
           ),
-        catch: (e) => new Error(`Failed to inspect backup candidate ${candidate.path}: ${e}`),
       });
 
       if (!exists) {
@@ -1321,7 +1441,8 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
       yield* Effect.tryPromise({
         try: () => Fs.copyFile(candidate.path, destination),
-        catch: (e) => new Error(`Failed to back up ${candidate.path}: ${e}`),
+        catch: (error) =>
+          new Error(`Failed to back up ${candidate.path}: ${messageFromUnknown(error)}`),
       });
       files.push(destination);
     }
@@ -1345,7 +1466,10 @@ const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const cleanedResolvedTrees: Record<string, BookmarkTree> = {};
 
     for (const targetId of Object.keys(currentResolvedTrees)) {
-      cleanedResolvedTrees[targetId] = yield* gcTree(currentResolvedTrees[targetId]!, maxAge);
+      cleanedResolvedTrees[targetId] = yield* gcTree(
+        targetTree(currentResolvedTrees, targetId),
+        maxAge,
+      );
     }
 
     for (const target of selectedTargets) {

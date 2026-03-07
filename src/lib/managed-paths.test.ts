@@ -43,7 +43,7 @@ describe("managed paths", () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-managed-paths-"));
     const symlinkPath = join(dir, "managed");
     const targetPath = join(dir, "missing", "target");
-    const filePath = join(symlinkPath, "workspace.yaml");
+    const filePath = join(symlinkPath, "bookmarks.yaml");
 
     try {
       await symlink(targetPath, symlinkPath);

@@ -1,8 +1,8 @@
 # bookmarks
 
-Cross-browser bookmark sync driven by durable config under `~/.config/bookmarks/` and workflow state under `~/.local/state/bookmarks/`.
+Cross-browser bookmark sync driven by a single user config at `~/.config/bookmarks/bookmarks.yaml`.
 
-The repo is the product. The normal workflow is to clone it locally, run the CLI from the clone, and optionally install the `bookmarks` launcher globally so it points back at your working tree.
+The repo is the product. Clone it locally, run the CLI from the clone, and optionally install the global `bookmarks` launcher so it points back at your working tree.
 
 ## Clone Repo Workflow
 
@@ -44,18 +44,16 @@ Important paths:
 
 - `~/.config/bookmarks/bookmarks.yaml`
 - `~/.config/bookmarks/bookmarks.schema.json`
-- `~/.local/state/bookmarks/workspace.yaml`
-- `~/.local/state/bookmarks/import.lock.json`
-- `~/.local/state/bookmarks/publish.plan.json`
+- `~/.local/state/bookmarks/sync-baseline.yaml`
 - `~/.local/state/bookmarks/backups/`
 - `~/.local/state/bookmarks/runtime/`
 
-Relevant commands now bootstrap what they can safely bootstrap:
+Relevant commands bootstrap what they can safely bootstrap:
 
 - they create the managed config and state directories if they do not exist
 - they mirror the repo JSON schema into the managed schema path
 - write commands create `bookmarks.yaml` when they first save it
-- workspace commands create `workspace.yaml`, `import.lock.json`, and `publish.plan.json` as needed
+- non-git syncs maintain `sync-baseline.yaml` automatically so sync remains incremental without git
 
 The YAML file can reference the adjacent schema with:
 
@@ -63,7 +61,7 @@ The YAML file can reference the adjacent schema with:
 # yaml-language-server: $schema=./bookmarks.schema.json
 ```
 
-You can still refresh the repo copy and managed copy explicitly:
+You can refresh the repo copy and managed copy explicitly:
 
 ```bash
 just schema
@@ -96,13 +94,13 @@ Target selection rules:
 
 ## Sync Workflow
 
-`bookmarks sync` is the primary command:
+`bookmarks sync` is the product:
 
 ```bash
 bookmarks sync
 ```
 
-What sync does on the fast path:
+What sync does:
 
 - reads the managed `bookmarks.yaml`
 - discovers Safari once and all discovered Chrome profiles
@@ -112,40 +110,7 @@ What sync does on the fast path:
 - writes live browser data
 - rereads and verifies the result
 
-If sync hits ambiguous or unsupported semantics, it stops before mutation and falls back to a manual review workspace automatically.
-
-## Manual Review Workflow
-
-The workspace flow is still available when you want explicit review:
-
-```bash
-bookmarks import
-$EDITOR ~/.local/state/bookmarks/workspace.yaml
-bookmarks validate
-bookmarks plan
-bookmarks publish
-```
-
-What each file does:
-
-- `workspace.yaml` is the editable review surface
-- `import.lock.json` is the machine-owned record of imported browser occurrences
-- `publish.plan.json` is the generated write plan with blockers and target status
-
-Workspace publish no longer requires Safari or Chrome to be closed:
-
-- `bookmarks plan` focuses on structural and permission blockers
-- `bookmarks publish` always backs up, attempts the write, then rereads and verifies the result
-
-The curated publish tree is split explicitly:
-
-- `publish.global` contains bookmarks that should span every selected profile
-- `publish.profiles.<target-id>` contains bookmarks that stay local to one profile
-- `archive` and `quarantine` follow the same `global + profiles` shape so profile-local items do not cross by accident
-
-`bookmarks next` is the guided router. If no workspace exists, it points you at `bookmarks sync`. If a review workspace exists, it points you at the next useful review step instead of making you remember the workflow.
-
-Git is optional. If you want history, branch review, or rollback on your config changes, commit these files. If you do not use git, the CLI still keeps immutable imports, publish plans, receipts, and automatic backups.
+If sync hits ambiguous or unsupported semantics, it stops before mutation and returns a clear error instead of silently mangling data.
 
 ## CLI
 
@@ -154,32 +119,22 @@ Core commands:
 ```bash
 bookmarks sync [target...]
 bookmarks sync [target...] --dry-run
-bookmarks next
-bookmarks import [target...]
-bookmarks validate
-bookmarks plan [target...]
-bookmarks publish [target...]
 bookmarks status [target...]
 bookmarks status --json
 bookmarks doctor --json
+bookmarks validate [--json]
+bookmarks backup [--json]
+bookmarks gc [--max-age=90d] [--json]
 ```
 
 Notes:
 
 - `sync` is the default automated workflow.
 - `sync --dry-run` shows the live diff without mutating browsers.
-- `sync` falls back to a review workspace automatically when browser state cannot be represented or merged safely.
-- `import` captures current browser state into workspace files without mutating browsers.
-- `import`, `status`, `pull`, `push`, `sync`, `plan`, and `publish` all accept optional target selectors.
-- omitting selectors means all discovered profiles for the addressed browsers.
-- `validate` validates `workspace.yaml` when it exists, otherwise it falls back to `bookmarks.yaml`.
-- `plan` generates the exact publish plan and fails clearly when review, target, or permission blockers remain.
-- `publish` always creates backups before writing target files, then rereads and verifies the result.
-- `next` supports `--json` for agents and scripts.
-- `status` shows pending changes in both directions and now includes patch previews.
-- `push`, `pull`, and `sync` support `--dry-run` and `--json`.
-- non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
-- the explicit `bookmarks backup` command is still available when you want an extra snapshot on demand.
+- `status` shows pending changes in both directions and includes patch previews.
+- `validate` validates `bookmarks.yaml`.
+- non-dry-run `sync` and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
+- `backup` is available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
 - runtime locking still serializes concurrent sync runs.
 
