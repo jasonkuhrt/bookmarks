@@ -3,16 +3,11 @@
   "$defs": {
     "BookmarksConfig": {
       "type": "object",
-      "required": [
-        "version",
-        "all"
-      ],
+      "required": ["version", "all"],
       "properties": {
         "version": {
           "type": "number",
-          "enum": [
-            2
-          ]
+          "enum": [2]
         },
         "all": {
           "$ref": "#/$defs/BookmarkTree"
@@ -69,11 +64,7 @@
     },
     "BookmarkLeaf": {
       "type": "object",
-      "required": [
-        "name",
-        "url",
-        "_tag"
-      ],
+      "required": ["name", "url", "_tag"],
       "properties": {
         "name": {
           "type": "string"
@@ -83,20 +74,14 @@
         },
         "_tag": {
           "type": "string",
-          "enum": [
-            "BookmarkLeaf"
-          ]
+          "enum": ["BookmarkLeaf"]
         }
       },
       "additionalProperties": false
     },
     "BookmarkFolder": {
       "type": "object",
-      "required": [
-        "name",
-        "children",
-        "_tag"
-      ],
+      "required": ["name", "children", "_tag"],
       "properties": {
         "name": {
           "type": "string"
@@ -109,9 +94,7 @@
         },
         "_tag": {
           "type": "string",
-          "enum": [
-            "BookmarkFolder"
-          ]
+          "enum": ["BookmarkFolder"]
         }
       },
       "additionalProperties": false

@@ -2,28 +2,53 @@
   "name": "@jasonkuhrt/bookmarks",
   "version": "0.0.0",
   "description": "Cross-browser bookmark sync driven by ~/.bookmarks/bookmarks.yaml",
-  "type": "module",
-  "sideEffects": false,
-  "bin": {
-    "bookmarks": "./src/bin/bookmarks.ts"
-  },
-  "scripts": {
-    "lint": "oxlint . --deny-warnings",
-    "typecheck": "bunx tsgo --noEmit -p tsconfig.json",
-    "test": "bun test",
-    "test:integration": "bun test src/bin/bookmarks.test.ts",
-    "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir coverage",
-    "coverage:check": "bun scripts/check-coverage.ts coverage/lcov.info 85 55",
-    "bookmarks": "bun src/bin/bookmarks.ts",
-    "generate:json-schema": "bun src/lib/generate-json-schema.ts"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git@github.com:jasonkuhrt/bookmarks.git"
-  },
   "homepage": "https://github.com/jasonkuhrt/bookmarks",
   "bugs": {
     "url": "https://github.com/jasonkuhrt/bookmarks/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/jasonkuhrt/bookmarks.git"
+  },
+  "bin": {
+    "bookmarks": "./src/bin/bookmarks.ts"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "src"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "imports": {
+    "#lib/*": "./src/lib/*.ts"
+  },
+  "exports": {
+    ".": "./build/exports/index.js"
+  },
+  "scripts": {
+    "build:clean": "tsgo --build --clean && rm -rf build",
+    "prebuild": "bun run build:clean",
+    "build": "tsgo --build tsconfig.build.json",
+    "test": "bun test src",
+    "test:integration": "bun test src/bin/bookmarks.test.ts",
+    "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir coverage",
+    "prepack": "bun run build && bun scripts/prepack-imports.ts",
+    "postpack": "bun scripts/prepack-imports.ts --restore",
+    "fix": "bun run fix:format && bun run fix:lint",
+    "fix:format": "oxfmt --write",
+    "fix:lint": "oxlint --type-aware --fix-dangerously --deny-warnings",
+    "check": "bun run check:format && bun run check:lint && bun run check:types && bun run test && bun run check:cov && bun run check:package && bun run check:exports && bun run check:ci",
+    "check:format": "oxfmt --check",
+    "check:lint": "oxlint --type-aware --deny-warnings",
+    "check:types": "tsgo",
+    "check:cov": "bun run test:coverage && bun scripts/filter-coverage.ts coverage/lcov.info coverage/lcov.filtered.info && bun scripts/check-coverage.ts coverage/lcov.filtered.info 90 90",
+    "check:package": "bun run build && publint run --strict",
+    "check:exports": "attw --pack . --profile esm-only",
+    "check:ci": "actionlint",
+    "bookmarks": "bun src/bin/bookmarks.ts",
+    "generate:json-schema": "bun src/lib/generate-json-schema.ts",
+    "pre-commit": "bun run check"
   },
   "dependencies": {
     "@clack/prompts": "^0.9.1",
@@ -33,8 +58,16 @@
     "yaml": "^2.8.2"
   },
   "devDependencies": {
-    "@tsconfig/strictest": "^2.0.8",
-    "@types/bun": "^1.2.0",
-    "oxlint": "^1.51.0"
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@tsconfig/node24": "^24.0.4",
+    "@tsconfig/strictest": "2.0.8",
+    "@types/bun": "^1.3.10",
+    "@types/node": "25.3.5",
+    "@typescript/native-preview": "7.0.0-dev.20260306.1",
+    "oxfmt": "^0.36.0",
+    "oxlint": "^1.51.0",
+    "oxlint-tsgolint": "^0.16.0",
+    "publint": "^0.3.18",
+    "typescript": "5.9.3"
   }
 }

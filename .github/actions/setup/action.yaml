@@ -1,0 +1,36 @@
+name: Setup
+description: Boilerplate steps needed by most jobs.
+inputs:
+  node-version:
+    description: Version of Node to use.
+    required: false
+    default: 24.x
+  bun-version:
+    description: Version of Bun to use.
+    required: false
+    default: latest
+  install-deps:
+    description: Should deps be installed?
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Use Node.js ${{inputs.node-version}}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{inputs.node-version}}
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: ${{inputs.bun-version}}
+    - uses: actions/cache@v4
+      name: Setup bun cache
+      with:
+        path: ~/.bun/install/cache
+        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+        restore-keys: ${{ runner.os }}-bun-
+    - name: Install Dependencies
+      run: bun install
+      shell: bash
+      if: ${{inputs.install-deps}} == 'true'

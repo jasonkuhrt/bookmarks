@@ -1,309 +1,320 @@
-import { describe, expect, test } from "bun:test"
-import { DateTime, Effect } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import * as Chrome from "./chrome.js"
-import * as Patch from "./patch.js"
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.js"
-import { CHROME_BOOKMARKS_FIXTURE_PATH, copyChromeBookmarksFixture } from "./test-fixtures.js"
+/* oxlint-disable await-thenable, no-confusing-void-expression, no-non-null-assertion, no-unsafe-argument, no-unsafe-assignment, no-unsafe-member-access, no-unsafe-type-assertion */
+import { describe, expect, test } from "bun:test";
+import { DateTime, Effect } from "effect";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as Chrome from "./chrome.ts";
+import * as Patch from "./patch.ts";
+import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
+import { CHROME_BOOKMARKS_FIXTURE_PATH, copyChromeBookmarksFixture } from "./test-fixtures.ts";
 
 // -- Test helpers --
 
-const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
-const now = DateTime.unsafeNow()
+const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
+const now = DateTime.unsafeNow();
 
 // -- Timestamp conversion --
 
 describe("chromeTimestampToUnixMs", () => {
   test("converts a known Chrome timestamp to a reasonable date", () => {
     // 13410289672995717 should decode to approximately 2025-12-15
-    const unixMs = Chrome.chromeTimestampToUnixMs("13410289672995717")
-    const date = new Date(unixMs)
-    expect(date.getFullYear()).toBeGreaterThanOrEqual(2020)
-    expect(date.getFullYear()).toBeLessThanOrEqual(2030)
-  })
+    const unixMs = Chrome.chromeTimestampToUnixMs("13410289672995717");
+    const date = new Date(unixMs);
+    expect(date.getFullYear()).toBeGreaterThanOrEqual(2020);
+    expect(date.getFullYear()).toBeLessThanOrEqual(2030);
+  });
 
   test("zero returns zero", () => {
-    expect(Chrome.chromeTimestampToUnixMs("0")).toBe(0)
-  })
+    expect(Chrome.chromeTimestampToUnixMs("0")).toBe(0);
+  });
 
   test("round-trips through unixMsToChromeTimestamp within 1 second", () => {
-    const original = Date.now()
-    const chromeTs = Chrome.unixMsToChromeTimestamp(original)
-    const roundTripped = Chrome.chromeTimestampToUnixMs(chromeTs)
+    const original = Date.now();
+    const chromeTs = Chrome.unixMsToChromeTimestamp(original);
+    const roundTripped = Chrome.chromeTimestampToUnixMs(chromeTs);
     // Precision loss is sub-second due to microsecond → second → microsecond
-    expect(Math.abs(original - roundTripped)).toBeLessThan(1000)
-  })
-})
+    expect(Math.abs(original - roundTripped)).toBeLessThan(1000);
+  });
+});
 
 describe("unixMsToChromeTimestamp", () => {
   test("produces a large numeric string (Windows epoch microseconds)", () => {
-    const ts = Chrome.unixMsToChromeTimestamp(Date.now())
-    expect(ts.length).toBeGreaterThan(15)
-    expect(Number(ts)).toBeGreaterThan(13_000_000_000_000_000)
-  })
-})
+    const ts = Chrome.unixMsToChromeTimestamp(Date.now());
+    expect(ts.length).toBeGreaterThan(15);
+    expect(Number(ts)).toBeGreaterThan(13_000_000_000_000_000);
+  });
+});
 
 // -- Checksum --
 
 describe("calculateChecksum", () => {
   test("matches the stored checksum in the fixture Chrome bookmarks file", async () => {
-    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text()
-    const file = JSON.parse(text)
-    const calculated = Chrome.calculateChecksum(file.roots)
-    expect(calculated).toBe(file.checksum)
-  })
+    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text();
+    const file = JSON.parse(text);
+    const calculated = Chrome.calculateChecksum(file.roots);
+    expect(calculated).toBe(file.checksum);
+  });
 
   test("produces a 32-character hex string", async () => {
-    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text()
-    const file = JSON.parse(text)
-    const checksum = Chrome.calculateChecksum(file.roots)
-    expect(checksum).toMatch(/^[0-9a-f]{32}$/)
-  })
-})
+    const text = await Bun.file(CHROME_BOOKMARKS_FIXTURE_PATH).text();
+    const file = JSON.parse(text);
+    const checksum = Chrome.calculateChecksum(file.roots);
+    expect(checksum).toMatch(/^[0-9a-f]{32}$/);
+  });
+});
 
 // -- readBookmarks --
 
 describe("readBookmarks", () => {
   test("reads fixture Chrome bookmarks and produces a BookmarkTree", async () => {
-    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
-    expect(tree).toBeInstanceOf(BookmarkTree)
-  })
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH));
+    expect(tree).toBeInstanceOf(BookmarkTree);
+  });
 
   test("bar contains bookmarks from bookmark_bar", async () => {
-    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
-    expect(tree.bar).toBeDefined()
-    expect(tree.bar!.length).toBeGreaterThan(0)
-  })
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH));
+    expect(tree.bar).toBeDefined();
+    expect(tree.bar!.length).toBeGreaterThan(0);
+  });
 
   test("leaf nodes have name and url", async () => {
-    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH));
     // Find a leaf somewhere in the tree
-    const findLeaf = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): BookmarkLeaf | undefined => {
+    const findLeaf = (
+      nodes: readonly (BookmarkLeaf | BookmarkFolder)[],
+    ): BookmarkLeaf | undefined => {
       for (const n of nodes) {
-        if (BookmarkLeaf.is(n)) return n
+        if (BookmarkLeaf.is(n)) return n;
         if (BookmarkFolder.is(n)) {
-          const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
-          if (found) return found
+          const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
+          if (found) return found;
         }
       }
-      return undefined
-    }
-    const leaf = findLeaf(tree.bar ?? [])
-    expect(leaf).toBeDefined()
-    expect(leaf!.name).toBeTruthy()
-    expect(leaf!.url).toMatch(/^https?:\/\//)
-  })
+      return undefined;
+    };
+    const leaf = findLeaf(tree.bar ?? []);
+    expect(leaf).toBeDefined();
+    expect(leaf!.name).toBeTruthy();
+    expect(leaf!.url).toMatch(/^https?:\/\//);
+  });
 
   test("folder nodes have name and children", async () => {
-    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH))
-    const folder = tree.bar?.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n),
-    )
-    expect(folder).toBeDefined()
-    expect(folder!.name).toBeTruthy()
-    expect(Array.isArray(folder!.children)).toBe(true)
-  })
+    const tree = await run(Chrome.readBookmarks(CHROME_BOOKMARKS_FIXTURE_PATH));
+    const folder = tree.bar?.find((n): n is BookmarkFolder => BookmarkFolder.is(n));
+    expect(folder).toBeDefined();
+    expect(folder!.name).toBeTruthy();
+    expect(Array.isArray(folder!.children)).toBe(true);
+  });
 
   test("preserves sibling ordering and empty folders in a hermetic fixture", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-"))
-    const path = join(dir, "Bookmarks")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-"));
+    const path = join(dir, "Bookmarks");
 
     try {
-      await Bun.write(path, JSON.stringify({
-        checksum: "",
-        version: 1,
-        roots: {
-          bookmark_bar: {
-            type: "folder",
-            name: "Bookmarks Bar",
-            id: "1",
-            guid: "root-bookmark-bar",
-            date_added: "0",
-            date_modified: "0",
-            children: [
-              {
-                type: "url",
-                name: "First",
-                url: "https://first.example",
-                id: "2",
-                guid: "first",
-                date_added: "0",
-                date_last_used: "0",
-              },
-              {
+      await Bun.write(
+        path,
+        JSON.stringify(
+          {
+            checksum: "",
+            version: 1,
+            roots: {
+              bookmark_bar: {
                 type: "folder",
-                name: "Empty",
-                children: [],
-                id: "3",
-                guid: "empty",
+                name: "Bookmarks Bar",
+                id: "1",
+                guid: "root-bookmark-bar",
                 date_added: "0",
                 date_modified: "0",
-                date_last_used: "0",
-              },
-              {
-                type: "folder",
-                name: "Nested",
                 children: [
                   {
                     type: "url",
-                    name: "Inside",
-                    url: "https://inside.example",
-                    id: "5",
-                    guid: "inside",
+                    name: "First",
+                    url: "https://first.example",
+                    id: "2",
+                    guid: "first",
+                    date_added: "0",
+                    date_last_used: "0",
+                  },
+                  {
+                    type: "folder",
+                    name: "Empty",
+                    children: [],
+                    id: "3",
+                    guid: "empty",
+                    date_added: "0",
+                    date_modified: "0",
+                    date_last_used: "0",
+                  },
+                  {
+                    type: "folder",
+                    name: "Nested",
+                    children: [
+                      {
+                        type: "url",
+                        name: "Inside",
+                        url: "https://inside.example",
+                        id: "5",
+                        guid: "inside",
+                        date_added: "0",
+                        date_last_used: "0",
+                      },
+                    ],
+                    id: "4",
+                    guid: "nested",
+                    date_added: "0",
+                    date_modified: "0",
+                    date_last_used: "0",
+                  },
+                  {
+                    type: "url",
+                    name: "Last",
+                    url: "https://last.example",
+                    id: "6",
+                    guid: "last",
                     date_added: "0",
                     date_last_used: "0",
                   },
                 ],
-                id: "4",
-                guid: "nested",
+              },
+              other: {
+                type: "folder",
+                name: "Other Bookmarks",
+                id: "7",
+                guid: "root-other",
                 date_added: "0",
                 date_modified: "0",
-                date_last_used: "0",
+                children: [],
               },
-              {
-                type: "url",
-                name: "Last",
-                url: "https://last.example",
-                id: "6",
-                guid: "last",
+              synced: {
+                type: "folder",
+                name: "Mobile Bookmarks",
+                id: "8",
+                guid: "root-synced",
                 date_added: "0",
-                date_last_used: "0",
+                date_modified: "0",
+                children: [],
               },
-            ],
+            },
           },
-          other: {
-            type: "folder",
-            name: "Other Bookmarks",
-            id: "7",
-            guid: "root-other",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-          synced: {
-            type: "folder",
-            name: "Mobile Bookmarks",
-            id: "8",
-            guid: "root-synced",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-        },
-      }, null, 2))
+          null,
+          2,
+        ),
+      );
 
-      const tree = await run(Chrome.readBookmarks(path))
+      const tree = await run(Chrome.readBookmarks(path));
 
-      expect(tree.bar?.map((node) => node.name)).toEqual([
-        "First",
-        "Empty",
-        "Nested",
-        "Last",
-      ])
+      expect(tree.bar?.map((node) => node.name)).toEqual(["First", "Empty", "Nested", "Last"]);
 
-      const emptyFolder = tree.bar?.[1]
-      expect(emptyFolder).toBeInstanceOf(BookmarkFolder)
-      expect((emptyFolder as BookmarkFolder).children).toEqual([])
+      const emptyFolder = tree.bar?.[1];
+      expect(emptyFolder).toBeInstanceOf(BookmarkFolder);
+      expect((emptyFolder as BookmarkFolder).children).toEqual([]);
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test("refuses separator nodes that would otherwise be dropped", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-unsupported-"))
-    const path = join(dir, "Bookmarks")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-unsupported-"));
+    const path = join(dir, "Bookmarks");
 
     try {
-      await Bun.write(path, JSON.stringify({
-        checksum: "",
-        version: 1,
-        roots: {
-          bookmark_bar: {
-            type: "folder",
-            name: "Bookmarks Bar",
-            id: "1",
-            guid: "root-bookmark-bar",
-            date_added: "0",
-            date_modified: "0",
-            children: [
-              {
-                type: "separator",
-                name: "",
-                id: "2",
-                guid: "separator",
+      await Bun.write(
+        path,
+        JSON.stringify(
+          {
+            checksum: "",
+            version: 1,
+            roots: {
+              bookmark_bar: {
+                type: "folder",
+                name: "Bookmarks Bar",
+                id: "1",
+                guid: "root-bookmark-bar",
                 date_added: "0",
                 date_modified: "0",
+                children: [
+                  {
+                    type: "separator",
+                    name: "",
+                    id: "2",
+                    guid: "separator",
+                    date_added: "0",
+                    date_modified: "0",
+                  },
+                ],
               },
-            ],
+              other: {
+                type: "folder",
+                name: "Other Bookmarks",
+                id: "7",
+                guid: "root-other",
+                date_added: "0",
+                date_modified: "0",
+                children: [],
+              },
+              synced: {
+                type: "folder",
+                name: "Mobile Bookmarks",
+                id: "8",
+                guid: "root-synced",
+                date_added: "0",
+                date_modified: "0",
+                children: [],
+              },
+            },
           },
-          other: {
-            type: "folder",
-            name: "Other Bookmarks",
-            id: "7",
-            guid: "root-other",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-          synced: {
-            type: "folder",
-            name: "Mobile Bookmarks",
-            id: "8",
-            guid: "root-synced",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-        },
-      }, null, 2))
+          null,
+          2,
+        ),
+      );
 
-      await expect(run(Chrome.readBookmarks(path))).rejects.toThrow("Bookmark separators are not supported")
+      await expect(run(Chrome.readBookmarks(path))).rejects.toThrow(
+        "Bookmark separators are not supported",
+      );
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 // -- applyPatches --
 
 describe("applyPatches", () => {
   const setupCopy = async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-patches-"))
-    const path = join(dir, "Bookmarks")
-    await copyChromeBookmarksFixture(path)
-    return { dir, path }
-  }
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-patches-"));
+    const path = join(dir, "Bookmarks");
+    await copyChromeBookmarksFixture(path);
+    return { dir, path };
+  };
 
-  const cleanup = async (dir: string) =>
-    rm(dir, { recursive: true, force: true })
+  const cleanup = async (dir: string) => rm(dir, { recursive: true, force: true });
 
   test("Add patch inserts a new leaf", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
-      const testUrl = "https://test-chrome-add.example.com/"
-      const testName = "Test Chrome Add Bookmark"
+      const testUrl = "https://test-chrome-add.example.com/";
+      const testName = "Test Chrome Add Bookmark";
 
       await run(
         Chrome.applyPatches(path, [
           Patch.Add({ url: testUrl, name: testName, path: "bar", date: now }),
         ]),
-      )
+      );
 
-      const tree = await run(Chrome.readBookmarks(path))
+      const tree = await run(Chrome.readBookmarks(path));
       const found = (tree.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
-      )
-      expect(found).toBeDefined()
-      expect(found!.name).toBe(testName)
+      );
+      expect(found).toBeDefined();
+      expect(found!.name).toBe(testName);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
+  });
 
   test("Add patch preserves valid checksum", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
       await run(
         Chrome.applyPatches(path, [
@@ -314,125 +325,131 @@ describe("applyPatches", () => {
             date: now,
           }),
         ]),
-      )
+      );
 
-      const text = await Bun.file(path).text()
-      const file = JSON.parse(text)
-      const calculated = Chrome.calculateChecksum(file.roots)
-      expect(calculated).toBe(file.checksum)
+      const text = await Bun.file(path).text();
+      const file = JSON.parse(text);
+      const calculated = Chrome.calculateChecksum(file.roots);
+      expect(calculated).toBe(file.checksum);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
+  });
 
   test("Remove patch deletes a leaf", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
-      const treeBefore = await run(Chrome.readBookmarks(path))
+      const treeBefore = await run(Chrome.readBookmarks(path));
       // Find a leaf to remove
       const findLeaf = (
         nodes: readonly (BookmarkLeaf | BookmarkFolder)[],
       ): BookmarkLeaf | undefined => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) return n
+          if (BookmarkLeaf.is(n)) return n;
           if (BookmarkFolder.is(n)) {
-            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
-            if (found) return found
+            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
+            if (found) return found;
           }
         }
-        return undefined
-      }
-      const target = findLeaf(treeBefore.bar ?? [])
-      expect(target).toBeDefined()
+        return undefined;
+      };
+      const target = findLeaf(treeBefore.bar ?? []);
+      expect(target).toBeDefined();
 
       await run(
         Chrome.applyPatches(path, [
           Patch.Remove({ url: target!.url, name: target!.name, path: "bar", date: now }),
         ]),
-      )
+      );
 
-      const treeAfter = await run(Chrome.readBookmarks(path))
-      const allUrls: string[] = []
+      const treeAfter = await run(Chrome.readBookmarks(path));
+      const allUrls: string[] = [];
       const collectUrls = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): void => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) allUrls.push(n.url)
+          if (BookmarkLeaf.is(n)) allUrls.push(n.url);
           if (BookmarkFolder.is(n))
-            collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
+            collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
         }
-      }
-      collectUrls(treeAfter.bar ?? [])
-      expect(allUrls).not.toContain(target!.url)
+      };
+      collectUrls(treeAfter.bar ?? []);
+      expect(allUrls).not.toContain(target!.url);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
+  });
 
   test("Rename patch updates a leaf's name", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
-      const treeBefore = await run(Chrome.readBookmarks(path))
+      const treeBefore = await run(Chrome.readBookmarks(path));
       const findLeaf = (
         nodes: readonly (BookmarkLeaf | BookmarkFolder)[],
       ): BookmarkLeaf | undefined => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) return n
+          if (BookmarkLeaf.is(n)) return n;
           if (BookmarkFolder.is(n)) {
-            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
-            if (found) return found
+            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
+            if (found) return found;
           }
         }
-        return undefined
-      }
-      const target = findLeaf(treeBefore.bar ?? [])
-      expect(target).toBeDefined()
-      const newName = "RENAMED_CHROME_TEST_BOOKMARK"
+        return undefined;
+      };
+      const target = findLeaf(treeBefore.bar ?? []);
+      expect(target).toBeDefined();
+      const newName = "RENAMED_CHROME_TEST_BOOKMARK";
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Rename({ url: target!.url, path: "bar", oldName: target!.name, newName, date: now }),
+          Patch.Rename({
+            url: target!.url,
+            path: "bar",
+            oldName: target!.name,
+            newName,
+            date: now,
+          }),
         ]),
-      )
+      );
 
-      const treeAfter = await run(Chrome.readBookmarks(path))
+      const treeAfter = await run(Chrome.readBookmarks(path));
       const findByUrl = (
         nodes: readonly (BookmarkLeaf | BookmarkFolder)[],
         url: string,
       ): BookmarkLeaf | undefined => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n) && n.url === url) return n
+          if (BookmarkLeaf.is(n) && n.url === url) return n;
           if (BookmarkFolder.is(n)) {
-            const found = findByUrl(n.children as readonly (BookmarkLeaf | BookmarkFolder)[], url)
-            if (found) return found
+            const found = findByUrl(n.children as readonly (BookmarkLeaf | BookmarkFolder)[], url);
+            if (found) return found;
           }
         }
-        return undefined
-      }
-      const found = findByUrl(treeAfter.bar ?? [], target!.url)
-      expect(found).toBeDefined()
-      expect(found!.name).toBe(newName)
+        return undefined;
+      };
+      const found = findByUrl(treeAfter.bar ?? [], target!.url);
+      expect(found).toBeDefined();
+      expect(found!.name).toBe(newName);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
+  });
 
   test("Move patch relocates a leaf to a different section", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
-      const treeBefore = await run(Chrome.readBookmarks(path))
+      const treeBefore = await run(Chrome.readBookmarks(path));
       const findLeaf = (
         nodes: readonly (BookmarkLeaf | BookmarkFolder)[],
       ): BookmarkLeaf | undefined => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) return n
+          if (BookmarkLeaf.is(n)) return n;
           if (BookmarkFolder.is(n)) {
-            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
-            if (found) return found
+            const found = findLeaf(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
+            if (found) return found;
           }
         }
-        return undefined
-      }
-      const target = findLeaf(treeBefore.bar ?? [])
-      expect(target).toBeDefined()
+        return undefined;
+      };
+      const target = findLeaf(treeBefore.bar ?? []);
+      expect(target).toBeDefined();
 
       await run(
         Chrome.applyPatches(path, [
@@ -444,46 +461,46 @@ describe("applyPatches", () => {
             date: now,
           }),
         ]),
-      )
+      );
 
-      const treeAfter = await run(Chrome.readBookmarks(path))
+      const treeAfter = await run(Chrome.readBookmarks(path));
 
       // Gone from bar
-      const favUrls: string[] = []
+      const favUrls: string[] = [];
       const collectUrls = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): void => {
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) favUrls.push(n.url)
+          if (BookmarkLeaf.is(n)) favUrls.push(n.url);
           if (BookmarkFolder.is(n))
-            collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[])
+            collectUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]);
         }
-      }
-      collectUrls(treeAfter.bar ?? [])
-      expect(favUrls).not.toContain(target!.url)
+      };
+      collectUrls(treeAfter.bar ?? []);
+      expect(favUrls).not.toContain(target!.url);
 
       // Present in other
       const collectOtherUrls = (nodes: readonly (BookmarkLeaf | BookmarkFolder)[]): string[] => {
-        const urls: string[] = []
+        const urls: string[] = [];
         for (const n of nodes) {
-          if (BookmarkLeaf.is(n)) urls.push(n.url)
+          if (BookmarkLeaf.is(n)) urls.push(n.url);
           if (BookmarkFolder.is(n))
             urls.push(
               ...collectOtherUrls(n.children as readonly (BookmarkLeaf | BookmarkFolder)[]),
-            )
+            );
         }
-        return urls
-      }
-      const foundInOther = collectOtherUrls(treeAfter.menu ?? [])
-      expect(foundInOther).toContain(target!.url)
+        return urls;
+      };
+      const foundInOther = collectOtherUrls(treeAfter.menu ?? []);
+      expect(foundInOther).toContain(target!.url);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
+  });
 
   test("Add patch into nested folder path creates folders as needed", async () => {
-    const { dir, path } = await setupCopy()
+    const { dir, path } = await setupCopy();
     try {
-      const testUrl = "https://test-chrome-nested-add.example.com/"
-      const testName = "Nested Chrome Add Test"
+      const testUrl = "https://test-chrome-nested-add.example.com/";
+      const testName = "Nested Chrome Add Test";
 
       await run(
         Chrome.applyPatches(path, [
@@ -494,36 +511,36 @@ describe("applyPatches", () => {
             date: now,
           }),
         ]),
-      )
+      );
 
-      const tree = await run(Chrome.readBookmarks(path))
+      const tree = await run(Chrome.readBookmarks(path));
       // Navigate: menu -> NewFolder -> SubFolder -> leaf
       const newFolder = (tree.menu ?? []).find(
         (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "NewFolder",
-      )
-      expect(newFolder).toBeDefined()
+      );
+      expect(newFolder).toBeDefined();
       const subFolder = newFolder!.children.find(
         (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "SubFolder",
-      )
-      expect(subFolder).toBeDefined()
+      );
+      expect(subFolder).toBeDefined();
       const leaf = subFolder!.children.find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
-      )
-      expect(leaf).toBeDefined()
-      expect(leaf!.name).toBe(testName)
+      );
+      expect(leaf).toBeDefined();
+      expect(leaf!.name).toBe(testName);
     } finally {
-      await cleanup(dir)
+      await cleanup(dir);
     }
-  })
-})
+  });
+});
 
 describe("writeTree", () => {
   test("writes structural changes exactly, including ordering and empty folders", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-tree-"))
-    const path = join(dir, "Bookmarks.json")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-tree-"));
+    const path = join(dir, "Bookmarks.json");
 
     try {
-      await copyChromeBookmarksFixture(path)
+      await copyChromeBookmarksFixture(path);
 
       const desired = BookmarkTree.make({
         bar: [
@@ -531,23 +548,19 @@ describe("writeTree", () => {
           BookmarkFolder.make({ name: "Empty", children: [] }),
           BookmarkFolder.make({
             name: "Work",
-            children: [
-              BookmarkLeaf.make({ name: "Docs", url: "https://docs.example" }),
-            ],
+            children: [BookmarkLeaf.make({ name: "Docs", url: "https://docs.example" })],
           }),
           BookmarkLeaf.make({ name: "Move Me", url: "https://move.example" }),
         ],
-        menu: [
-          BookmarkLeaf.make({ name: "Other Link", url: "https://other.example" }),
-        ],
-      })
+        menu: [BookmarkLeaf.make({ name: "Other Link", url: "https://other.example" })],
+      });
 
-      await run(Chrome.writeTree(path, desired))
+      await run(Chrome.writeTree(path, desired));
 
-      const reread = await run(Chrome.readBookmarks(path))
-      expect(reread).toEqual(desired)
+      const reread = await run(Chrome.readBookmarks(path));
+      expect(reread).toEqual(desired);
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});

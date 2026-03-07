@@ -1,16 +1,21 @@
-import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import * as Doctor from "./doctor.js"
-import { BookmarkTree, BookmarksConfig, ChromeBookmarks, ChromeProfileBookmarks } from "./schema/__.js"
-import { copyChromeBookmarksFixture } from "./test-fixtures.js"
-import * as YamlModule from "./yaml.js"
+import { describe, expect, test } from "bun:test";
+import { Effect } from "effect";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as Doctor from "./doctor.ts";
+import {
+  BookmarkTree,
+  BookmarksConfig,
+  ChromeBookmarks,
+  ChromeProfileBookmarks,
+} from "./schema/__.ts";
+import { copyChromeBookmarksFixture } from "./test-fixtures.ts";
+import * as YamlModule from "./yaml.ts";
 
 // -- Test helpers --
 
-const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect)
+const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
 
 // -- DoctorCheck / DoctorResult types --
 
@@ -20,12 +25,12 @@ describe("DoctorCheck", () => {
       name: "test",
       passed: true,
       message: "all good",
-    }
-    expect(check.name).toBe("test")
-    expect(check.passed).toBe(true)
-    expect(check.message).toBe("all good")
-    expect(check.fix).toBeUndefined()
-  })
+    };
+    expect(check.name).toBe("test");
+    expect(check.passed).toBe(true);
+    expect(check.message).toBe("all good");
+    expect(check.fix).toBeUndefined();
+  });
 
   test("has optional fix for failing check", () => {
     const check: Doctor.DoctorCheck = {
@@ -33,11 +38,11 @@ describe("DoctorCheck", () => {
       passed: false,
       message: "not good",
       fix: "do this",
-    }
-    expect(check.passed).toBe(false)
-    expect(check.fix).toBe("do this")
-  })
-})
+    };
+    expect(check.passed).toBe(false);
+    expect(check.fix).toBe("do this");
+  });
+});
 
 describe("DoctorResult", () => {
   test("allPassed is true when all checks pass", () => {
@@ -47,9 +52,9 @@ describe("DoctorResult", () => {
         { name: "b", passed: true, message: "ok" },
       ],
       allPassed: true,
-    }
-    expect(result.allPassed).toBe(true)
-  })
+    };
+    expect(result.allPassed).toBe(true);
+  });
 
   test("allPassed is false when any check fails", () => {
     const result: Doctor.DoctorResult = {
@@ -58,10 +63,10 @@ describe("DoctorResult", () => {
         { name: "b", passed: false, message: "fail", fix: "fix it" },
       ],
       allPassed: false,
-    }
-    expect(result.allPassed).toBe(false)
-  })
-})
+    };
+    expect(result.allPassed).toBe(false);
+  });
+});
 
 // -- formatReport --
 
@@ -70,11 +75,11 @@ describe("formatReport", () => {
     const result: Doctor.DoctorResult = {
       checks: [{ name: "Full Disk Access", passed: true, message: "granted" }],
       allPassed: true,
-    }
-    const report = Doctor.formatReport(result)
-    expect(report).toContain("\u2713 Full Disk Access: granted")
-    expect(report).toContain("All checks passed.")
-  })
+    };
+    const report = Doctor.formatReport(result);
+    expect(report).toContain("\u2713 Full Disk Access: granted");
+    expect(report).toContain("All checks passed.");
+  });
 
   test("uses cross for failing checks with fix", () => {
     const result: Doctor.DoctorResult = {
@@ -87,12 +92,12 @@ describe("formatReport", () => {
         },
       ],
       allPassed: false,
-    }
-    const report = Doctor.formatReport(result)
-    expect(report).toContain("\u2717 Safari plist exists: not found")
-    expect(report).toContain("Fix: Launch Safari once.")
-    expect(report).toContain("Some checks failed.")
-  })
+    };
+    const report = Doctor.formatReport(result);
+    expect(report).toContain("\u2717 Safari plist exists: not found");
+    expect(report).toContain("Fix: Launch Safari once.");
+    expect(report).toContain("Some checks failed.");
+  });
 
   test("mixed pass/fail report", () => {
     const result: Doctor.DoctorResult = {
@@ -102,137 +107,151 @@ describe("formatReport", () => {
         { name: "C", passed: true, message: "fine" },
       ],
       allPassed: false,
-    }
-    const report = Doctor.formatReport(result)
-    expect(report).toContain("\u2713 A: ok")
-    expect(report).toContain("\u2717 B: bad")
-    expect(report).toContain("Fix: do X")
-    expect(report).toContain("\u2713 C: fine")
-  })
+    };
+    const report = Doctor.formatReport(result);
+    expect(report).toContain("\u2713 A: ok");
+    expect(report).toContain("\u2717 B: bad");
+    expect(report).toContain("Fix: do X");
+    expect(report).toContain("\u2713 C: fine");
+  });
 
   test("failing check without fix omits Fix line", () => {
     const result: Doctor.DoctorResult = {
-      checks: [
-        { name: "X", passed: false, message: "broken" },
-      ],
+      checks: [{ name: "X", passed: false, message: "broken" }],
       allPassed: false,
-    }
-    const report = Doctor.formatReport(result)
-    expect(report).toContain("\u2717 X: broken")
-    expect(report).not.toContain("Fix:")
-  })
-})
+    };
+    const report = Doctor.formatReport(result);
+    expect(report).toContain("\u2717 X: broken");
+    expect(report).not.toContain("Fix:");
+  });
+});
 
 // -- runDiagnostics --
 
 describe("runDiagnostics", () => {
   test("reports the actual configured targets and browser processes", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-"))
-    const yamlPath = join(dir, "bookmarks.yaml")
-    const chromeDataDir = join(dir, "Chrome")
-    const chromePath = join(chromeDataDir, "Work", "Bookmarks")
-    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"]
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const chromeDataDir = join(dir, "Chrome");
+    const chromePath = join(chromeDataDir, "Work", "Bookmarks");
+    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
 
     try {
-      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
-      await mkdir(join(chromeDataDir, "Work"), { recursive: true })
-      await copyChromeBookmarksFixture(chromePath)
-      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
-        profile: {
-          info_cache: {
-            Work: {},
-          },
-        },
-      }))
-      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
-        all: BookmarkTree.make({}),
-        chrome: ChromeBookmarks.make({
-          profiles: {
-            work: ChromeProfileBookmarks.make({}),
+      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
+      await mkdir(join(chromeDataDir, "Work"), { recursive: true });
+      await copyChromeBookmarksFixture(chromePath);
+      await Bun.write(
+        join(chromeDataDir, "Local State"),
+        JSON.stringify({
+          profile: {
+            info_cache: {
+              Work: {},
+            },
           },
         }),
-      })))
+      );
+      await run(
+        YamlModule.save(
+          yamlPath,
+          BookmarksConfig.make({
+            all: BookmarkTree.make({}),
+            chrome: ChromeBookmarks.make({
+              profiles: {
+                work: ChromeProfileBookmarks.make({}),
+              },
+            }),
+          }),
+        ),
+      );
 
-      const result = await run(Doctor.runDiagnostics(yamlPath))
-      const names = result.checks.map((check) => check.name)
+      const result = await run(Doctor.runDiagnostics(yamlPath));
+      const names = result.checks.map((check) => check.name);
 
-      expect(typeof result.allPassed).toBe("boolean")
-      expect(names).toContain("YAML source of truth")
-      expect(names).toContain("Configured Chrome profiles")
-      expect(names).toContain("Enabled targets")
-      expect(names).toContain("Discovered target chrome/work exists")
-      expect(names).toContain("Google Chrome not running")
+      expect(typeof result.allPassed).toBe("boolean");
+      expect(names).toContain("YAML source of truth");
+      expect(names).toContain("Configured Chrome profiles");
+      expect(names).toContain("Enabled targets");
+      expect(names).toContain("Discovered target chrome/work exists");
+      expect(names).toContain("Google Chrome not running");
     } finally {
       if (originalChromeDataDir === undefined) {
-        delete process.env["BOOKMARKS_CHROME_DATA_DIR"]
+        delete process.env["BOOKMARKS_CHROME_DATA_DIR"];
       } else {
-        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir
+        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir;
       }
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test("surfaces YAML errors without inventing target checks", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-invalid-"))
-    const yamlPath = join(dir, "bookmarks.yaml")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-invalid-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
 
     try {
-      await Bun.write(yamlPath, "targets:\n  chrome:\n    default: [")
+      await Bun.write(yamlPath, "targets:\n  chrome:\n    default: [");
 
-      const result = await run(Doctor.runDiagnostics(yamlPath))
+      const result = await run(Doctor.runDiagnostics(yamlPath));
 
-      expect(result.allPassed).toBe(false)
-      expect(result.checks).toHaveLength(1)
-      expect(result.checks[0]?.name).toBe("YAML source of truth")
-      expect(result.checks[0]?.passed).toBe(false)
+      expect(result.allPassed).toBe(false);
+      expect(result.checks).toHaveLength(1);
+      expect(result.checks[0]?.name).toBe("YAML source of truth");
+      expect(result.checks[0]?.passed).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test("each check has required fields", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-shape-"))
-    const yamlPath = join(dir, "bookmarks.yaml")
-    const chromeDataDir = join(dir, "Chrome")
-    const chromePath = join(chromeDataDir, "Default", "Bookmarks")
-    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"]
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-shape-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const chromeDataDir = join(dir, "Chrome");
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks");
+    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
 
     try {
-      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir
-      await mkdir(join(chromeDataDir, "Default"), { recursive: true })
-      await copyChromeBookmarksFixture(chromePath)
-      await Bun.write(join(chromeDataDir, "Local State"), JSON.stringify({
-        profile: {
-          info_cache: {
-            Default: {},
-          },
-        },
-      }))
-      await run(YamlModule.save(yamlPath, BookmarksConfig.make({
-        all: BookmarkTree.make({}),
-        chrome: ChromeBookmarks.make({
-          profiles: {
-            default: ChromeProfileBookmarks.make({}),
+      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true });
+      await copyChromeBookmarksFixture(chromePath);
+      await Bun.write(
+        join(chromeDataDir, "Local State"),
+        JSON.stringify({
+          profile: {
+            info_cache: {
+              Default: {},
+            },
           },
         }),
-      })))
+      );
+      await run(
+        YamlModule.save(
+          yamlPath,
+          BookmarksConfig.make({
+            all: BookmarkTree.make({}),
+            chrome: ChromeBookmarks.make({
+              profiles: {
+                default: ChromeProfileBookmarks.make({}),
+              },
+            }),
+          }),
+        ),
+      );
 
-      const result = await run(Doctor.runDiagnostics(yamlPath))
+      const result = await run(Doctor.runDiagnostics(yamlPath));
       for (const check of result.checks) {
-        expect(typeof check.name).toBe("string")
-        expect(typeof check.passed).toBe("boolean")
-        expect(typeof check.message).toBe("string")
+        expect(typeof check.name).toBe("string");
+        expect(typeof check.passed).toBe("boolean");
+        expect(typeof check.message).toBe("string");
         if (check.fix !== undefined) {
-          expect(typeof check.fix).toBe("string")
+          expect(typeof check.fix).toBe("string");
         }
       }
     } finally {
       if (originalChromeDataDir === undefined) {
-        delete process.env["BOOKMARKS_CHROME_DATA_DIR"]
+        delete process.env["BOOKMARKS_CHROME_DATA_DIR"];
       } else {
-        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir
+        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir;
       }
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});

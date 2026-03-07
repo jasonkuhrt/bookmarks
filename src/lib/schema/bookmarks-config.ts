@@ -1,11 +1,11 @@
-import * as Schema from "effect/Schema"
-import { BookmarkTree } from "./bookmark-tree.js"
-import { BookmarkSection } from "./bookmark-structure.js"
+import * as Schema from "effect/Schema";
+import { BookmarkTree } from "./bookmark-tree.ts";
+import { BookmarkSection } from "./bookmark-structure.ts";
 
-const BarSection = Schema.optional(BookmarkSection)
-const MenuSection = Schema.optional(BookmarkSection)
-const ReadingListSection = Schema.optional(BookmarkSection)
-const MobileSection = Schema.optional(BookmarkSection)
+const BarSection = Schema.optional(BookmarkSection);
+const MenuSection = Schema.optional(BookmarkSection);
+const ReadingListSection = Schema.optional(BookmarkSection);
+const MobileSection = Schema.optional(BookmarkSection);
 
 export class SafariBookmarks extends Schema.Class<SafariBookmarks>("SafariBookmarks")({
   enabled: Schema.optional(Schema.Boolean),
@@ -13,16 +13,18 @@ export class SafariBookmarks extends Schema.Class<SafariBookmarks>("SafariBookma
   menu: MenuSection,
   reading_list: ReadingListSection,
 }) {
-  static is = Schema.is(SafariBookmarks)
+  static is = Schema.is(SafariBookmarks);
 }
 
-export class ChromeProfileBookmarks extends Schema.Class<ChromeProfileBookmarks>("ChromeProfileBookmarks")({
+export class ChromeProfileBookmarks extends Schema.Class<ChromeProfileBookmarks>(
+  "ChromeProfileBookmarks",
+)({
   enabled: Schema.optional(Schema.Boolean),
   bar: BarSection,
   menu: MenuSection,
   mobile: MobileSection,
 }) {
-  static is = Schema.is(ChromeProfileBookmarks)
+  static is = Schema.is(ChromeProfileBookmarks);
 }
 
 export class ChromeBookmarks extends Schema.Class<ChromeBookmarks>("ChromeBookmarks")({
@@ -32,7 +34,7 @@ export class ChromeBookmarks extends Schema.Class<ChromeBookmarks>("ChromeBookma
   mobile: MobileSection,
   profiles: Schema.optional(Schema.Record({ key: Schema.String, value: ChromeProfileBookmarks })),
 }) {
-  static is = Schema.is(ChromeBookmarks)
+  static is = Schema.is(ChromeBookmarks);
 }
 
 export class BookmarksConfig extends Schema.Class<BookmarksConfig>("BookmarksConfig")({
@@ -44,5 +46,5 @@ export class BookmarksConfig extends Schema.Class<BookmarksConfig>("BookmarksCon
   safari: Schema.optional(SafariBookmarks),
   chrome: Schema.optional(ChromeBookmarks),
 }) {
-  static is = Schema.is(BookmarksConfig)
+  static is = Schema.is(BookmarksConfig);
 }

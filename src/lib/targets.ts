@@ -1,283 +1,286 @@
-import { Database } from "bun:sqlite"
-import { parse } from "@plist/binary.parse"
-import { Effect } from "effect"
-import * as Fs from "node:fs/promises"
-import * as Path from "node:path"
-import * as Chrome from "./chrome.js"
-import * as Patch from "./patch.js"
-import * as Paths from "./paths.js"
-import * as Safari from "./safari.js"
-import { BookmarksConfig, BookmarkTree } from "./schema/__.js"
+/* oxlint-disable no-await-in-loop, no-unsafe-type-assertion, restrict-template-expressions */
+import { Database } from "bun:sqlite";
+import { parse } from "@plist/binary.parse";
+import { Effect } from "effect";
+import * as Fs from "node:fs/promises";
+import * as Path from "node:path";
+import * as Chrome from "./chrome.ts";
+import type * as Patch from "./patch.ts";
+import * as Paths from "./paths.ts";
+import * as Safari from "./safari.ts";
+import type { BookmarksConfig, BookmarkTree } from "./schema/__.ts";
 
 export interface TargetDescriptor {
-  readonly browser: string
-  readonly path: string
-  readonly enabled: boolean
-  readonly profile?: string | undefined
+  readonly browser: string;
+  readonly path: string;
+  readonly enabled: boolean;
+  readonly profile?: string | undefined;
 }
 
 export interface SafariProfileMetadata {
-  readonly profile: string
-  readonly bookmarkScope: string
+  readonly profile: string;
+  readonly bookmarkScope: string;
 }
 
 type ChromeLocalState = {
   profile?: {
-    info_cache?: Record<string, unknown>
-  }
-}
+    info_cache?: Record<string, unknown>;
+  };
+};
 
 type SafariProfileRow = {
-  readonly title: string | null
-  readonly external_uuid: string
-  readonly extra_attributes: Uint8Array | ArrayBuffer | null
-}
+  readonly title: string | null;
+  readonly external_uuid: string;
+  readonly extra_attributes: Uint8Array | ArrayBuffer | null;
+};
 
-const DEFAULT_SAFARI_BOOKMARK_SCOPE = "Favorites Bar"
+const DEFAULT_SAFARI_BOOKMARK_SCOPE = "Favorites Bar";
 
 export const keyOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  target.profile ? `${target.browser}/${target.profile}` : target.browser
+  target.profile ? `${target.browser}/${target.profile}` : target.browser;
 
 export const displayNameOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  keyOf(target)
+  keyOf(target);
 
 const exists = async (path: string): Promise<boolean> => {
   try {
-    await Fs.access(path)
-    return true
+    await Fs.access(path);
+    return true;
   } catch {
-    return false
+    return false;
   }
-}
+};
 
 const normalizeChromeProfileSelector = (directoryName: string): string =>
   directoryName
     .trim()
     .toLowerCase()
     .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "")
+    .replaceAll(/^-+|-+$/g, "");
 
-const normalizeSafariProfileSelector = (
-  title: string | null,
-  externalUuid: string,
-): string =>
+const normalizeSafariProfileSelector = (title: string | null, externalUuid: string): string =>
   externalUuid === "DefaultProfile"
     ? "default"
-    : normalizeChromeProfileSelector(title ?? externalUuid)
+    : normalizeChromeProfileSelector(title ?? externalUuid);
 
 const toArrayBuffer = (value: Uint8Array | ArrayBuffer): ArrayBuffer =>
-  value instanceof ArrayBuffer
-    ? value
-    : Uint8Array.from(value).buffer
+  value instanceof ArrayBuffer ? value : Uint8Array.from(value).buffer;
 
 const bookmarkScopeOf = (extraAttributes: Uint8Array | ArrayBuffer | null): string => {
-  if (!extraAttributes) return DEFAULT_SAFARI_BOOKMARK_SCOPE
+  if (!extraAttributes) return DEFAULT_SAFARI_BOOKMARK_SCOPE;
 
   try {
-    const parsed = parse(toArrayBuffer(extraAttributes)) as Record<string, unknown>
-    const scope = parsed["CustomFavoritesFolderServerID"]
-    return typeof scope === "string" && scope.length > 0 ? scope : DEFAULT_SAFARI_BOOKMARK_SCOPE
+    const parsed = parse(toArrayBuffer(extraAttributes)) as Record<string, unknown>;
+    const scope = parsed["CustomFavoritesFolderServerID"];
+    return typeof scope === "string" && scope.length > 0 ? scope : DEFAULT_SAFARI_BOOKMARK_SCOPE;
   } catch {
-    return DEFAULT_SAFARI_BOOKMARK_SCOPE
+    return DEFAULT_SAFARI_BOOKMARK_SCOPE;
   }
-}
+};
 
 const readChromeProfileDirectories = async (chromeDataDir: string): Promise<string[]> => {
-  const localStatePath = Path.join(chromeDataDir, "Local State")
+  const localStatePath = Path.join(chromeDataDir, "Local State");
   if (await exists(localStatePath)) {
-    const parsed = JSON.parse(await Fs.readFile(localStatePath, "utf-8")) as ChromeLocalState
-    const infoCache = parsed.profile?.info_cache
+    const parsed = JSON.parse(await Fs.readFile(localStatePath, "utf-8")) as ChromeLocalState;
+    const infoCache = parsed.profile?.info_cache;
     if (infoCache) {
-      return Object.keys(infoCache)
-        .filter((directoryName) => directoryName !== "System Profile")
+      return Object.keys(infoCache).filter((directoryName) => directoryName !== "System Profile");
     }
   }
 
   return (await Fs.readdir(chromeDataDir, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name !== "System Profile")
-    .map((entry) => entry.name)
-}
+    .map((entry) => entry.name);
+};
 
 export const discoverChromeTargets = (
   chromeDataDir = Paths.defaultChromeDataDir(),
 ): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.tryPromise({
     try: async () => {
-      if (!(await exists(chromeDataDir))) return []
+      if (!(await exists(chromeDataDir))) return [];
 
-      const directories = await readChromeProfileDirectories(chromeDataDir)
-      const targets: TargetDescriptor[] = []
+      const directories = await readChromeProfileDirectories(chromeDataDir);
+      const targets: TargetDescriptor[] = [];
 
       for (const directoryName of directories) {
-        const bookmarksPath = Path.join(chromeDataDir, directoryName, "Bookmarks")
-        if (!(await exists(bookmarksPath))) continue
+        const bookmarksPath = Path.join(chromeDataDir, directoryName, "Bookmarks");
+        if (!(await exists(bookmarksPath))) continue;
 
         targets.push({
           browser: "chrome",
           profile: normalizeChromeProfileSelector(directoryName),
           path: bookmarksPath,
           enabled: true,
-        })
+        });
       }
 
-      return targets
+      return targets;
     },
     catch: (e) => new Error(`Failed to discover Chrome targets in ${chromeDataDir}: ${e}`),
-  })
+  });
 
 export const discoverSafariProfiles = (
   tabsDbPath = Paths.defaultSafariTabsDbPath(),
 ): Effect.Effect<readonly SafariProfileMetadata[], Error> =>
   Effect.tryPromise({
     try: async () => {
-      if (!(await exists(tabsDbPath))) return []
+      if (!(await exists(tabsDbPath))) return [];
 
-      const db = new Database(tabsDbPath)
+      const db = new Database(tabsDbPath);
       try {
         const rows = db
           .query<SafariProfileRow, []>(
             "select title, external_uuid, extra_attributes from bookmarks where parent = 0 and type = 1 and subtype = 2 order by id",
           )
-          .all()
+          .all();
 
-        if (rows.length === 0) return []
+        if (rows.length === 0) return [];
 
-        return rows.map((row) => ({
-          profile: normalizeSafariProfileSelector(row.title, row.external_uuid),
-          bookmarkScope: bookmarkScopeOf(row.extra_attributes),
-        } satisfies SafariProfileMetadata))
+        return rows.map(
+          (row) =>
+            ({
+              profile: normalizeSafariProfileSelector(row.title, row.external_uuid),
+              bookmarkScope: bookmarkScopeOf(row.extra_attributes),
+            }) satisfies SafariProfileMetadata,
+        );
       } finally {
-        db.close()
+        db.close();
       }
     },
     catch: (e) => new Error(`Failed to discover Safari profiles at ${tabsDbPath}: ${e}`),
-  })
+  });
 
 export const discoverSafariTargets = (
   plistPath = Paths.defaultSafariPlistPath(),
 ): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.tryPromise({
     try: async () => {
-      if (!(await exists(plistPath))) return []
-      return [{
-        browser: "safari",
-        path: plistPath,
-        enabled: true,
-      } satisfies TargetDescriptor]
+      if (!(await exists(plistPath))) return [];
+      return [
+        {
+          browser: "safari",
+          path: plistPath,
+          enabled: true,
+        } satisfies TargetDescriptor,
+      ];
     },
     catch: (e) => new Error(`Failed to discover Safari targets at ${plistPath}: ${e}`),
-  })
+  });
 
 export const discoverTargets = (): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.all([discoverSafariTargets(), discoverChromeTargets()]).pipe(
     Effect.map(([safariTargets, chromeTargets]) => [...safariTargets, ...chromeTargets]),
-  )
+  );
 
 export const resolveTargetSelectors = (
   availableTargets: readonly TargetDescriptor[],
   selectors: readonly string[],
 ): Effect.Effect<readonly TargetDescriptor[], Error> =>
   Effect.gen(function* () {
-    const byId = new Map(availableTargets.map((target) => [keyOf(target), target]))
-    const resolved: TargetDescriptor[] = []
-    const seen = new Set<string>()
+    const byId = new Map(availableTargets.map((target) => [keyOf(target), target]));
+    const resolved: TargetDescriptor[] = [];
+    const seen = new Set<string>();
     const resolveTarget = (target: TargetDescriptor) => {
-      const id = keyOf(target)
-      if (seen.has(id)) return
-      seen.add(id)
-      resolved.push(target)
-    }
+      const id = keyOf(target);
+      if (seen.has(id)) return;
+      seen.add(id);
+      resolved.push(target);
+    };
 
     if (selectors.length === 0) {
-      for (const target of availableTargets) resolveTarget(target)
+      for (const target of availableTargets) resolveTarget(target);
     }
 
     for (const selector of selectors) {
       if (selector.includes("/")) {
         if (selector.startsWith("safari/")) {
-          return yield* Effect.fail(new Error(
-            `Safari bookmarks are shared; use "safari" instead of "${selector}".`,
-          ))
+          return yield* Effect.fail(
+            new Error(`Safari bookmarks are shared; use "safari" instead of "${selector}".`),
+          );
         }
 
-        const exact = byId.get(selector)
+        const exact = byId.get(selector);
         if (!exact) {
-          return yield* Effect.fail(new Error(
-            `Unknown target selector "${selector}". Available targets: ${availableTargets.map(keyOf).join(", ") || "(none)"}.`,
-          ))
+          return yield* Effect.fail(
+            new Error(
+              `Unknown target selector "${selector}". Available targets: ${availableTargets.map(keyOf).join(", ") || "(none)"}.`,
+            ),
+          );
         }
 
-        resolveTarget(exact)
-        continue
+        resolveTarget(exact);
+        continue;
       }
 
-      const matches = availableTargets.filter((target) => target.browser === selector)
+      const matches = availableTargets.filter((target) => target.browser === selector);
       if (matches.length === 0) {
-        return yield* Effect.fail(new Error(
-          `Unknown browser selector "${selector}". Available targets: ${availableTargets.map(keyOf).join(", ") || "(none)"}.`,
-        ))
+        return yield* Effect.fail(
+          new Error(
+            `Unknown browser selector "${selector}". Available targets: ${availableTargets.map(keyOf).join(", ") || "(none)"}.`,
+          ),
+        );
       }
 
       for (const match of matches) {
-        resolveTarget(match)
+        resolveTarget(match);
       }
     }
 
-    return resolved
-  })
+    return resolved;
+  });
 
 export const processNameOf = (browser: string): string => {
   switch (browser) {
     case "safari":
-      return "Safari"
+      return "Safari";
     case "chrome":
-      return "Google Chrome"
+      return "Google Chrome";
     default:
-      return browser
+      return browser;
   }
-}
+};
 
-export const requiresFullDiskAccess = (target: Pick<TargetDescriptor, "browser" | "path">): boolean =>
-  target.browser === "safari" && target.path === Paths.defaultSafariPlistPath()
+export const requiresFullDiskAccess = (
+  target: Pick<TargetDescriptor, "browser" | "path">,
+): boolean => target.browser === "safari" && target.path === Paths.defaultSafariPlistPath();
 
 export const graveyardSourceOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
-  target.browser === "safari"
-    ? "safari"
-    : `${target.browser}-${target.profile ?? "default"}`
+  target.browser === "safari" ? "safari" : `${target.browser}-${target.profile ?? "default"}`;
 
 export const listConfiguredChromeProfileKeys = (config: BookmarksConfig): readonly string[] =>
-  Object.keys(config.chrome?.profiles ?? {}).map((profile) => `chrome/${profile}`)
+  Object.keys(config.chrome?.profiles ?? {}).map((profile) => `chrome/${profile}`);
 
 export const readTree = (target: TargetDescriptor): Effect.Effect<BookmarkTree, Error> => {
   switch (target.browser) {
     case "safari":
-      return Safari.readBookmarks(target.path)
+      return Safari.readBookmarks(target.path);
     case "chrome":
-      return Chrome.readBookmarks(target.path)
+      return Chrome.readBookmarks(target.path);
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
-      )
+      );
   }
-}
+};
 
 export const applyPatches = (
   target: TargetDescriptor,
   patches: readonly Patch.BookmarkPatch[],
 ): Effect.Effect<void, Error> => {
-  if (patches.length === 0) return Effect.void
+  if (patches.length === 0) return Effect.void;
 
   switch (target.browser) {
     case "safari":
-      return Safari.applyPatches(target.path, patches)
+      return Safari.applyPatches(target.path, patches);
     case "chrome":
-      return Chrome.applyPatches(target.path, patches)
+      return Chrome.applyPatches(target.path, patches);
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
-      )
+      );
   }
-}
+};
 
 export const writeTree = (
   target: TargetDescriptor,
@@ -285,12 +288,12 @@ export const writeTree = (
 ): Effect.Effect<void, Error> => {
   switch (target.browser) {
     case "safari":
-      return Safari.writeTree(target.path, tree)
+      return Safari.writeTree(target.path, tree);
     case "chrome":
-      return Chrome.writeTree(target.path, tree)
+      return Chrome.writeTree(target.path, tree);
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
-      )
+      );
   }
-}
+};

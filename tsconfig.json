@@ -1,19 +1,25 @@
 {
-  "extends": ["@tsconfig/strictest/tsconfig.json"],
+  "extends": ["@tsconfig/strictest/tsconfig.json", "@tsconfig/node24/tsconfig.json"],
   "compilerOptions": {
-    // Bun runtime
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    // Package
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
 
     // DX
+    "tsBuildInfoFile": "node_modules/.cache/.tsbuildinfo",
     "noErrorTruncation": true,
+    "incremental": true,
+    "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
 
-    // Strictness
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true
+    // Downstream DX
+    "isolatedModules": true,
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true
   },
-  "include": ["src", "scripts", "*.d.ts"]
+  "include": ["src", "tests", "scripts"],
+  "exclude": ["build"]
 }

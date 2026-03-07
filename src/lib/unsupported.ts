@@ -1,18 +1,19 @@
-import { Data, Effect } from "effect"
-import { BookmarkFolder, BookmarkLeaf, BookmarkSection, BookmarkTree } from "./schema/__.js"
+import { Data, Effect } from "effect";
+import type { BookmarkSection, BookmarkTree } from "./schema/__.ts";
+import { BookmarkFolder, BookmarkLeaf } from "./schema/__.ts";
 
 export interface BookmarkIssue {
-  readonly code: "duplicate-url" | "separator" | "unsupported-node"
-  readonly path: string
-  readonly message: string
+  readonly code: "duplicate-url" | "separator" | "unsupported-node";
+  readonly path: string;
+  readonly message: string;
 }
 
 export class UnsupportedBookmarks extends Data.TaggedError("UnsupportedBookmarks")<{
-  readonly source: string
-  readonly issues: readonly BookmarkIssue[]
+  readonly source: string;
+  readonly issues: readonly BookmarkIssue[];
 }> {
   static is = (u: unknown): u is UnsupportedBookmarks =>
-    u != null && typeof u === "object" && "_tag" in u && u._tag === "UnsupportedBookmarks"
+    u !== null && typeof u === "object" && "_tag" in u && u._tag === "UnsupportedBookmarks";
 
   override get message(): string {
     return [
@@ -20,67 +21,65 @@ export class UnsupportedBookmarks extends Data.TaggedError("UnsupportedBookmarks
       ...this.issues.map((issue) => `- ${issue.path}: ${issue.message}`),
       "",
       "Resolve the listed duplicate URLs or separators and retry. These constructs cannot round-trip safely yet.",
-    ].join("\n")
+    ].join("\n");
   }
 }
 
-export const collectDuplicateUrlIssues = (
-  tree: BookmarkTree,
-): readonly BookmarkIssue[] => {
-  const issues: BookmarkIssue[] = []
-  const seen = new Set<string>()
+export const collectDuplicateUrlIssues = (tree: BookmarkTree): readonly BookmarkIssue[] => {
+  const issues: BookmarkIssue[] = [];
+  const seen = new Set<string>();
 
   const visit = (nodes: BookmarkSection | undefined, path: string): void => {
-    if (!nodes) return
+    if (!nodes) return;
 
     for (const node of nodes) {
       if (BookmarkLeaf.is(node)) {
-        const leafPath = `${path}/${node.name}`
+        const leafPath = `${path}/${node.name}`;
         if (seen.has(node.url)) {
           issues.push({
             code: "duplicate-url",
             path: leafPath,
             message: `Duplicate URL "${node.url}" is not supported; bookmark identity is URL-based so mutation would be ambiguous.`,
-          })
-          continue
+          });
+          continue;
         }
 
-        seen.add(node.url)
-        continue
+        seen.add(node.url);
+        continue;
       }
 
       if (BookmarkFolder.is(node)) {
-        visit(node.children as BookmarkSection, `${path}/${node.name}`)
+        visit(node.children, `${path}/${node.name}`);
       }
     }
-  }
+  };
 
   for (const sectionKey of ["bar", "menu", "reading_list", "mobile"] as const) {
-    visit(tree[sectionKey], sectionKey)
+    visit(tree[sectionKey], sectionKey);
   }
 
-  return issues
-}
+  return issues;
+};
 
 export const ensureMutationSupported = (
   tree: BookmarkTree,
   source: string,
 ): Effect.Effect<void, UnsupportedBookmarks> =>
   Effect.gen(function* () {
-    const issues = collectDuplicateUrlIssues(tree)
+    const issues = collectDuplicateUrlIssues(tree);
     if (issues.length > 0) {
-      return yield* Effect.fail(new UnsupportedBookmarks({ source, issues }))
+      return yield* Effect.fail(new UnsupportedBookmarks({ source, issues }));
     }
-  })
+  });
 
 export const separatorIssue = (path: string, detail: string): BookmarkIssue => ({
   code: "separator",
   path,
   message: `Bookmark separators are not supported. ${detail}`,
-})
+});
 
 export const unsupportedNodeIssue = (path: string, detail: string): BookmarkIssue => ({
   code: "unsupported-node",
   path,
   message: detail,
-})
+});

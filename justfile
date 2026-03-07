@@ -9,14 +9,26 @@ install:
 install-global:
   bun install -g .
 
+build:
+  bun run build
+
 schema:
   bun run generate:json-schema
 
+format:
+  bun run fix:format
+
+format-check:
+  bun run check:format
+
 lint:
-  bun run lint
+  bun run check:lint
+
+lint-fix:
+  bun run fix:lint
 
 typecheck:
-  bun run typecheck
+  bun run check:types
 
 test:
   bun run test
@@ -25,14 +37,25 @@ test-integration:
   bun run test:integration
 
 coverage:
-  bun run test:coverage
-  bun run coverage:check
+  bun run check:cov
 
-pre-commit: lint typecheck
+package-check:
+  bun run check:package
 
-pre-push: pre-commit test coverage
+exports-check:
+  bun run check:exports
 
-quality: pre-push
+ci-check:
+  bun run check:ci
+
+check:
+  bun run check
+
+pre-commit: format-check lint typecheck
+
+pre-push: check
+
+quality: check
 
 hooks-install:
   git config core.hooksPath .beads/hooks

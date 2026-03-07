@@ -179,7 +179,9 @@ Primary workflows are exposed through the root `justfile`:
 ```bash
 just install
 just install-global
+just build
 just schema
+just format
 just pre-commit
 just pre-push
 just quality
@@ -187,18 +189,18 @@ just quality
 
 Quality gates:
 
-- `just pre-commit` runs `oxlint` and `tsgo`
-- `just pre-push` runs lint, typecheck, tests, and coverage enforcement
+- `just pre-commit` runs format, lint, and type checks
+- `just pre-push` runs the full `bun run check` gate
 - native git hooks live under `.beads/hooks`
 
 Direct commands, if needed:
 
 ```bash
-bun test
-bun run lint
-bun run typecheck
+bun run check
+bun run check:lint
+bun run check:types
 bun run test:coverage
-bun run coverage:check
+bun run check:cov
 ```
 
 The test suite is fixture-driven and hermetic. It does not depend on live Safari or Chrome bookmark files.

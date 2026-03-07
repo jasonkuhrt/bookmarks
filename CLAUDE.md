@@ -4,16 +4,16 @@
 
 Use Effect data types instead of native JS equivalents:
 
-| Native | Effect | Notes |
-|--------|--------|-------|
-| `Map`, `Record` (as data map) | `HashMap` | O(1) lookup with structural equality |
-| `Set` | `HashSet` | |
-| `Date`, `string` (dates) | `DateTime.Utc` or `DateTime.Zoned` | Use `Schema.DateTimeUtc` at boundaries |
-| `string` (durations) | `Duration` | |
-| `T \| null`, `T \| undefined` | `Option` | |
-| Prefix-keyed dictionaries | `Trie` | For hierarchical path keys |
-| Ordered collections | `RedBlackTree`, `SortedMap` | |
-| Raw discriminated unions | `Data.TaggedEnum` | Derives constructors, `$is`, `$match` |
+| Native                        | Effect                             | Notes                                  |
+| ----------------------------- | ---------------------------------- | -------------------------------------- |
+| `Map`, `Record` (as data map) | `HashMap`                          | O(1) lookup with structural equality   |
+| `Set`                         | `HashSet`                          |                                        |
+| `Date`, `string` (dates)      | `DateTime.Utc` or `DateTime.Zoned` | Use `Schema.DateTimeUtc` at boundaries |
+| `string` (durations)          | `Duration`                         |                                        |
+| `T \| null`, `T \| undefined` | `Option`                           |                                        |
+| Prefix-keyed dictionaries     | `Trie`                             | For hierarchical path keys             |
+| Ordered collections           | `RedBlackTree`, `SortedMap`        |                                        |
+| Raw discriminated unions      | `Data.TaggedEnum`                  | Derives constructors, `$is`, `$match`  |
 
 **Exception:** `Schema.*` types (`Schema.Array`, `Schema.Record`, `Schema.optional`) define the wire/serialization format — native types are correct there.
 

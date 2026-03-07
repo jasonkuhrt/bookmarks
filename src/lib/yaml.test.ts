@@ -1,21 +1,27 @@
-import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { BookmarkFolder, BookmarkLeaf, BookmarksConfig, BookmarkTree, SafariBookmarks } from "./schema/__.js"
-import * as YamlModule from "./yaml.js"
+import { describe, expect, test } from "bun:test";
+import { Effect } from "effect";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  BookmarkFolder,
+  BookmarkLeaf,
+  BookmarksConfig,
+  BookmarkTree,
+  SafariBookmarks,
+} from "./schema/__.ts";
+import * as YamlModule from "./yaml.ts";
 
-const leaf = (name: string, url: string) => new BookmarkLeaf({ name, url })
+const leaf = (name: string, url: string) => new BookmarkLeaf({ name, url });
 const folder = (name: string, children: Array<BookmarkLeaf | BookmarkFolder>) =>
-  new BookmarkFolder({ name, children })
+  new BookmarkFolder({ name, children });
 
-const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect)
+const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
 
 describe("yaml", () => {
   test("save/load preserves sibling ordering and empty folders", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-yaml-"))
-    const yamlPath = join(dir, "bookmarks.yaml")
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-yaml-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
 
     try {
       const config = BookmarksConfig.make({
@@ -28,19 +34,16 @@ describe("yaml", () => {
           ],
         }),
         safari: SafariBookmarks.make({
-          menu: [
-            folder("Profile Empty", []),
-            leaf("Profile Bookmark", "https://profile.example"),
-          ],
+          menu: [folder("Profile Empty", []), leaf("Profile Bookmark", "https://profile.example")],
         }),
-      })
+      });
 
-      await run(YamlModule.save(yamlPath, config))
-      const loaded = await run(YamlModule.load(yamlPath))
+      await run(YamlModule.save(yamlPath, config));
+      const loaded = await run(YamlModule.load(yamlPath));
 
-      expect(loaded).toEqual(config)
+      expect(loaded).toEqual(config);
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
