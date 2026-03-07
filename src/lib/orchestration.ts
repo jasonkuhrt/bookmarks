@@ -1,4 +1,3 @@
-/* oxlint-disable no-unsafe-type-assertion, restrict-template-expressions */
 import { DateTime, Effect } from "effect";
 import * as Fs from "node:fs/promises";
 import * as ManagedPaths from "./managed-paths.ts";
@@ -38,13 +37,16 @@ const isLivePid = (pid: number): boolean => {
 const hasCode = (error: unknown, code: string): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === code;
 
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 const ensureRuntimeDir = (): Effect.Effect<void, Error> =>
   ManagedPaths.ensureDir(Paths.defaultRuntimeDir());
 
 const clearFile = (path: string): Effect.Effect<void> =>
   Effect.tryPromise({
     try: () => Fs.rm(path, { force: true }),
-    catch: (e) => new Error(`Failed to remove ${path}: ${e}`),
+    catch: (error) => new Error(`Failed to remove ${path}: ${messageFromUnknown(error)}`),
   }).pipe(
     Effect.catchAll(() => Effect.void),
     Effect.asVoid,
@@ -55,9 +57,10 @@ const readJsonFile = <A>(path: string): Effect.Effect<A | undefined, Error> =>
     try: async () => {
       const raw = await Fs.readFile(path, "utf-8");
       try {
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- callers validate or pattern-match the decoded JSON shape immediately.
         return JSON.parse(raw) as A;
       } catch (cause) {
-        throw new Error(`Failed to parse ${path}: ${cause}`, { cause });
+        throw new Error(`Failed to parse ${path}: ${messageFromUnknown(cause)}`, { cause });
       }
     },
     catch: (e) =>
@@ -65,7 +68,7 @@ const readJsonFile = <A>(path: string): Effect.Effect<A | undefined, Error> =>
         ? undefined
         : e instanceof Error
           ? e
-          : new Error(`Failed to read ${path}: ${e}`),
+          : new Error(`Failed to read ${path}: ${messageFromUnknown(e)}`),
   }).pipe(
     Effect.catchAll((e) => {
       if (e === undefined) return Effect.succeed(undefined);
@@ -76,7 +79,8 @@ const readJsonFile = <A>(path: string): Effect.Effect<A | undefined, Error> =>
 const writeJsonFile = (path: string, value: unknown, flag?: "wx"): Effect.Effect<void, Error> =>
   Effect.tryPromise({
     try: () => Fs.writeFile(path, JSON.stringify(value, null, 2), flag ? { flag } : undefined),
-    catch: (e) => new Error(`Failed to write ${path}: ${e}`, { cause: e }),
+    catch: (error) =>
+      new Error(`Failed to write ${path}: ${messageFromUnknown(error)}`, { cause: error }),
   });
 
 const acquireLock = <O extends OrchestratedOperation>(

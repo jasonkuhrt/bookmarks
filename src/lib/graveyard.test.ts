@@ -1,9 +1,8 @@
-/* oxlint-disable no-non-null-assertion, no-unsafe-type-assertion */
 import { describe, expect, test } from "bun:test";
 import { DateTime, Duration, Effect, Option, TestClock, TestContext } from "effect";
 import * as Graveyard from "./graveyard.ts";
 import * as Patch from "./patch.ts";
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
+import { BookmarkFolder, BookmarkLeaf, type BookmarkNode, BookmarkTree } from "./schema/__.ts";
 
 // -- Test helpers --
 
@@ -17,6 +16,35 @@ const run = <A>(effect: Effect.Effect<A, Error>) =>
   Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)));
 
 const mkDate = (iso: string): DateTime.Utc => DateTime.unsafeMake(iso);
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const expectFolder = (value: BookmarkNode | undefined, message: string): BookmarkFolder => {
+  const node = expectDefined(value, message);
+  expect(BookmarkFolder.is(node)).toBe(true);
+  if (!BookmarkFolder.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectLeaf = (value: BookmarkNode | undefined, message: string): BookmarkLeaf => {
+  const node = expectDefined(value, message);
+  expect(BookmarkLeaf.is(node)).toBe(true);
+  if (!BookmarkLeaf.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectMenu = (tree: BookmarkTree): readonly BookmarkNode[] =>
+  expectDefined(tree.menu, "expected menu section");
 
 const mkAddPatch = (
   url: string,
@@ -103,12 +131,11 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "conflict"));
 
-    expect(result.menu).toBeDefined();
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
     );
-    expect(graveyardFolder).toBeDefined();
-    expect(graveyardFolder!.children.length).toBe(1);
+    expect(graveyardFolder.children.length).toBe(1);
   });
 
   test("preserves original path as nested folders", async () => {
@@ -122,21 +149,22 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "conflict"));
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     // Event folder is the first child
-    const eventFolder = graveyardFolder.children[0] as BookmarkFolder;
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
     expect(eventFolder.name).toMatch(/^\d{4}-\d{2}-\d{2}_safari_conflict$/);
 
     // Path should be: bar/AI/Tools/ChatGPT (leaf)
-    const pathRoot = eventFolder.children[0] as BookmarkFolder;
+    const pathRoot = expectFolder(eventFolder.children[0], "expected bar path root");
     expect(pathRoot.name).toBe("bar");
-    const aiFolder = pathRoot.children[0] as BookmarkFolder;
+    const aiFolder = expectFolder(pathRoot.children[0], 'expected "AI" folder');
     expect(aiFolder.name).toBe("AI");
-    const toolsFolder = aiFolder.children[0] as BookmarkFolder;
+    const toolsFolder = expectFolder(aiFolder.children[0], 'expected "Tools" folder');
     expect(toolsFolder.name).toBe("Tools");
-    const leafNode = toolsFolder.children[0] as BookmarkLeaf;
+    const leafNode = expectLeaf(toolsFolder.children[0], "expected graveyard bookmark");
     expect(leafNode.name).toBe("ChatGPT");
     expect(leafNode.url).toBe("https://chat.openai.com");
   });
@@ -149,9 +177,10 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "conflict"));
 
-    expect(result.menu!.length).toBe(2); // existing leaf + _graveyard folder
-    const existingLeaf = result.menu!.find(
-      (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.name === "Existing",
+    const menu = expectMenu(result);
+    expect(menu.length).toBe(2); // existing leaf + _graveyard folder
+    const existingLeaf = menu.find(
+      (node): node is BookmarkLeaf => BookmarkLeaf.is(node) && node.name === "Existing",
     );
     expect(existingLeaf).toBeDefined();
   });
@@ -167,15 +196,16 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "deleted"));
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     expect(graveyardFolder.children.length).toBe(1);
-    const eventFolder = graveyardFolder.children[0] as BookmarkFolder;
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
     expect(eventFolder.name).toMatch(/^\d{4}-\d{2}-\d{2}_safari_deleted$/);
-    const pathRoot = eventFolder.children[0] as BookmarkFolder;
-    const oldFolder = pathRoot.children[0] as BookmarkFolder;
-    const leafNode = oldFolder.children[0] as BookmarkLeaf;
+    const pathRoot = expectFolder(eventFolder.children[0], "expected bar path root");
+    const oldFolder = expectFolder(pathRoot.children[0], 'expected "Old" folder');
+    const leafNode = expectLeaf(oldFolder.children[0], "expected graveyard bookmark");
     expect(leafNode.name).toBe("Old Bookmark");
     expect(leafNode.url).toBe("https://removed.com");
   });
@@ -192,13 +222,14 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "conflict"));
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
-    const eventFolder = graveyardFolder.children[0] as BookmarkFolder;
-    const pathRoot = eventFolder.children[0] as BookmarkFolder;
-    const researchFolder = pathRoot.children[0] as BookmarkFolder;
-    const leafNode = researchFolder.children[0] as BookmarkLeaf;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
+    const pathRoot = expectFolder(eventFolder.children[0], "expected bar path root");
+    const researchFolder = expectFolder(pathRoot.children[0], 'expected "Research" folder');
+    const leafNode = expectLeaf(researchFolder.children[0], "expected graveyard bookmark");
     expect(pathRoot.name).toBe("bar");
     expect(researchFolder.name).toBe("Research");
     expect(leafNode.name).toBe("Old Title");
@@ -217,13 +248,14 @@ describe("addToGraveyard", () => {
 
     const result = await run(Graveyard.addToGraveyard(tree, patch, "safari", "conflict"));
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
-    const eventFolder = graveyardFolder.children[0] as BookmarkFolder;
-    const pathRoot = eventFolder.children[0] as BookmarkFolder;
-    const projectsFolder = pathRoot.children[0] as BookmarkFolder;
-    const leafNode = projectsFolder.children[0] as BookmarkLeaf;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
+    const pathRoot = expectFolder(eventFolder.children[0], "expected bar path root");
+    const projectsFolder = expectFolder(pathRoot.children[0], 'expected "Projects" folder');
+    const leafNode = expectLeaf(projectsFolder.children[0], "expected graveyard bookmark");
     expect(pathRoot.name).toBe("bar");
     expect(projectsFolder.name).toBe("Projects");
     expect(leafNode.name).toBe("Moved Bookmark");
@@ -243,11 +275,12 @@ describe("addGraveyardEntries", () => {
 
     const result = await run(Graveyard.addGraveyardEntries(tree, patches, "safari", "conflict"));
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     // Both patches should share the same event folder (same date, source, reason)
-    const eventFolder = graveyardFolder.children[0] as BookmarkFolder;
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
     expect(eventFolder.children.length).toBe(2);
   });
 
@@ -283,11 +316,14 @@ describe("gc", () => {
       }),
     );
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     expect(graveyardFolder.children.length).toBe(1);
-    expect((graveyardFolder.children[0] as BookmarkFolder).name).toBe("2025-12-01_safari_conflict");
+    expect(expectFolder(graveyardFolder.children[0], "expected remaining event folder").name).toBe(
+      "2025-12-01_safari_conflict",
+    );
   });
 
   test("removes graveyard folder when all entries are expired", async () => {
@@ -304,7 +340,7 @@ describe("gc", () => {
     );
 
     // Graveyard folder should be removed entirely
-    const graveyardFolder = result.menu!.find(
+    const graveyardFolder = expectMenu(result).find(
       (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
     );
     expect(graveyardFolder).toBeUndefined();
@@ -320,9 +356,10 @@ describe("gc", () => {
       }),
     );
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     expect(graveyardFolder.children.length).toBe(2);
   });
 
@@ -336,7 +373,7 @@ describe("gc", () => {
       }),
     );
 
-    expect(result.menu!.length).toBe(1);
+    expect(expectMenu(result).length).toBe(1);
   });
 
   test("returns tree unchanged when other section is absent", async () => {
@@ -366,8 +403,9 @@ describe("gc", () => {
     );
 
     // Graveyard removed (all entries expired), but existing leaf kept
-    expect(result.menu!.length).toBe(1);
-    const kept = result.menu![0] as BookmarkLeaf;
+    const menu = expectMenu(result);
+    expect(menu.length).toBe(1);
+    const kept = expectLeaf(menu[0], "expected preserved bookmark leaf");
     expect(kept.name).toBe("MyBookmark");
     expect(kept.url).toBe("https://keep.com");
   });
@@ -389,11 +427,14 @@ describe("gc", () => {
       }),
     );
 
-    const graveyardFolder = result.menu!.find(
-      (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "_graveyard",
-    )!;
+    const graveyardFolder = expectFolder(
+      expectMenu(result).find((node) => BookmarkFolder.is(node) && node.name === "_graveyard"),
+      'expected "_graveyard" folder',
+    );
     // Only the unparseable folder should remain
     expect(graveyardFolder.children.length).toBe(1);
-    expect((graveyardFolder.children[0] as BookmarkFolder).name).toBe("not-a-valid-name");
+    expect(expectFolder(graveyardFolder.children[0], "expected retained folder").name).toBe(
+      "not-a-valid-name",
+    );
   });
 });

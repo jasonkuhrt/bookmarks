@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-/* oxlint-disable restrict-template-expressions */
 /**
  * bookmarks - Cross-browser bookmark sync from YAML
  *
@@ -15,8 +14,18 @@
  *   validate    validate bookmarks.yaml
  */
 
-import type { DateTime } from "effect";
-import { Cause, Console, Data, Duration, Effect, Exit, LogLevel, Logger, Option } from "effect";
+import {
+  Cause,
+  Console,
+  Data,
+  DateTime,
+  Duration,
+  Effect,
+  Exit,
+  LogLevel,
+  Logger,
+  Option,
+} from "effect";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { BookmarkPatch } from "../lib/patch.ts";
@@ -468,8 +477,8 @@ const program = Effect.gen(function* () {
           if (flags.json) {
             yield* printJson(serializeDaemonStatus(st));
           } else {
-            const formatOptDate = (opt: Option.Option<DateTime.Utc>) =>
-              Option.isSome(opt) ? opt.value.toJSON() : "unknown";
+            const formatOptDate = (opt: Option.Option<DateTime.Utc>): string =>
+              Option.isSome(opt) ? DateTime.formatIso(opt.value) : "unknown";
             yield* Console.log(`Daemon status:`);
             yield* Console.log(`  Running:  ${st.running ? "yes" : "no"}`);
             yield* Console.log(`  Last run: ${formatOptDate(st.lastRun)}`);

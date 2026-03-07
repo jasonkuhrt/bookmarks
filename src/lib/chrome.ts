@@ -1,4 +1,3 @@
-/* oxlint-disable no-explicit-any, no-non-null-assertion, no-unsafe-assignment, no-unsafe-type-assertion, no-unnecessary-condition */
 /**
  * Chrome JSON adapter.
  *
@@ -43,6 +42,42 @@ type ChromeBookmarksFile = {
   sync_metadata?: string;
 };
 
+type ChromeSectionKey = "bar" | "menu" | "mobile";
+
+const chromeSections = [
+  ["bookmark_bar", "bar"],
+  ["other", "menu"],
+  ["synced", "mobile"],
+] as const satisfies readonly (readonly [keyof ChromeRoot, ChromeSectionKey])[];
+
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const parseChromeBookmarksFile = (text: string, bookmarksPath: string): ChromeBookmarksFile => {
+  try {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Chrome bookmark files are read from the browser and used through the adapter's typed helpers below.
+    return JSON.parse(text) as ChromeBookmarksFile;
+  } catch (error) {
+    throw new Error(
+      `Failed to parse Chrome bookmarks at ${bookmarksPath}: ${messageFromUnknown(error)}`,
+      { cause: error },
+    );
+  }
+};
+
+const decodeUnknownChildren = (children: readonly unknown[] | undefined): BookmarkNode[] => {
+  if (!children) return [];
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Schema transforms only pass raw Chrome child node arrays into this helper.
+  return decodeNodes(children as ChromeNode[]);
+};
+
 // -- Chrome timestamp helpers --
 
 /** Offset in seconds between Windows epoch (1601-01-01) and Unix epoch (1970-01-01). */
@@ -69,13 +104,7 @@ const nowChromeTimestamp = (): string =>
 
 // -- Chrome section key ↔ domain section key mappings --
 
-const CHROME_KEY_TO_SECTION: Record<string, "bar" | "menu" | "mobile"> = {
-  bookmark_bar: "bar",
-  other: "menu",
-  synced: "mobile",
-};
-
-const SECTION_TO_CHROME_KEY: Record<string, keyof ChromeRoot> = {
+const SECTION_TO_CHROME_KEY: Record<ChromeSectionKey, keyof ChromeRoot> = {
   bar: "bookmark_bar",
   menu: "other",
   mobile: "synced",
@@ -113,12 +142,12 @@ const ChromeFolderTransform = Schema.transform(
     decode: (chrome) => ({
       _tag: "BookmarkFolder" as const,
       name: chrome.name,
-      children: chrome.children ? decodeNodes(chrome.children as ChromeNode[]) : [],
+      children: decodeUnknownChildren(chrome.children),
     }),
     encode: (folder) => ({
       type: "folder" as const,
       name: folder.name,
-      children: folder.children as any,
+      children: folder.children,
     }),
   },
 );
@@ -130,16 +159,7 @@ const ChromeFolderTransform = Schema.transform(
  * This is used for the "name" (title) field in the checksum calculation.
  */
 const toUtf16LeBytes = (str: string): Uint8Array => {
-  const codeUnits: number[] = [];
-  for (let i = 0; i < str.length; i++) {
-    codeUnits.push(str.charCodeAt(i));
-  }
-  const bytes = new Uint8Array(codeUnits.length * 2);
-  for (let i = 0; i < codeUnits.length; i++) {
-    bytes[i * 2] = codeUnits[i]! & 0xff;
-    bytes[i * 2 + 1] = (codeUnits[i]! >> 8) & 0xff;
-  }
-  return bytes;
+  return new Uint8Array(Buffer.from(str, "utf16le"));
 };
 
 /**
@@ -189,15 +209,15 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
       catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
     });
 
-    const file = JSON.parse(text) as ChromeBookmarksFile;
+    const file = parseChromeBookmarksFile(text, bookmarksPath);
     const { roots } = file;
 
     const sections: Partial<Record<"bar" | "menu" | "mobile", BookmarkSection>> = {};
     const issues: BookmarkIssue[] = [];
 
-    for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
-      const rootNode = roots[chromeKey as keyof ChromeRoot];
-      if (rootNode?.children && rootNode.children.length > 0) {
+    for (const [chromeKey, sectionKey] of chromeSections) {
+      const rootNode = roots[chromeKey];
+      if (rootNode.children && rootNode.children.length > 0) {
         issues.push(...scanNodes(rootNode.children, sectionKey));
         sections[sectionKey] = decodeNodes(rootNode.children);
       }
@@ -240,7 +260,7 @@ export const applyPatches = (
       catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
     });
 
-    const file = JSON.parse(text) as ChromeBookmarksFile;
+    const file = parseChromeBookmarksFile(text, bookmarksPath);
     const { roots } = file;
 
     // Track next sequential ID for new nodes
@@ -254,7 +274,7 @@ export const applyPatches = (
           rootNode.children ??= [];
           const parent = ensureFolderPath(rootNode.children, folderPath, () => nextId++);
           const ts = nowChromeTimestamp();
-          parent.push({
+          const newLeaf: ChromeNode = {
             type: "url",
             name,
             url,
@@ -262,7 +282,8 @@ export const applyPatches = (
             guid: crypto.randomUUID(),
             date_added: ts,
             date_last_used: "0",
-          } as unknown as ChromeNode);
+          };
+          parent.push(newLeaf);
         },
         Remove: ({ url }) => {
           removeNodeByUrl(roots, url);
@@ -310,7 +331,7 @@ export const writeTree = (bookmarksPath: string, tree: BookmarkTree): Effect.Eff
       catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
     });
 
-    const file = JSON.parse(text) as ChromeBookmarksFile;
+    const file = parseChromeBookmarksFile(text, bookmarksPath);
     const { roots } = file;
     let nextId = findMaxId(roots) + 1;
     const existing = collectChromeNodes(roots);
@@ -347,8 +368,8 @@ const collectChromeNodes = (roots: ChromeRoot): ChromeNodeLookup => {
     leavesByUrl: new Map(),
   };
 
-  for (const [chromeKey, sectionKey] of Object.entries(CHROME_KEY_TO_SECTION)) {
-    const rootNode = roots[chromeKey as keyof ChromeRoot];
+  for (const [chromeKey, sectionKey] of chromeSections) {
+    const rootNode = roots[chromeKey];
     collectChromeChildren(rootNode.children ?? [], sectionKey, lookup);
   }
 
@@ -433,7 +454,8 @@ const scanNodes = (children: ChromeNode[], path: string): BookmarkIssue[] => {
   const issues: BookmarkIssue[] = [];
 
   for (let index = 0; index < children.length; index++) {
-    const child = children[index]!;
+    const child = children[index];
+    if (!child) continue;
     const itemPath = `${path}/[${index + 1}]`;
 
     if (child.type === "url") continue;
@@ -481,7 +503,9 @@ function decodeNodes(children: ChromeNode[]): BookmarkNode[] {
 /** Parse a domain path like "bar/Dev" into Chrome root key + folder path. */
 const parseDomainPath = (path: string): { chromeKey: keyof ChromeRoot; folderPath: string[] } => {
   const [sectionKey, ...rest] = path.split("/");
-  const chromeKey = SECTION_TO_CHROME_KEY[sectionKey!] ?? (sectionKey as keyof ChromeRoot);
+  const normalizedSectionKey: ChromeSectionKey =
+    sectionKey === "menu" || sectionKey === "mobile" ? sectionKey : "bar";
+  const chromeKey = SECTION_TO_CHROME_KEY[normalizedSectionKey];
   return { chromeKey, folderPath: rest };
 };
 
@@ -510,7 +534,7 @@ const ensureFolderPath = (
         date_last_used: "0",
       };
       current.push(newFolder);
-      current = newFolder.children!;
+      current = expectDefined(newFolder.children, "Expected Chrome folder children array");
     }
   }
   return current;
@@ -548,7 +572,8 @@ const removeNodeByUrl = (roots: ChromeRoot, url: string): boolean => {
 /** Remove a URL node from a children array (recursive). */
 const removeFromChildren = (children: ChromeNode[], url: string): boolean => {
   for (let i = 0; i < children.length; i++) {
-    const node = children[i]!;
+    const node = children[i];
+    if (!node) continue;
     if (node.type === "url" && node.url === url) {
       children.splice(i, 1);
       return true;
@@ -572,7 +597,8 @@ const extractNodeByUrl = (roots: ChromeRoot, url: string): ChromeNode | undefine
 /** Extract a URL node from a children array (recursive). */
 const extractFromChildren = (children: ChromeNode[], url: string): ChromeNode | undefined => {
   for (let i = 0; i < children.length; i++) {
-    const node = children[i]!;
+    const node = children[i];
+    if (!node) continue;
     if (node.type === "url" && node.url === url) {
       children.splice(i, 1);
       return node;

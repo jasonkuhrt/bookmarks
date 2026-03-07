@@ -1,4 +1,3 @@
-/* oxlint-disable no-non-null-assertion */
 /**
  * Doctor — pre-flight diagnostics for bookmark sync.
  *
@@ -46,6 +45,11 @@ const fail = (name: string, message: string, fix: string): DoctorCheck => ({
   message,
   fix,
 });
+
+const hasChromeProfile = (
+  target: Targets.TargetDescriptor,
+): target is Targets.TargetDescriptor & { readonly profile: string } =>
+  target.browser === "chrome" && typeof target.profile === "string";
 
 // ---------------------------------------------------------------------------
 // Individual checks
@@ -110,9 +114,7 @@ const checkConfiguredChromeProfiles = (
   discoveredTargets: readonly Targets.TargetDescriptor[],
 ): DoctorCheck => {
   const discoveredChromeProfiles = new Set(
-    discoveredTargets
-      .filter((target) => target.browser === "chrome" && target.profile)
-      .map((target) => `chrome/${target.profile!}`),
+    discoveredTargets.filter(hasChromeProfile).map((target) => `chrome/${target.profile}`),
   );
   const missingProfiles = YamlModule.configuredChromeProfiles(config).filter(
     (profile) => !discoveredChromeProfiles.has(`chrome/${profile}`),

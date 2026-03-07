@@ -1,4 +1,3 @@
-/* oxlint-disable no-unnecessary-condition, restrict-template-expressions */
 /**
  * Load and save bookmarks.yaml.
  *
@@ -34,6 +33,9 @@ const supportedSectionsByBrowser: Record<string, readonly SectionKey[]> = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
+
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 const normalizeTreeDocument = (value: unknown): Record<string, unknown> | undefined => {
   if (!isRecord(value)) return undefined;
@@ -80,7 +82,7 @@ const normalizeChromeDocument = (value: unknown): Record<string, unknown> | unde
             ([profile, profileValue]) =>
               [profile, normalizeChromeProfileDocument(profileValue)] as const,
           )
-          .filter(([, profileValue]) => profileValue !== null),
+          .filter(([, profileValue]) => profileValue !== undefined),
       )
     : undefined;
 
@@ -243,7 +245,7 @@ export const decodeDocument = (
   Effect.gen(function* () {
     const normalized = yield* Effect.try({
       try: () => normalizeDocument(value),
-      catch: (e) => new Error(`Failed to normalize ${source}: ${e}`),
+      catch: (error) => new Error(`Failed to normalize ${source}: ${messageFromUnknown(error)}`),
     });
     return yield* Schema.decodeUnknown(BookmarksConfig)(normalized).pipe(
       Effect.mapError((e) => new Error(`Schema validation failed for ${source}: ${e.message}`)),
@@ -255,11 +257,11 @@ export const load = (path: string): Effect.Effect<BookmarksConfig, Error> =>
   Effect.gen(function* () {
     const raw = yield* Effect.tryPromise({
       try: () => Fs.readFile(path, "utf-8"),
-      catch: (e) => new Error(`Failed to read ${path}: ${e}`),
+      catch: (error) => new Error(`Failed to read ${path}: ${messageFromUnknown(error)}`),
     });
     const parsed = yield* Effect.try({
       try: () => Yaml.parse(raw) as unknown,
-      catch: (e) => new Error(`Failed to parse ${path}: ${e}`),
+      catch: (error) => new Error(`Failed to parse ${path}: ${messageFromUnknown(error)}`),
     });
     return yield* decodeDocument(parsed, path);
   });
@@ -296,7 +298,7 @@ export const save = (path: string, config: BookmarksConfig): Effect.Effect<void,
     yield* ManagedPaths.ensureParentDir(path);
     yield* Effect.tryPromise({
       try: () => Fs.writeFile(path, yamlStr, "utf-8"),
-      catch: (e) => new Error(`Failed to write ${path}: ${e}`),
+      catch: (error) => new Error(`Failed to write ${path}: ${messageFromUnknown(error)}`),
     });
   });
 

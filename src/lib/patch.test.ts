@@ -1,7 +1,6 @@
-/* oxlint-disable await-thenable, no-confusing-void-expression, no-non-null-assertion, no-unsafe-type-assertion */
 import { describe, expect, test } from "bun:test";
 import { DateTime, Effect, HashMap, Option } from "effect";
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
+import { BookmarkFolder, BookmarkLeaf, type BookmarkNode, BookmarkTree } from "./schema/__.ts";
 import * as Patch from "./patch.ts";
 
 // -- Test helpers --
@@ -13,6 +12,45 @@ const folder = (name: string, children: Array<BookmarkLeaf | BookmarkFolder>) =>
 const emptyTree = () => new BookmarkTree({});
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const expectLeaf = (value: BookmarkNode | undefined, message: string): BookmarkLeaf => {
+  const node = expectDefined(value, message);
+  expect(BookmarkLeaf.is(node)).toBe(true);
+  if (!BookmarkLeaf.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectFolder = (value: BookmarkNode | undefined, message: string): BookmarkFolder => {
+  const node = expectDefined(value, message);
+  expect(BookmarkFolder.is(node)).toBe(true);
+  if (!BookmarkFolder.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectRejects = async (promise: Promise<unknown>, message: string): Promise<void> => {
+  try {
+    await promise;
+    throw new Error(`Expected rejection containing "${message}"`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) {
+      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
+    }
+    expect(error.message).toContain(message);
+  }
+};
 
 // -- flatten --
 
@@ -76,9 +114,9 @@ describe("toTrie / fromTrie", () => {
       bar: [leaf("A", "https://a.com")],
     });
     const result = Patch.fromTrie(Patch.toTrie(tree));
-    expect(result.bar).toBeDefined();
-    expect(result.bar!.length).toBe(1);
-    const node = result.bar![0] as BookmarkLeaf;
+    const bar = expectDefined(result.bar, "expected bookmarks bar section");
+    expect(bar.length).toBe(1);
+    const node = expectLeaf(bar[0], "expected bookmark leaf");
     expect(node.name).toBe("A");
     expect(node.url).toBe("https://a.com");
   });
@@ -101,10 +139,11 @@ describe("toTrie / fromTrie", () => {
     expect(result.mobile).toBeUndefined();
 
     // Check nested structure
-    const aiFolder = result.bar!.find(
-      (n) => BookmarkFolder.is(n) && n.name === "AI",
-    ) as BookmarkFolder;
-    expect(aiFolder).toBeDefined();
+    const bar = expectDefined(result.bar, "expected bookmarks bar section");
+    const aiFolder = expectFolder(
+      bar.find((node) => BookmarkFolder.is(node) && node.name === "AI"),
+      'expected "AI" folder',
+    );
     expect(aiFolder.children.length).toBe(2);
   });
 
@@ -155,7 +194,7 @@ describe("generatePatches", () => {
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
     const removes = patches.filter(Patch.$is("Remove"));
     expect(removes.length).toBe(1);
-    expect(removes[0]!.url).toBe("https://b.com");
+    expect(expectDefined(removes[0], "expected remove patch").url).toBe("https://b.com");
   });
 
   test("renamed bookmark produces Rename patch", async () => {
@@ -168,8 +207,9 @@ describe("generatePatches", () => {
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
     const renames = patches.filter(Patch.$is("Rename"));
     expect(renames.length).toBe(1);
-    expect(renames[0]!.oldName).toBe("Old Name");
-    expect(renames[0]!.newName).toBe("New Name");
+    const rename = expectDefined(renames[0], "expected rename patch");
+    expect(rename.oldName).toBe("Old Name");
+    expect(rename.newName).toBe("New Name");
   });
 
   test("moved bookmark produces Move patch", async () => {
@@ -182,8 +222,9 @@ describe("generatePatches", () => {
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
     const moves = patches.filter(Patch.$is("Move"));
     expect(moves.length).toBe(1);
-    expect(moves[0]!.fromPath).toBe("bar");
-    expect(moves[0]!.toPath).toBe("menu");
+    const move = expectDefined(moves[0], "expected move patch");
+    expect(move.fromPath).toBe("bar");
+    expect(move.toPath).toBe("menu");
   });
 
   test("moved + renamed in one produces both patches", async () => {
@@ -222,7 +263,8 @@ describe("generatePatches", () => {
       bar: [leaf("First", "https://dup.example"), leaf("Second", "https://dup.example")],
     });
 
-    await expect(run(Patch.generatePatches(emptyTree(), current, "yaml"))).rejects.toThrow(
+    await expectRejects(
+      run(Patch.generatePatches(emptyTree(), current, "yaml")),
       'Duplicate URL "https://dup.example"',
     );
   });

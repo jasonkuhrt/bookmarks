@@ -1,4 +1,3 @@
-/* oxlint-disable no-non-null-assertion */
 /**
  * Graveyard management and garbage collection.
  *
@@ -26,6 +25,13 @@ export const GRAVEYARD_FOLDER_NAME = "_graveyard";
 /** Regex for parsing graveyard event folder names. */
 const EVENT_FOLDER_RE = /^(\d{4}-\d{2}-\d{2})_([^_]+)_([^_]+)$/;
 
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers (internal)
 // ---------------------------------------------------------------------------
@@ -50,9 +56,13 @@ export const parseEventFolderName = (
 ): Option.Option<{ date: DateTime.Utc; source: string; reason: string }> => {
   const m = EVENT_FOLDER_RE.exec(name);
   if (!m) return Option.none();
-  const dateOpt = DateTime.make(m[1]!);
+  const dateOpt = DateTime.make(expectDefined(m[1], `Missing graveyard date in "${name}"`));
   if (Option.isNone(dateOpt)) return Option.none();
-  return Option.some({ date: dateOpt.value, source: m[2]!, reason: m[3]! });
+  return Option.some({
+    date: dateOpt.value,
+    source: expectDefined(m[2], `Missing graveyard source in "${name}"`),
+    reason: expectDefined(m[3], `Missing graveyard reason in "${name}"`),
+  });
 };
 
 /**
@@ -66,7 +76,10 @@ const buildPathFolders = (pathSegments: readonly string[], leaf: BookmarkNode): 
 
   let current: BookmarkNode = leaf;
   for (let i = pathSegments.length - 1; i >= 0; i--) {
-    current = BookmarkFolder.make({ name: pathSegments[i]!, children: [current] });
+    current = BookmarkFolder.make({
+      name: expectDefined(pathSegments[i], "Missing graveyard path segment"),
+      children: [current],
+    });
   }
   return current;
 };

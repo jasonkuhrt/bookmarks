@@ -1,4 +1,3 @@
-/* oxlint-disable no-unsafe-type-assertion */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -28,7 +27,10 @@ const expectFailure = async (promise: Promise<unknown>, message: string): Promis
     throw new Error(`Expected rejection containing "${message}"`);
   } catch (error) {
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(message);
+    if (!(error instanceof Error)) {
+      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
+    }
+    expect(error.message).toContain(message);
   }
 };
 

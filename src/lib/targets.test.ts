@@ -1,4 +1,3 @@
-/* oxlint-disable await-thenable, no-confusing-void-expression */
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { serialize } from "@plist/binary.serialize";
@@ -19,6 +18,19 @@ import { copyChromeBookmarksFixture, writeSafariBookmarksFixture } from "./test-
 import * as Targets from "./targets.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
+
+const expectRejects = async (promise: Promise<unknown>, message: string): Promise<void> => {
+  try {
+    await promise;
+    throw new Error(`Expected rejection containing "${message}"`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) {
+      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
+    }
+    expect(error.message).toContain(message);
+  }
+};
 
 describe("targets", () => {
   test("discoverSafariTargets discovers the shared Safari bookmark store once", async () => {
@@ -166,7 +178,8 @@ describe("targets", () => {
       { browser: "chrome", profile: "default", path: "/tmp/default", enabled: true },
     ] as const;
 
-    await expect(run(Targets.resolveTargetSelectors(targets, ["chrome/defualt"]))).rejects.toThrow(
+    await expectRejects(
+      run(Targets.resolveTargetSelectors(targets, ["chrome/defualt"])),
       'Unknown target selector "chrome/defualt"',
     );
   });
@@ -174,7 +187,8 @@ describe("targets", () => {
   test("resolveTargetSelectors fails clearly for Safari profile selectors", async () => {
     const targets = [{ browser: "safari", path: "/tmp/Safari.plist", enabled: true }] as const;
 
-    await expect(run(Targets.resolveTargetSelectors(targets, ["safari/default"]))).rejects.toThrow(
+    await expectRejects(
+      run(Targets.resolveTargetSelectors(targets, ["safari/default"])),
       'Safari bookmarks are shared; use "safari" instead of "safari/default".',
     );
   });
@@ -184,7 +198,8 @@ describe("targets", () => {
       { browser: "chrome", profile: "default", path: "/tmp/default", enabled: true },
     ] as const;
 
-    await expect(run(Targets.resolveTargetSelectors(targets, ["firefox"]))).rejects.toThrow(
+    await expectRejects(
+      run(Targets.resolveTargetSelectors(targets, ["firefox"])),
       'Unknown browser selector "firefox"',
     );
   });
@@ -303,10 +318,11 @@ describe("targets", () => {
       );
       expect(rewritten.bar?.map((node) => node.name)).toEqual(["Rewritten"]);
 
-      await expect(
+      await expectRejects(
         run(Targets.readTree({ browser: "firefox", path: chromePath, enabled: true })),
-      ).rejects.toThrow("Unsupported bookmarks target");
-      await expect(
+        "Unsupported bookmarks target",
+      );
+      await expectRejects(
         run(
           Targets.applyPatches({ browser: "firefox", path: chromePath, enabled: true }, [
             Patch.Remove({
@@ -317,15 +333,17 @@ describe("targets", () => {
             }),
           ]),
         ),
-      ).rejects.toThrow("Unsupported bookmarks target");
-      await expect(
+        "Unsupported bookmarks target",
+      );
+      await expectRejects(
         run(
           Targets.writeTree(
             { browser: "firefox", path: chromePath, enabled: true },
             BookmarkTree.make({}),
           ),
         ),
-      ).rejects.toThrow("Unsupported bookmarks target");
+        "Unsupported bookmarks target",
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

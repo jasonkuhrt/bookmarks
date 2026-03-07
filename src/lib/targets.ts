@@ -1,4 +1,3 @@
-/* oxlint-disable no-await-in-loop, no-unsafe-type-assertion, restrict-template-expressions */
 import { Database } from "bun:sqlite";
 import { parse } from "@plist/binary.parse";
 import { Effect } from "effect";
@@ -36,6 +35,18 @@ type SafariProfileRow = {
 
 const DEFAULT_SAFARI_BOOKMARK_SCOPE = "Favorites Bar";
 
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const isChromeLocalState = (value: unknown): value is ChromeLocalState =>
+  !isRecord(value) ||
+  value["profile"] === undefined ||
+  (isRecord(value["profile"]) &&
+    (value["profile"]["info_cache"] === undefined || isRecord(value["profile"]["info_cache"])));
+
 export const keyOf = (target: Pick<TargetDescriptor, "browser" | "profile">): string =>
   target.profile ? `${target.browser}/${target.profile}` : target.browser;
 
@@ -70,7 +81,8 @@ const bookmarkScopeOf = (extraAttributes: Uint8Array | ArrayBuffer | null): stri
   if (!extraAttributes) return DEFAULT_SAFARI_BOOKMARK_SCOPE;
 
   try {
-    const parsed = parse(toArrayBuffer(extraAttributes)) as Record<string, unknown>;
+    const parsed = parse(toArrayBuffer(extraAttributes));
+    if (!isRecord(parsed)) return DEFAULT_SAFARI_BOOKMARK_SCOPE;
     const scope = parsed["CustomFavoritesFolderServerID"];
     return typeof scope === "string" && scope.length > 0 ? scope : DEFAULT_SAFARI_BOOKMARK_SCOPE;
   } catch {
@@ -81,8 +93,8 @@ const bookmarkScopeOf = (extraAttributes: Uint8Array | ArrayBuffer | null): stri
 const readChromeProfileDirectories = async (chromeDataDir: string): Promise<string[]> => {
   const localStatePath = Path.join(chromeDataDir, "Local State");
   if (await exists(localStatePath)) {
-    const parsed = JSON.parse(await Fs.readFile(localStatePath, "utf-8")) as ChromeLocalState;
-    const infoCache = parsed.profile?.info_cache;
+    const parsed: unknown = JSON.parse(await Fs.readFile(localStatePath, "utf-8"));
+    const infoCache = isChromeLocalState(parsed) ? parsed.profile?.info_cache : undefined;
     if (infoCache) {
       return Object.keys(infoCache).filter((directoryName) => directoryName !== "System Profile");
     }
@@ -101,23 +113,26 @@ export const discoverChromeTargets = (
       if (!(await exists(chromeDataDir))) return [];
 
       const directories = (await readChromeProfileDirectories(chromeDataDir)).sort();
-      const targets: TargetDescriptor[] = [];
+      const targets = await Promise.all(
+        directories.map(async (directoryName) => {
+          const bookmarksPath = Path.join(chromeDataDir, directoryName, "Bookmarks");
+          if (!(await exists(bookmarksPath))) return undefined;
 
-      for (const directoryName of directories) {
-        const bookmarksPath = Path.join(chromeDataDir, directoryName, "Bookmarks");
-        if (!(await exists(bookmarksPath))) continue;
+          return {
+            browser: "chrome",
+            profile: normalizeChromeProfileSelector(directoryName),
+            path: bookmarksPath,
+            enabled: true,
+          } satisfies TargetDescriptor;
+        }),
+      );
 
-        targets.push({
-          browser: "chrome",
-          profile: normalizeChromeProfileSelector(directoryName),
-          path: bookmarksPath,
-          enabled: true,
-        });
-      }
-
-      return targets;
+      return targets.filter((target) => target !== undefined);
     },
-    catch: (e) => new Error(`Failed to discover Chrome targets in ${chromeDataDir}: ${e}`),
+    catch: (error) =>
+      new Error(
+        `Failed to discover Chrome targets in ${chromeDataDir}: ${messageFromUnknown(error)}`,
+      ),
   });
 
 export const discoverSafariProfiles = (
@@ -148,7 +163,10 @@ export const discoverSafariProfiles = (
         db.close();
       }
     },
-    catch: (e) => new Error(`Failed to discover Safari profiles at ${tabsDbPath}: ${e}`),
+    catch: (error) =>
+      new Error(
+        `Failed to discover Safari profiles at ${tabsDbPath}: ${messageFromUnknown(error)}`,
+      ),
   });
 
 export const discoverSafariTargets = (
@@ -165,7 +183,8 @@ export const discoverSafariTargets = (
         } satisfies TargetDescriptor,
       ];
     },
-    catch: (e) => new Error(`Failed to discover Safari targets at ${plistPath}: ${e}`),
+    catch: (error) =>
+      new Error(`Failed to discover Safari targets at ${plistPath}: ${messageFromUnknown(error)}`),
   });
 
 export const discoverTargets = (): Effect.Effect<readonly TargetDescriptor[], Error> =>

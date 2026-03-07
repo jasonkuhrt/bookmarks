@@ -1,7 +1,9 @@
-/* oxlint-disable no-await-in-loop, restrict-template-expressions */
 import { Effect } from "effect";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
+
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 const codeIs = (error: unknown, code: string): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === code;
@@ -14,6 +16,7 @@ const materializeAncestorSymlinkTargets = (path: string): Effect.Effect<void, Er
       const relativeParts = parsed.dir.slice(parsed.root.length).split(Path.sep).filter(Boolean);
 
       let current = parsed.root;
+      /* oxlint-disable no-await-in-loop -- Ancestor symlinks must be inspected and materialized in path order. */
       for (const part of relativeParts) {
         current = Path.join(current, part);
         try {
@@ -30,8 +33,10 @@ const materializeAncestorSymlinkTargets = (path: string): Effect.Effect<void, Er
           throw error;
         }
       }
+      /* oxlint-enable no-await-in-loop */
     },
-    catch: (e) => new Error(`Failed to prepare managed path ${path}: ${e}`),
+    catch: (error) =>
+      new Error(`Failed to prepare managed path ${path}: ${messageFromUnknown(error)}`),
   });
 
 const materializePathIfSymlink = (path: string): Effect.Effect<void, Error> =>
@@ -51,7 +56,8 @@ const materializePathIfSymlink = (path: string): Effect.Effect<void, Error> =>
         throw error;
       }
     },
-    catch: (e) => new Error(`Failed to prepare managed path ${path}: ${e}`),
+    catch: (error) =>
+      new Error(`Failed to prepare managed path ${path}: ${messageFromUnknown(error)}`),
   });
 
 export const ensureDir = (path: string): Effect.Effect<void, Error> =>
@@ -69,7 +75,8 @@ export const ensureDir = (path: string): Effect.Effect<void, Error> =>
           if (!stat.isDirectory() && !stat.isSymbolicLink()) throw error;
         }
       },
-      catch: (e) => new Error(`Failed to create directory ${path}: ${e}`),
+      catch: (error) =>
+        new Error(`Failed to create directory ${path}: ${messageFromUnknown(error)}`),
     });
   });
 

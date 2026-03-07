@@ -1,4 +1,3 @@
-/* oxlint-disable await-thenable, no-confusing-void-expression, no-non-null-assertion, no-unsafe-type-assertion */
 import { describe, expect, test } from "bun:test";
 import { serialize } from "@plist/binary.serialize";
 import { DateTime, Effect } from "effect";
@@ -6,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Patch from "./patch.ts";
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
+import { BookmarkFolder, BookmarkLeaf, type BookmarkNode, BookmarkTree } from "./schema/__.ts";
 import * as Safari from "./safari.ts";
 import { writeSafariBookmarksFixture } from "./test-fixtures.ts";
 
@@ -14,6 +13,45 @@ import { writeSafariBookmarksFixture } from "./test-fixtures.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
 const now = DateTime.unsafeNow();
+
+const expectDefined = <T>(value: T | undefined, message: string): T => {
+  expect(value).toBeDefined();
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+};
+
+const expectLeaf = (value: BookmarkNode | undefined, message: string): BookmarkLeaf => {
+  const node = expectDefined(value, message);
+  expect(BookmarkLeaf.is(node)).toBe(true);
+  if (!BookmarkLeaf.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectFolder = (value: BookmarkNode | undefined, message: string): BookmarkFolder => {
+  const node = expectDefined(value, message);
+  expect(BookmarkFolder.is(node)).toBe(true);
+  if (!BookmarkFolder.is(node)) {
+    throw new Error(message);
+  }
+  return node;
+};
+
+const expectRejects = async (promise: Promise<unknown>, message: string): Promise<void> => {
+  try {
+    await promise;
+    throw new Error(`Expected rejection containing "${message}"`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) {
+      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
+    }
+    expect(error.message).toContain(message);
+  }
+};
 
 const setupFixture = async () => {
   const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-fixture-"));
@@ -45,9 +83,9 @@ describe("readBookmarks", () => {
   test("bar contains folders from BookmarksBar", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path));
-      expect(tree.bar).toBeDefined();
-      expect(tree.bar!.length).toBeGreaterThan(0);
-      const firstItem = tree.bar![0]!;
+      const bar = expectDefined(tree.bar, "expected bookmarks bar section");
+      expect(bar.length).toBeGreaterThan(0);
+      const firstItem = expectFolder(bar[0], "expected folder in bookmarks bar");
       expect(firstItem).toBeInstanceOf(BookmarkFolder);
     });
   });
@@ -55,19 +93,18 @@ describe("readBookmarks", () => {
   test("reading_list contains leaves from com.apple.ReadingList", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path));
-      expect(tree.reading_list).toBeDefined();
-      expect(tree.reading_list!.length).toBeGreaterThan(0);
-      const firstItem = tree.reading_list![0]!;
-      expect(firstItem).toBeInstanceOf(BookmarkLeaf);
-      expect((firstItem as BookmarkLeaf).url).toMatch(/^https?:\/\//);
+      const readingList = expectDefined(tree.reading_list, "expected reading list section");
+      expect(readingList.length).toBeGreaterThan(0);
+      const firstItem = expectLeaf(readingList[0], "expected reading list bookmark");
+      expect(firstItem.url).toMatch(/^https?:\/\//);
     });
   });
 
   test("other section collects root-level folders and BookmarksMenu content", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path));
-      expect(tree.menu).toBeDefined();
-      expect(tree.menu!.length).toBeGreaterThan(0);
+      const menu = expectDefined(tree.menu, "expected menu section");
+      expect(menu.length).toBeGreaterThan(0);
     });
   });
 
@@ -86,7 +123,7 @@ describe("readBookmarks", () => {
   test("leaf nodes have name and url", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path));
-      const leaf = tree.reading_list![0]! as BookmarkLeaf;
+      const leaf = expectLeaf(tree.reading_list?.[0], "expected reading list bookmark");
       expect(leaf.name).toBeTruthy();
       expect(leaf.url).toBeTruthy();
       expect(leaf.url).toMatch(/^https?:\/\//);
@@ -96,7 +133,7 @@ describe("readBookmarks", () => {
   test("folder nodes have name and children", async () => {
     await withFixture(async (path) => {
       const tree = await run(Safari.readBookmarks(path));
-      const folder = tree.bar![0]! as BookmarkFolder;
+      const folder = expectFolder(tree.bar?.[0], "expected folder in bookmarks bar");
       expect(folder.name).toBeTruthy();
       expect(Array.isArray(folder.children)).toBe(true);
     });
@@ -162,8 +199,7 @@ describe("readBookmarks", () => {
       expect(tree.bar?.map((node) => node.name)).toEqual(["First", "Empty", "Nested", "Last"]);
 
       const emptyFolder = tree.bar?.[1];
-      expect(emptyFolder).toBeInstanceOf(BookmarkFolder);
-      expect((emptyFolder as BookmarkFolder).children).toEqual([]);
+      expect(expectFolder(emptyFolder, 'expected "Empty" folder').children).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -202,9 +238,7 @@ describe("readBookmarks", () => {
         }),
       );
 
-      await expect(run(Safari.readBookmarks(path))).rejects.toThrow(
-        "Bookmark separators are not supported",
-      );
+      await expectRejects(run(Safari.readBookmarks(path)), "Bookmark separators are not supported");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -238,8 +272,7 @@ describe("applyPatches", () => {
       const found = (tree.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
       );
-      expect(found).toBeDefined();
-      expect(found!.name).toBe(testName);
+      expect(expectLeaf(found, "expected inserted bookmark").name).toBe(testName);
     } finally {
       await cleanup(dir);
     }
@@ -249,7 +282,10 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = treeBefore.reading_list![0]! as BookmarkLeaf;
+      const target = expectLeaf(
+        treeBefore.reading_list?.[0],
+        "expected reading list bookmark to remove",
+      );
 
       await run(
         Safari.applyPatches(path, [
@@ -271,7 +307,10 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = treeBefore.reading_list![0]! as BookmarkLeaf;
+      const target = expectLeaf(
+        treeBefore.reading_list?.[0],
+        "expected reading list bookmark to rename",
+      );
       const newName = "RENAMED_TEST_BOOKMARK";
 
       await run(
@@ -290,8 +329,7 @@ describe("applyPatches", () => {
       const found = (treeAfter.reading_list ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === target.url,
       );
-      expect(found).toBeDefined();
-      expect(found!.name).toBe(newName);
+      expect(expectLeaf(found, "expected renamed bookmark").name).toBe(newName);
     } finally {
       await cleanup(dir);
     }
@@ -301,7 +339,10 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = treeBefore.reading_list![0]! as BookmarkLeaf;
+      const target = expectLeaf(
+        treeBefore.reading_list?.[0],
+        "expected reading list bookmark to move",
+      );
 
       await run(
         Safari.applyPatches(path, [
@@ -327,8 +368,7 @@ describe("applyPatches", () => {
       const found = (treeAfter.bar ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === target.url,
       );
-      expect(found).toBeDefined();
-      expect(found!.name).toBe(target.name);
+      expect(expectLeaf(found, "expected moved bookmark").name).toBe(target.name);
     } finally {
       await cleanup(dir);
     }
@@ -351,16 +391,17 @@ describe("applyPatches", () => {
       const newFolder = (tree.menu ?? []).find(
         (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "NewFolder",
       );
-      expect(newFolder).toBeDefined();
-      const subFolder = newFolder!.children.find(
-        (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "SubFolder",
+      const folder = expectFolder(newFolder, 'expected "NewFolder" folder');
+      const subFolder = expectFolder(
+        folder.children.find(
+          (n): n is BookmarkFolder => BookmarkFolder.is(n) && n.name === "SubFolder",
+        ),
+        'expected "SubFolder" folder',
       );
-      expect(subFolder).toBeDefined();
-      const leaf = subFolder!.children.find(
+      const leaf = subFolder.children.find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === testUrl,
       );
-      expect(leaf).toBeDefined();
-      expect(leaf!.name).toBe(testName);
+      expect(expectLeaf(leaf, "expected nested bookmark").name).toBe(testName);
     } finally {
       await cleanup(dir);
     }
