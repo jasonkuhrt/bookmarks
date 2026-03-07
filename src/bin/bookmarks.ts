@@ -431,15 +431,23 @@ const printWorkspacePlan = (plan: WorkspacePlan) =>
 
 const printWorkspacePublishSummary = (result: Workspace.WorkspacePublishResult) =>
   Effect.gen(function* () {
+    if (result.orchestration) {
+      const verb = result.orchestration.state === "queued" ? "queued" : "deferred";
+      yield* Console.log(`Publish ${verb}: ${result.orchestration.message}`);
+      return;
+    }
+
     yield* Console.log(`Publish complete: ${result.publishedTargets.length} target(s) updated`);
     yield* Console.log(`  generated at: ${result.plan.generatedAt}`);
     yield* Console.log(`  published at: ${result.plan.publishedAt}`);
-    yield* Console.log(`  backup: ${result.backup.backupDir}`);
-    for (const file of result.backup.files) {
-      yield* Console.log(`    wrote ${file}`);
-    }
-    for (const skipped of result.backup.skipped) {
-      yield* Console.log(`    skipped ${skipped}`);
+    if (result.backup) {
+      yield* Console.log(`  backup: ${result.backup.backupDir}`);
+      for (const file of result.backup.files) {
+        yield* Console.log(`    wrote ${file}`);
+      }
+      for (const skipped of result.backup.skipped) {
+        yield* Console.log(`    skipped ${skipped}`);
+      }
     }
     for (const targetId of result.publishedTargets) {
       yield* Console.log(`  published: ${targetId}`);

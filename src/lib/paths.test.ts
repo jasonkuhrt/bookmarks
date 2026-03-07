@@ -14,6 +14,7 @@ const ENV_KEYS = [
   "BOOKMARKS_WORKSPACE_PATH",
   "BOOKMARKS_IMPORT_LOCK_PATH",
   "BOOKMARKS_PUBLISH_PLAN_PATH",
+  "BOOKMARKS_WORKSPACE_PUBLISH_QUEUE_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
   "BOOKMARKS_SAFARI_PLIST_PATH",
@@ -57,6 +58,9 @@ describe("paths", () => {
     expect(Paths.defaultPublishPlanPath()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "publish.plan.json"),
     );
+    expect(Paths.defaultWorkspacePublishQueuePath()).toBe(
+      join(homedir(), ".local", "state", "bookmarks", "runtime", "workspace.publish.queue.json"),
+    );
     expect(Paths.defaultBackupDir()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "backups"),
     );
@@ -92,6 +96,9 @@ describe("paths", () => {
     expect(Paths.defaultWorkspacePath()).toBe("/tmp/bookmarks-state/workspace.yaml");
     expect(Paths.defaultImportLockPath()).toBe("/tmp/bookmarks-state/import.lock.json");
     expect(Paths.defaultPublishPlanPath()).toBe("/tmp/bookmarks-state/publish.plan.json");
+    expect(Paths.defaultWorkspacePublishQueuePath()).toBe(
+      "/tmp/bookmarks-state/runtime/workspace.publish.queue.json",
+    );
     expect(Paths.defaultBackupDir()).toBe("/tmp/bookmarks-state/backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/bookmarks-state/runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/bookmarks-state/runtime/sync.lock.json");
@@ -112,6 +119,7 @@ describe("paths", () => {
     process.env["BOOKMARKS_WORKSPACE_PATH"] = "/tmp/workspace.yaml";
     process.env["BOOKMARKS_IMPORT_LOCK_PATH"] = "/tmp/import.lock.json";
     process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] = "/tmp/publish.plan.json";
+    process.env["BOOKMARKS_WORKSPACE_PUBLISH_QUEUE_PATH"] = "/tmp/workspace.publish.queue.json";
     process.env["BOOKMARKS_BACKUP_DIR"] = "/tmp/custom-backups";
     process.env["BOOKMARKS_RUNTIME_DIR"] = "/tmp/custom-runtime";
     process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = "/tmp/Safari/Bookmarks.plist";
@@ -124,6 +132,7 @@ describe("paths", () => {
     expect(Paths.defaultWorkspacePath()).toBe("/tmp/workspace.yaml");
     expect(Paths.defaultImportLockPath()).toBe("/tmp/import.lock.json");
     expect(Paths.defaultPublishPlanPath()).toBe("/tmp/publish.plan.json");
+    expect(Paths.defaultWorkspacePublishQueuePath()).toBe("/tmp/workspace.publish.queue.json");
     expect(Paths.defaultBackupDir()).toBe("/tmp/custom-backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json");

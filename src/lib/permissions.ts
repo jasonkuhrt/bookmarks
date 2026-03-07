@@ -90,17 +90,28 @@ export const requireFullDiskAccess = (): Effect.Effect<void, PermissionDenied> =
 
 /** Check if a browser process is currently running. */
 export const checkBrowserRunning = (browser: string): Effect.Effect<boolean> =>
-  Effect.tryPromise({
-    try: async () => {
-      const proc = Bun.spawn(["pgrep", "-x", browser], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const exitCode = await proc.exited;
-      return exitCode === 0;
-    },
-    catch: () => false,
-  }).pipe(Effect.catchAll(() => Effect.succeed(false)));
+  Effect.gen(function* () {
+    const forced = process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"];
+    if (forced !== undefined) {
+      const forcedBrowsers = forced
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      return forcedBrowsers.includes(browser);
+    }
+
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const proc = Bun.spawn(["pgrep", "-x", browser], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const exitCode = await proc.exited;
+        return exitCode === 0;
+      },
+      catch: () => false,
+    }).pipe(Effect.catchAll(() => Effect.succeed(false)));
+  });
 
 /** Assert that a browser is not running, failing with a {@link BrowserRunning} error if it is. */
 export const requireBrowserNotRunning = (browser: string): Effect.Effect<void, BrowserRunning> =>

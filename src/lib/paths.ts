@@ -28,6 +28,10 @@ export const defaultImportLockPath = (): string =>
 export const defaultPublishPlanPath = (): string =>
   process.env["BOOKMARKS_PUBLISH_PLAN_PATH"] ?? join(defaultStateDir(), "publish.plan.json");
 
+export const defaultWorkspacePublishQueuePath = (): string =>
+  process.env["BOOKMARKS_WORKSPACE_PUBLISH_QUEUE_PATH"] ??
+  join(defaultRuntimeDir(), "workspace.publish.queue.json");
+
 export const defaultBackupDir = (): string =>
   process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultStateDir(), "backups");
 

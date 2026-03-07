@@ -113,6 +113,12 @@ What each file does:
 - `import.lock.json` is the machine-owned record of imported browser occurrences
 - `publish.plan.json` is the generated write plan with blockers and target status
 
+Workspace publish now treats open browsers as a temporary runtime condition instead of a hard failure:
+
+- `bookmarks plan` still succeeds and shows browser-running blockers on the affected targets
+- `bookmarks publish` queues the publish when Safari or Chrome are open
+- the queued publish replays on the next `bookmarks publish` after those browsers close
+
 The curated publish tree is split explicitly:
 
 - `publish.global` contains bookmarks that should span every selected profile

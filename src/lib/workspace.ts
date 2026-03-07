@@ -6,6 +6,7 @@ import { DateTime, Effect, Schema } from "effect";
 import * as Yaml from "yaml";
 import * as Chrome from "./chrome.ts";
 import * as ManagedPaths from "./managed-paths.ts";
+import * as Orchestration from "./orchestration.ts";
 import * as Patch from "./patch.ts";
 import * as Paths from "./paths.ts";
 import * as Permissions from "./permissions.ts";
@@ -59,8 +60,9 @@ export interface WorkspaceValidationResult {
 
 export interface WorkspacePublishResult {
   readonly plan: WorkspacePlan;
-  readonly backup: WorkspaceBackupResult;
+  readonly backup: WorkspaceBackupResult | null;
   readonly publishedTargets: readonly string[];
+  readonly orchestration?: Orchestration.WorkspacePublishNotice;
 }
 
 const WORKSPACE_MODELINE = "# bookmarks-workspace: version=1\n";
@@ -630,6 +632,16 @@ const planSummary = (
   blockerCount: blockers.length,
 });
 
+const planBrowserBlockers = (plan: WorkspacePlan): readonly string[] => [
+  ...new Set(
+    plan.targets.flatMap((target) =>
+      target.enabled && target.blockers.some((blocker) => blocker.code === "browser-running")
+        ? [Targets.processNameOf(target.browser)]
+        : [],
+    ),
+  ),
+];
+
 const buildPlan = (
   workspace: WorkspaceFile,
   workspacePath: string,
@@ -715,7 +727,7 @@ const buildPlan = (
         });
       }
 
-      blockers.push(...targetBlockers);
+      blockers.push(...targetBlockers.filter((blocker) => blocker.code !== "browser-running"));
       targets.push({
         targetId,
         browser: target.browser,
@@ -800,54 +812,90 @@ export const publishTo = (
       return yield* Effect.fail(new Error(validation.errors.join("\n")));
     }
 
-    const built = yield* buildPlan(
+    const initialBuilt = yield* buildPlan(
       workspace,
       workspacePath,
       workspaceHash(rawWorkspace),
       requestedTargetIds,
     );
-    if (built.plan.blockers.length > 0) {
-      return yield* Effect.fail(
-        new Error(built.plan.blockers.map((blocker) => blocker.message).join("\n")),
-      );
+    yield* savePlan(planPath, initialBuilt.plan);
+
+    let latestBuilt = initialBuilt;
+
+    const publishResult = yield* Orchestration.withOrchestratedWorkspacePublish(
+      workspacePath,
+      requestedTargetIds,
+      (effectiveTargetIds) =>
+        Effect.gen(function* () {
+          const built = yield* buildPlan(
+            workspace,
+            workspacePath,
+            workspaceHash(rawWorkspace),
+            effectiveTargetIds,
+          );
+          latestBuilt = built;
+          yield* savePlan(planPath, built.plan);
+
+          if (built.plan.blockers.length > 0) {
+            return yield* Effect.fail(
+              new Error(built.plan.blockers.map((blocker) => blocker.message).join("\n")),
+            );
+          }
+
+          const browserBlockers = planBrowserBlockers(built.plan);
+          if (browserBlockers.length > 0) {
+            return yield* Effect.fail(
+              new Orchestration.TemporarySyncBlocker({ blockers: browserBlockers }),
+            );
+          }
+
+          const backup = yield* backupArtifacts("workspace-publish", [
+            { label: "workspace", path: workspacePath },
+            { label: "import-lock", path: importLockPath },
+            { label: "publish-plan", path: planPath },
+            ...built.plan.targets
+              .filter((target) => target.status === "ready")
+              .map((target) => ({ label: target.targetId, path: target.path })),
+          ]);
+
+          const publishedTargets: string[] = [];
+          for (const target of built.plan.targets.filter((target) => target.status === "ready")) {
+            const publishTree = built.publishTrees[target.targetId]!;
+            const descriptor = targetToDescriptor(workspace.targets[target.targetId]!);
+            yield* Targets.writeTree(descriptor, publishTree);
+            const readBack = yield* Targets.readTree(descriptor);
+            const verified = yield* plansEqual(readBack, publishTree);
+            if (!verified) {
+              return yield* Effect.fail(
+                new Error(`Post-publish verification failed for ${target.targetId}`),
+              );
+            }
+            publishedTargets.push(target.targetId);
+          }
+
+          const publishedPlan: WorkspacePlan = {
+            ...built.plan,
+            publishedAt: DateTime.formatIso(DateTime.unsafeNow()),
+          };
+          yield* savePlan(planPath, publishedPlan);
+
+          return {
+            plan: publishedPlan,
+            backup,
+            publishedTargets,
+          };
+        }),
+    );
+
+    if (publishResult._tag === "completed") {
+      return publishResult.value;
     }
-
-    yield* savePlan(planPath, built.plan);
-
-    const backup = yield* backupArtifacts("workspace-publish", [
-      { label: "workspace", path: workspacePath },
-      { label: "import-lock", path: importLockPath },
-      { label: "publish-plan", path: planPath },
-      ...built.plan.targets
-        .filter((target) => target.status === "ready")
-        .map((target) => ({ label: target.targetId, path: target.path })),
-    ]);
-
-    const publishedTargets: string[] = [];
-    for (const target of built.plan.targets.filter((target) => target.status === "ready")) {
-      const publishTree = built.publishTrees[target.targetId]!;
-      const descriptor = targetToDescriptor(workspace.targets[target.targetId]!);
-      yield* Targets.writeTree(descriptor, publishTree);
-      const readBack = yield* Targets.readTree(descriptor);
-      const verified = yield* plansEqual(readBack, publishTree);
-      if (!verified) {
-        return yield* Effect.fail(
-          new Error(`Post-publish verification failed for ${target.targetId}`),
-        );
-      }
-      publishedTargets.push(target.targetId);
-    }
-
-    const publishedPlan: WorkspacePlan = {
-      ...built.plan,
-      publishedAt: DateTime.formatIso(DateTime.unsafeNow()),
-    };
-    yield* savePlan(planPath, publishedPlan);
 
     return {
-      plan: publishedPlan,
-      backup,
-      publishedTargets,
+      plan: latestBuilt.plan,
+      backup: null,
+      publishedTargets: [],
+      orchestration: publishResult.notice,
     };
   });
 

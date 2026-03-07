@@ -24,11 +24,13 @@ const ENV_KEYS = [
   "BOOKMARKS_WORKSPACE_PATH",
   "BOOKMARKS_IMPORT_LOCK_PATH",
   "BOOKMARKS_PUBLISH_PLAN_PATH",
+  "BOOKMARKS_WORKSPACE_PUBLISH_QUEUE_PATH",
   "BOOKMARKS_BACKUP_DIR",
   "BOOKMARKS_RUNTIME_DIR",
   "BOOKMARKS_SAFARI_PLIST_PATH",
   "BOOKMARKS_SAFARI_TABS_DB_PATH",
   "BOOKMARKS_CHROME_DATA_DIR",
+  "BOOKMARKS_FORCE_BROWSER_RUNNING",
 ] as const;
 
 const ORIGINAL_ENV = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as Record<
@@ -119,6 +121,7 @@ const setupWorkspaceEnv = async (
   process.env["BOOKMARKS_SAFARI_PLIST_PATH"] = safariPath;
   process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"] = safariTabsDbPath;
   process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
+  process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
 
   await mkdir(chromeDataDir, { recursive: true });
   await Bun.write(
@@ -250,7 +253,8 @@ describe("workspace workflow", () => {
         const published = await run(Workspace.publish());
         expect(published.publishedTargets).toEqual(["chrome/default"]);
         expect(published.plan.publishedAt).not.toBeNull();
-        expect(published.backup.files).toHaveLength(4);
+        expect(published.backup).not.toBeNull();
+        expect(published.backup?.files).toHaveLength(4);
 
         const tree = await run(Chrome.readBookmarks(env.chromePath));
         const first = tree.bar?.[0];
@@ -263,6 +267,59 @@ describe("workspace workflow", () => {
         expect(plan.blockers.some((blocker) => blocker.code === "browser-running")).toBe(true);
         expect(plan.targets[0]?.status).toBe("blocked");
       }
+    } finally {
+      await rm(env.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("plan stays publishable while browser blockers queue workspace publish", async () => {
+    const env = await setupWorkspaceEnv();
+
+    try {
+      await run(Workspace.importState(["chrome/default"]));
+
+      const workspace = await run(Workspace.load(env.workspacePath));
+      const importedNode = workspace.inbox["chrome/default"]?.bar?.[0];
+      expect(importedNode?.kind).toBe("bookmark");
+      if (importedNode?.kind !== "bookmark") {
+        throw new Error("Expected imported bookmark in bar");
+      }
+
+      workspace.inbox = {};
+      workspace.publish.profiles["chrome/default"] = {
+        bar: [
+          {
+            ...importedNode,
+            title: "Queued Link",
+          },
+        ],
+      };
+
+      await run(Workspace.save(env.workspacePath, workspace));
+
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Google Chrome";
+
+      const plan = await run(Workspace.plan());
+      expect(plan.blockers).toEqual([]);
+      expect(plan.targets[0]?.status).toBe("blocked");
+      expect(plan.targets[0]?.blockers.some((blocker) => blocker.code === "browser-running")).toBe(
+        true,
+      );
+
+      const queued = await run(Workspace.publish());
+      expect(queued.orchestration?.state).toBe("queued");
+      expect(queued.orchestration?.operation).toBe("publish");
+      expect(queued.publishedTargets).toEqual([]);
+      expect(queued.backup).toBeNull();
+
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+
+      const published = await run(Workspace.publish());
+      expect(published.orchestration).toBeUndefined();
+      expect(published.publishedTargets).toEqual(["chrome/default"]);
+
+      const tree = await run(Chrome.readBookmarks(env.chromePath));
+      expect(tree.bar?.[0]?.name).toBe("Queued Link");
     } finally {
       await rm(env.dir, { recursive: true, force: true });
     }

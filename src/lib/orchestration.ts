@@ -5,11 +5,13 @@ import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
 
 export type SyncOperation = "gc" | "pull" | "push" | "sync";
+export type WorkspaceOperation = "publish";
+type OrchestratedOperation = SyncOperation | WorkspaceOperation;
 
-interface SyncLockState {
+interface LockState {
   readonly pid: number;
-  readonly operation: SyncOperation;
-  readonly yamlPath: string;
+  readonly operation: OrchestratedOperation;
+  readonly resourcePath: string;
   readonly acquiredAt: string;
 }
 
@@ -20,16 +22,32 @@ interface SyncQueueState {
   readonly queuedAt: string;
 }
 
-export interface SyncNotice {
+interface WorkspaceQueueState {
+  readonly operation: WorkspaceOperation;
+  readonly workspacePath: string;
+  readonly requestedTargetIds: readonly string[];
+  readonly blockers: readonly string[];
+  readonly queuedAt: string;
+}
+
+interface Notice<O extends OrchestratedOperation> {
   readonly state: "busy" | "queued";
-  readonly operation: SyncOperation;
+  readonly operation: O;
   readonly message: string;
   readonly blockers?: readonly string[];
 }
 
+export interface SyncNotice extends Notice<SyncOperation> {}
+
+export interface WorkspacePublishNotice extends Notice<WorkspaceOperation> {}
+
 export type OrchestratedSyncResult<A> =
   | { readonly _tag: "completed"; readonly value: A }
   | { readonly _tag: "deferred"; readonly notice: SyncNotice };
+
+export type OrchestratedWorkspacePublishResult<A> =
+  | { readonly _tag: "completed"; readonly value: A }
+  | { readonly _tag: "deferred"; readonly notice: WorkspacePublishNotice };
 
 export class TemporarySyncBlocker extends Data.TaggedError("TemporarySyncBlocker")<{
   readonly blockers: readonly string[];
@@ -91,21 +109,22 @@ const writeJsonFile = (path: string, value: unknown, flag?: "wx"): Effect.Effect
     catch: (e) => new Error(`Failed to write ${path}: ${e}`, { cause: e }),
   });
 
-const acquireLock = (
-  requestedOperation: SyncOperation,
-  yamlPath: string,
+const acquireLock = <O extends OrchestratedOperation>(
+  requestedOperation: O,
+  resourcePath: string,
+  busyMessage: string,
 ): Effect.Effect<
-  { readonly acquired: true } | { readonly acquired: false; readonly notice: SyncNotice },
+  { readonly acquired: true } | { readonly acquired: false; readonly notice: Notice<O> },
   Error
 > =>
   Effect.gen(function* () {
     yield* ensureRuntimeDir();
 
     const lockPath = Paths.defaultSyncLockPath();
-    const nextLock: SyncLockState = {
+    const nextLock: LockState = {
       pid: process.pid,
       operation: requestedOperation,
-      yamlPath,
+      resourcePath,
       acquiredAt: DateTime.formatIso(DateTime.unsafeNow()),
     };
 
@@ -125,14 +144,14 @@ const acquireLock = (
       return { acquired: true };
     }
 
-    const existingLock = yield* readJsonFile<SyncLockState>(lockPath);
+    const existingLock = yield* readJsonFile<LockState>(lockPath);
     if (existingLock && isLivePid(existingLock.pid)) {
       return {
         acquired: false,
         notice: {
           state: "busy",
           operation: requestedOperation,
-          message: `Another bookmarks sync is already running (pid ${existingLock.pid}).`,
+          message: `${busyMessage} (pid ${existingLock.pid}).`,
         },
       };
     }
@@ -149,7 +168,7 @@ const acquireLock = (
       notice: {
         state: "busy",
         operation: requestedOperation,
-        message: "Another bookmarks sync is already running.",
+        message: busyMessage,
       },
     };
   });
@@ -183,13 +202,50 @@ const writePendingQueue = (
     };
   });
 
+const readPendingWorkspacePublishQueue = (): Effect.Effect<
+  WorkspaceQueueState | undefined,
+  Error
+> => readJsonFile<WorkspaceQueueState>(Paths.defaultWorkspacePublishQueuePath());
+
+const clearPendingWorkspacePublishQueue = (): Effect.Effect<void> =>
+  clearFile(Paths.defaultWorkspacePublishQueuePath());
+
+const writePendingWorkspacePublishQueue = (
+  workspacePath: string,
+  requestedTargetIds: readonly string[],
+  blockers: readonly string[],
+): Effect.Effect<WorkspacePublishNotice, Error> =>
+  Effect.gen(function* () {
+    const queue: WorkspaceQueueState = {
+      operation: "publish",
+      workspacePath,
+      requestedTargetIds: [...new Set(requestedTargetIds)],
+      blockers,
+      queuedAt: DateTime.formatIso(DateTime.unsafeNow()),
+    };
+
+    yield* ensureRuntimeDir();
+    yield* writeJsonFile(Paths.defaultWorkspacePublishQueuePath(), queue);
+
+    return {
+      state: "queued",
+      operation: "publish",
+      blockers,
+      message: `publish is queued until ${formatBlockers(blockers)} ${blockers.length === 1 ? "closes" : "close"}.`,
+    };
+  });
+
 export const withOrchestratedSync = <A>(
   yamlPath: string,
   requestedOperation: SyncOperation,
   run: (operation: SyncOperation) => Effect.Effect<A, Error | TemporarySyncBlocker>,
 ): Effect.Effect<OrchestratedSyncResult<A>, Error> =>
   Effect.gen(function* () {
-    const lock = yield* acquireLock(requestedOperation, yamlPath);
+    const lock = yield* acquireLock(
+      requestedOperation,
+      yamlPath,
+      "Another bookmarks sync is already running",
+    );
     if (!lock.acquired) {
       return { _tag: "deferred", notice: lock.notice } as const;
     }
@@ -215,6 +271,50 @@ export const withOrchestratedSync = <A>(
 
       if (outcome._tag === "completed") {
         yield* clearPendingQueue();
+      }
+
+      return outcome;
+    } finally {
+      yield* clearFile(Paths.defaultSyncLockPath());
+    }
+  });
+
+export const withOrchestratedWorkspacePublish = <A>(
+  workspacePath: string,
+  requestedTargetIds: readonly string[],
+  run: (requestedTargetIds: readonly string[]) => Effect.Effect<A, Error | TemporarySyncBlocker>,
+): Effect.Effect<OrchestratedWorkspacePublishResult<A>, Error> =>
+  Effect.gen(function* () {
+    const lock = yield* acquireLock(
+      "publish",
+      workspacePath,
+      "Another bookmarks publish is already running",
+    );
+    if (!lock.acquired) {
+      return { _tag: "deferred", notice: lock.notice } as const;
+    }
+
+    try {
+      const pendingQueue = yield* readPendingWorkspacePublishQueue();
+      const targetIds = [
+        ...new Set([...(pendingQueue?.requestedTargetIds ?? []), ...requestedTargetIds]),
+      ];
+
+      const outcome = yield* run(targetIds).pipe(
+        Effect.map((value) => ({ _tag: "completed", value }) as const),
+        Effect.catchAll((error) => {
+          if (TemporarySyncBlocker.is(error)) {
+            return writePendingWorkspacePublishQueue(workspacePath, targetIds, error.blockers).pipe(
+              Effect.map((notice) => ({ _tag: "deferred", notice }) as const),
+            );
+          }
+
+          return clearPendingWorkspacePublishQueue().pipe(Effect.flatMap(() => Effect.fail(error)));
+        }),
+      );
+
+      if (outcome._tag === "completed") {
+        yield* clearPendingWorkspacePublishQueue();
       }
 
       return outcome;

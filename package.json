@@ -1,7 +1,7 @@
 {
   "name": "@jasonkuhrt/bookmarks",
   "version": "0.0.0",
-  "description": "Cross-browser bookmark sync driven by ~/.bookmarks/bookmarks.yaml",
+  "description": "Cross-browser bookmark sync driven by ~/.config/bookmarks/bookmarks.yaml",
   "homepage": "https://github.com/jasonkuhrt/bookmarks",
   "bugs": {
     "url": "https://github.com/jasonkuhrt/bookmarks/issues"
