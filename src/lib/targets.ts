@@ -100,7 +100,7 @@ export const discoverChromeTargets = (
     try: async () => {
       if (!(await exists(chromeDataDir))) return [];
 
-      const directories = await readChromeProfileDirectories(chromeDataDir);
+      const directories = (await readChromeProfileDirectories(chromeDataDir)).sort();
       const targets: TargetDescriptor[] = [];
 
       for (const directoryName of directories) {

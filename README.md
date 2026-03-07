@@ -23,7 +23,7 @@ just install-global
 Recommended first checks:
 
 ```bash
-bookmarks next
+bookmarks sync --dry-run
 bookmarks doctor
 ```
 
@@ -94,12 +94,31 @@ Target selection rules:
 - pass an exact selector like `chrome/profile-1` to scope literally
 - exact typos fail clearly instead of silently falling back
 
-## Workspace Workflow
+## Sync Workflow
 
-The default workflow is file-first and agent-friendly:
+`bookmarks sync` is the primary command:
 
 ```bash
-bookmarks next
+bookmarks sync
+```
+
+What sync does on the fast path:
+
+- reads the managed `bookmarks.yaml`
+- discovers Safari once and all discovered Chrome profiles
+- merges YAML and browser changes
+- sends destructive losers to the graveyard instead of dropping them
+- creates backups before mutation
+- writes live browser data
+- rereads and verifies the result
+
+If sync hits ambiguous or unsupported semantics, it stops before mutation and falls back to a manual review workspace automatically.
+
+## Manual Review Workflow
+
+The workspace flow is still available when you want explicit review:
+
+```bash
 bookmarks import
 $EDITOR ~/.local/state/bookmarks/workspace.yaml
 bookmarks validate
@@ -124,7 +143,7 @@ The curated publish tree is split explicitly:
 - `publish.profiles.<target-id>` contains bookmarks that stay local to one profile
 - `archive` and `quarantine` follow the same `global + profiles` shape so profile-local items do not cross by accident
 
-`bookmarks next` is the guided router. It inspects the current state and points to the next useful step instead of making you remember the workflow.
+`bookmarks next` is the guided router. If no workspace exists, it points you at `bookmarks sync`. If a review workspace exists, it points you at the next useful review step instead of making you remember the workflow.
 
 Git is optional. If you want history, branch review, or rollback on your config changes, commit these files. If you do not use git, the CLI still keeps immutable imports, publish plans, receipts, and automatic backups.
 
@@ -133,20 +152,23 @@ Git is optional. If you want history, branch review, or rollback on your config 
 Core commands:
 
 ```bash
+bookmarks sync [target...]
+bookmarks sync [target...] --dry-run
 bookmarks next
 bookmarks import [target...]
 bookmarks validate
 bookmarks plan [target...]
 bookmarks publish [target...]
 bookmarks status [target...]
-bookmarks sync [target...]
-bookmarks sync [target...] --dry-run
 bookmarks status --json
 bookmarks doctor --json
 ```
 
 Notes:
 
+- `sync` is the default automated workflow.
+- `sync --dry-run` shows the live diff without mutating browsers.
+- `sync` falls back to a review workspace automatically when browser state cannot be represented or merged safely.
 - `import` captures current browser state into workspace files without mutating browsers.
 - `import`, `status`, `pull`, `push`, `sync`, `plan`, and `publish` all accept optional target selectors.
 - omitting selectors means all discovered profiles for the addressed browsers.
@@ -159,7 +181,7 @@ Notes:
 - non-dry-run `push`, `pull`, `sync`, and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
 - the explicit `bookmarks backup` command is still available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
-- runtime orchestration still serializes active sync runs for the legacy sync path.
+- runtime locking still serializes concurrent sync runs.
 
 ## Global Install Notes
 

@@ -1,5 +1,5 @@
-/* oxlint-disable no-unsafe-type-assertion, no-unnecessary-condition, restrict-template-expressions */
-import { Data, DateTime, Effect } from "effect";
+/* oxlint-disable no-unsafe-type-assertion, restrict-template-expressions */
+import { DateTime, Effect } from "effect";
 import * as Fs from "node:fs/promises";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
@@ -14,18 +14,10 @@ interface LockState {
   readonly acquiredAt: string;
 }
 
-interface SyncQueueState {
-  readonly operation: SyncOperation;
-  readonly yamlPath: string;
-  readonly blockers: readonly string[];
-  readonly queuedAt: string;
-}
-
 interface Notice<O extends OrchestratedOperation> {
-  readonly state: "busy" | "queued";
+  readonly state: "busy";
   readonly operation: O;
   readonly message: string;
-  readonly blockers?: readonly string[];
 }
 
 export interface SyncNotice extends Notice<SyncOperation> {}
@@ -33,21 +25,6 @@ export interface SyncNotice extends Notice<SyncOperation> {}
 export type OrchestratedSyncResult<A> =
   | { readonly _tag: "completed"; readonly value: A }
   | { readonly _tag: "deferred"; readonly notice: SyncNotice };
-
-export class TemporarySyncBlocker extends Data.TaggedError("TemporarySyncBlocker")<{
-  readonly blockers: readonly string[];
-}> {
-  static is = (u: unknown): u is TemporarySyncBlocker =>
-    u !== null && typeof u === "object" && "_tag" in u && u._tag === "TemporarySyncBlocker";
-}
-
-const combineOperations = (left: SyncOperation, right: SyncOperation): SyncOperation =>
-  left === right ? left : "sync";
-
-const formatBlockers = (blockers: readonly string[]): string =>
-  blockers.length <= 1
-    ? (blockers[0] ?? "the configured browser")
-    : `${blockers.slice(0, -1).join(", ")} and ${blockers.at(-1)}`;
 
 const isLivePid = (pid: number): boolean => {
   try {
@@ -75,12 +52,20 @@ const clearFile = (path: string): Effect.Effect<void> =>
 
 const readJsonFile = <A>(path: string): Effect.Effect<A | undefined, Error> =>
   Effect.tryPromise({
-    try: async () => JSON.parse(await Fs.readFile(path, "utf-8")) as A,
-    catch: (e) => {
-      if (typeof e === "object" && e !== null && "code" in e && e.code === "ENOENT")
-        return undefined;
-      throw e;
+    try: async () => {
+      const raw = await Fs.readFile(path, "utf-8");
+      try {
+        return JSON.parse(raw) as A;
+      } catch (cause) {
+        throw new Error(`Failed to parse ${path}: ${cause}`, { cause });
+      }
     },
+    catch: (e) =>
+      hasCode(e, "ENOENT")
+        ? undefined
+        : e instanceof Error
+          ? e
+          : new Error(`Failed to read ${path}: ${e}`),
   }).pipe(
     Effect.catchAll((e) => {
       if (e === undefined) return Effect.succeed(undefined);
@@ -158,39 +143,10 @@ const acquireLock = <O extends OrchestratedOperation>(
     };
   });
 
-const readPendingQueue = (): Effect.Effect<SyncQueueState | undefined, Error> =>
-  readJsonFile<SyncQueueState>(Paths.defaultSyncQueuePath());
-
-const clearPendingQueue = (): Effect.Effect<void> => clearFile(Paths.defaultSyncQueuePath());
-
-const writePendingQueue = (
-  operation: SyncOperation,
-  yamlPath: string,
-  blockers: readonly string[],
-): Effect.Effect<SyncNotice, Error> =>
-  Effect.gen(function* () {
-    const queue: SyncQueueState = {
-      operation,
-      yamlPath,
-      blockers,
-      queuedAt: DateTime.formatIso(DateTime.unsafeNow()),
-    };
-
-    yield* ensureRuntimeDir();
-    yield* writeJsonFile(Paths.defaultSyncQueuePath(), queue);
-
-    return {
-      state: "queued",
-      operation,
-      blockers,
-      message: `${operation} is queued until ${formatBlockers(blockers)} ${blockers.length === 1 ? "closes" : "close"}.`,
-    };
-  });
-
 export const withOrchestratedSync = <A>(
   yamlPath: string,
   requestedOperation: SyncOperation,
-  run: (operation: SyncOperation) => Effect.Effect<A, Error | TemporarySyncBlocker>,
+  run: (operation: SyncOperation) => Effect.Effect<A, Error>,
 ): Effect.Effect<OrchestratedSyncResult<A>, Error> =>
   Effect.gen(function* () {
     const lock = yield* acquireLock(
@@ -202,31 +158,8 @@ export const withOrchestratedSync = <A>(
       return { _tag: "deferred", notice: lock.notice } as const;
     }
 
-    try {
-      const pendingQueue = yield* readPendingQueue();
-      const operation = pendingQueue
-        ? combineOperations(pendingQueue.operation, requestedOperation)
-        : requestedOperation;
-
-      const outcome = yield* run(operation).pipe(
-        Effect.map((value) => ({ _tag: "completed", value }) as const),
-        Effect.catchAll((error) => {
-          if (TemporarySyncBlocker.is(error)) {
-            return writePendingQueue(operation, yamlPath, error.blockers).pipe(
-              Effect.map((notice) => ({ _tag: "deferred", notice }) as const),
-            );
-          }
-
-          return clearPendingQueue().pipe(Effect.flatMap(() => Effect.fail(error)));
-        }),
-      );
-
-      if (outcome._tag === "completed") {
-        yield* clearPendingQueue();
-      }
-
-      return outcome;
-    } finally {
-      yield* clearFile(Paths.defaultSyncLockPath());
-    }
+    return yield* run(requestedOperation).pipe(
+      Effect.map((value) => ({ _tag: "completed", value }) as const),
+      Effect.ensuring(clearFile(Paths.defaultSyncLockPath())),
+    );
   });

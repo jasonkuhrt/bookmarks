@@ -7,10 +7,10 @@
  *   bookmarks <command> [options]
  *
  * Commands:
+ *   sync        browsers <-> YAML fast path
  *   import      browsers -> workspace files
  *   push        YAML -> browsers
  *   pull        browsers -> YAML
- *   sync        bidirectional (pull then push)
  *   plan        workspace -> publish plan
  *   publish     workspace -> browsers
  *   next        guided workflow router
@@ -59,10 +59,10 @@ Usage:
   bookmarks <command> [options]
 
 Commands:
+  bookmarks sync [target...] [--dry-run] [--json]    browsers <-> YAML fast path
   bookmarks import [target...] [--json]      browsers -> workspace files
   bookmarks push [target...] [--dry-run] [--json]    YAML -> browsers
   bookmarks pull [target...] [--dry-run] [--json]    browsers -> YAML
-  bookmarks sync [target...] [--dry-run] [--json]    bidirectional (pull then push)
   bookmarks plan [target...] [--json]                workspace -> publish plan
   bookmarks publish [target...] [--json]             workspace -> browsers
   bookmarks next [--json]                guided workflow router
@@ -316,8 +316,7 @@ const printSyncSummary = (
 ) =>
   Effect.gen(function* () {
     if (result.orchestration) {
-      const verb = result.orchestration.state === "queued" ? "queued" : "deferred";
-      yield* Console.log(`\n${label} ${verb}: ${result.orchestration.message}`);
+      yield* Console.log(`\n${label} deferred: ${result.orchestration.message}`);
       return;
     }
 
@@ -390,6 +389,42 @@ const printWorkspaceImportSummary = (result: Workspace.WorkspaceImportResult) =>
         yield* Console.log(`    skipped ${skipped}`);
       }
     }
+  });
+
+type SyncCommandOutcome =
+  | { readonly kind: "sync"; readonly result: SyncModule.SyncResult }
+  | { readonly kind: "workspace_fallback" };
+
+const shouldFallbackToWorkspace = (error: Error): boolean =>
+  UnsupportedBookmarks.is(error) ||
+  error.message.includes("Cannot safely merge divergent structural bookmark changes");
+
+const emitSyncWorkspaceFallback = (
+  requestedTargets: readonly string[],
+  json: boolean,
+  error: Error,
+): Effect.Effect<SyncCommandOutcome, Error> =>
+  Effect.gen(function* () {
+    const workspaceFallback = yield* Workspace.importState(requestedTargets);
+
+    if (json) {
+      yield* printJson({
+        command: "sync",
+        status: "workspace_fallback",
+        error: error.message,
+        type: UnsupportedBookmarks.is(error) ? error._tag : "UnsafeSync",
+        workspaceFallback,
+      });
+    } else {
+      yield* Console.error(error.message);
+      yield* Console.log("");
+      yield* Console.log(
+        "Sync stopped before mutation. Imported current browser state into a workspace for manual review.",
+      );
+      yield* printWorkspaceImportSummary(workspaceFallback);
+    }
+
+    return { kind: "workspace_fallback" } as const;
   });
 
 const printWorkspaceValidation = (result: Workspace.WorkspaceValidationResult) =>
@@ -572,11 +607,22 @@ const program = Effect.gen(function* () {
       const preview = flags.dryRun
         ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
         : undefined;
-      const syncResult = yield* SyncModule.sync({
+      const syncOutcome = yield* SyncModule.sync({
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
         requestedTargets: positional,
-      });
+      }).pipe(
+        Effect.map((result) => ({ kind: "sync", result }) as const),
+        Effect.catchAll((error) =>
+          !flags.dryRun && shouldFallbackToWorkspace(error)
+            ? emitSyncWorkspaceFallback(positional, flags.json, error)
+            : Effect.fail(error),
+        ),
+      );
+
+      if (syncOutcome.kind === "workspace_fallback") break;
+
+      const syncResult = syncOutcome.result;
       if (flags.json) {
         yield* printJson({
           ...serializeSyncResult("sync", managed.yamlPath, flags.dryRun, syncResult),

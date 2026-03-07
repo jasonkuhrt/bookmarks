@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Exit } from "effect";
 import { join } from "node:path";
 import * as Permissions from "./permissions.ts";
@@ -7,6 +7,22 @@ import * as Permissions from "./permissions.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
 const runExit = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromiseExit(effect);
+const ORIGINAL_FORCE_FULL_DISK_ACCESS = process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"];
+const ORIGINAL_FORCE_BROWSER_RUNNING = process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"];
+
+afterEach(() => {
+  if (ORIGINAL_FORCE_FULL_DISK_ACCESS === undefined) {
+    delete process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"];
+  } else {
+    process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"] = ORIGINAL_FORCE_FULL_DISK_ACCESS;
+  }
+
+  if (ORIGINAL_FORCE_BROWSER_RUNNING === undefined) {
+    delete process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"];
+  } else {
+    process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = ORIGINAL_FORCE_BROWSER_RUNNING;
+  }
+});
 
 // -- Tagged Error Types --
 
@@ -72,6 +88,31 @@ describe("checkFullDiskAccess", () => {
     const result = await run(Permissions.checkFullDiskAccess());
     expect(typeof result).toBe("boolean");
   });
+
+  test("supports deterministic overrides for tests", async () => {
+    process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"] = "true";
+    expect(await run(Permissions.checkFullDiskAccess())).toBe(true);
+
+    process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"] = "0";
+    expect(await run(Permissions.checkFullDiskAccess())).toBe(false);
+  });
+});
+
+describe("requireFullDiskAccess", () => {
+  test("succeeds when access is forced on", async () => {
+    process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"] = "true";
+    const exit = await runExit(Permissions.requireFullDiskAccess());
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("fails with PermissionDenied when access is forced off", async () => {
+    process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"] = "false";
+    const exit = await runExit(Permissions.requireFullDiskAccess());
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(exit.cause._tag).toBe("Fail");
+    }
+  });
 });
 
 // -- checkBrowserRunning --
@@ -85,6 +126,12 @@ describe("checkBrowserRunning", () => {
   test("returns a boolean for Safari", async () => {
     const result = await run(Permissions.checkBrowserRunning("Safari"));
     expect(typeof result).toBe("boolean");
+  });
+
+  test("supports deterministic overrides for tests", async () => {
+    process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Safari,Google Chrome";
+    expect(await run(Permissions.checkBrowserRunning("Safari"))).toBe(true);
+    expect(await run(Permissions.checkBrowserRunning("Firefox"))).toBe(false);
   });
 });
 
@@ -132,5 +179,14 @@ describe("requireBrowserNotRunning", () => {
       Permissions.requireBrowserNotRunning("__nonexistent_process_12345__"),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("fails with BrowserRunning when the browser is forced on", async () => {
+    process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Safari";
+    const exit = await runExit(Permissions.requireBrowserNotRunning("Safari"));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(exit.cause._tag).toBe("Fail");
+    }
   });
 });

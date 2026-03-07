@@ -66,9 +66,6 @@ describe("paths", () => {
     expect(Paths.defaultSyncLockPath()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.lock.json"),
     );
-    expect(Paths.defaultSyncQueuePath()).toBe(
-      join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.queue.json"),
-    );
     expect(Paths.defaultSafariPlistPath()).toBe(join(homedir(), "Library/Safari/Bookmarks.plist"));
     expect(Paths.defaultSafariTabsDbPath()).toBe(
       join(homedir(), "Library/Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db"),
@@ -95,7 +92,6 @@ describe("paths", () => {
     expect(Paths.defaultBackupDir()).toBe("/tmp/bookmarks-state/backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/bookmarks-state/runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/bookmarks-state/runtime/sync.lock.json");
-    expect(Paths.defaultSyncQueuePath()).toBe("/tmp/bookmarks-state/runtime/sync.queue.json");
   });
 
   test("XDG home env vars feed the default bookmarks directories", () => {
@@ -127,7 +123,6 @@ describe("paths", () => {
     expect(Paths.defaultBackupDir()).toBe("/tmp/custom-backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json");
-    expect(Paths.defaultSyncQueuePath()).toBe("/tmp/custom-runtime/sync.queue.json");
     expect(Paths.defaultSafariPlistPath()).toBe("/tmp/Safari/Bookmarks.plist");
     expect(Paths.defaultSafariTabsDbPath()).toBe("/tmp/Safari/SafariTabs.db");
     expect(Paths.defaultChromeDataDir()).toBe("/tmp/Chrome");

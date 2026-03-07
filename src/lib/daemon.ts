@@ -1,4 +1,3 @@
-/* oxlint-disable no-non-null-assertion */
 /**
  * Launchd daemon lifecycle.
  *
@@ -15,11 +14,11 @@ import * as Path from "node:path";
 
 const LABEL = "com.jasonkuhrt.bookmarks-sync";
 const PLIST_FILENAME = `${LABEL}.plist`;
-const HOME = process.env["HOME"] ?? "";
-const PLIST_DIR = Path.join(HOME, "Library/LaunchAgents");
-const PLIST_PATH = Path.join(PLIST_DIR, PLIST_FILENAME);
-const LOG_DIR = Path.join(HOME, "Library/Logs/bookmarks-sync");
-const STDOUT_LOG = Path.join(LOG_DIR, "bookmarks-sync.log");
+const homeDir = (): string => process.env["HOME"] ?? "";
+const plistDir = (): string => Path.join(homeDir(), "Library/LaunchAgents");
+const plistPath = (): string => Path.join(plistDir(), PLIST_FILENAME);
+const defaultLogDir = (): string => Path.join(homeDir(), "Library/Logs/bookmarks-sync");
+const stdoutLogPath = (): string => Path.join(defaultLogDir(), "bookmarks-sync.log");
 
 // -- Types --
 
@@ -133,10 +132,10 @@ export const generatePlist = (config: DaemonConfig): string => {
 export const defaultConfig = (): Effect.Effect<DaemonConfig, Error> =>
   Effect.gen(function* () {
     const bunPath = yield* resolveBunPath();
-    const workingDir = Path.resolve(import.meta.dirname, "../../../..");
+    const workingDir = Path.resolve(import.meta.dirname, "../..");
     return {
       interval: Duration.hours(1),
-      logDir: LOG_DIR,
+      logDir: defaultLogDir(),
       workingDir,
       bunPath,
     };
@@ -148,35 +147,37 @@ export const defaultConfig = (): Effect.Effect<DaemonConfig, Error> =>
 export const start = (config: DaemonConfig): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     // Ensure directories exist
-    yield* mkdir(PLIST_DIR);
+    yield* mkdir(plistDir());
     yield* mkdir(config.logDir);
 
     // Generate and write plist
     const plistContent = generatePlist(config);
-    yield* writeFile(PLIST_PATH, plistContent);
+    const installedPlistPath = plistPath();
+    yield* writeFile(installedPlistPath, plistContent);
 
     // Load via launchctl
-    yield* execFileEffect("launchctl", ["load", PLIST_PATH]);
+    yield* execFileEffect("launchctl", ["load", installedPlistPath]);
   });
 
 /** Unload the launchd plist and remove the file. */
 export const stop = (): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const exists = yield* fileExists(PLIST_PATH);
+    const installedPlistPath = plistPath();
+    const exists = yield* fileExists(installedPlistPath);
     if (!exists) {
       return yield* Effect.fail(
-        new Error(`Plist not found: ${PLIST_PATH}. Is the daemon running?`),
+        new Error(`Plist not found: ${installedPlistPath}. Is the daemon running?`),
       );
     }
 
     // Unload via launchctl (ignore error if not loaded)
     yield* pipe(
-      execFileEffect("launchctl", ["unload", PLIST_PATH]),
+      execFileEffect("launchctl", ["unload", installedPlistPath]),
       Effect.catchAll(() => Effect.void),
     );
 
     // Remove plist file
-    yield* removeFile(PLIST_PATH);
+    yield* removeFile(installedPlistPath);
   });
 
 /** Check daemon status: running, last run, next run. */
@@ -192,7 +193,7 @@ export const status = (): Effect.Effect<DaemonStatus, Error> =>
     // Parse last run from stdout log (last line with a timestamp)
     const lastRun = yield* pipe(
       Effect.tryPromise({
-        try: () => Fs.readFile(STDOUT_LOG, "utf-8"),
+        try: () => Fs.readFile(stdoutLogPath(), "utf-8"),
         catch: () => new Error("Failed to read log"),
       }),
       Effect.map((content) => parseLastRunTimestamp(content)),
@@ -218,7 +219,7 @@ export const status = (): Effect.Effect<DaemonStatus, Error> =>
       running,
       lastRun,
       nextRun,
-      plistPath: PLIST_PATH,
+      plistPath: plistPath(),
     };
   });
 
@@ -231,8 +232,9 @@ const parseLastRunTimestamp = (logContent: string): Option.Option<DateTime.Utc> 
   for (const line of lines) {
     // Try to find an ISO timestamp at the start of a line
     const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?)/);
-    if (isoMatch) {
-      return pipe(DateTime.make(isoMatch[1]!), Option.map(DateTime.toUtc));
+    const isoTimestamp = isoMatch?.[1];
+    if (isoTimestamp) {
+      return pipe(DateTime.make(isoTimestamp), Option.map(DateTime.toUtc));
     }
     // Fallback: try the modification time approach -- we'll use file stat instead
   }
@@ -243,7 +245,7 @@ const parseLastRunTimestamp = (logContent: string): Option.Option<DateTime.Utc> 
 const readIntervalFromPlist = (): Effect.Effect<number, Error> =>
   pipe(
     Effect.tryPromise({
-      try: () => Fs.readFile(PLIST_PATH, "utf-8"),
+      try: () => Fs.readFile(plistPath(), "utf-8"),
       catch: () => new Error("Failed to read plist"),
     }),
     Effect.flatMap((content) => {

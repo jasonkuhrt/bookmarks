@@ -1,7 +1,7 @@
-/* oxlint-disable await-thenable, no-confusing-void-expression, no-unsafe-type-assertion */
+/* oxlint-disable no-unsafe-type-assertion */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Paths from "./paths.ts";
@@ -10,6 +10,27 @@ import * as Orchestration from "./orchestration.ts";
 const ORIGINAL_RUNTIME_DIR = process.env["BOOKMARKS_RUNTIME_DIR"];
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
+
+const expectMissing = async (path: string): Promise<void> => {
+  try {
+    await access(path);
+    throw new Error(`Expected ${path} to be missing`);
+  } catch (error) {
+    if (error instanceof Error && error.message === `Expected ${path} to be missing`) {
+      throw error;
+    }
+  }
+};
+
+const expectFailure = async (promise: Promise<unknown>, message: string): Promise<void> => {
+  try {
+    await promise;
+    throw new Error(`Expected rejection containing "${message}"`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(message);
+  }
+};
 
 afterEach(async () => {
   const runtimeDir = process.env["BOOKMARKS_RUNTIME_DIR"];
@@ -26,19 +47,9 @@ afterEach(async () => {
 });
 
 describe("withOrchestratedSync", () => {
-  test("replays queued work on the next successful run", async () => {
+  test("executes the requested operation when no lock exists", async () => {
     const runtimeDir = await mkdtemp(join(tmpdir(), "bookmarks-runtime-"));
     process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
-
-    await writeFile(
-      Paths.defaultSyncQueuePath(),
-      JSON.stringify({
-        operation: "push",
-        yamlPath: "/tmp/bookmarks.yaml",
-        blockers: ["Safari"],
-        queuedAt: "2026-01-01T00:00:00.000Z",
-      }),
-    );
 
     let executedOperation: Orchestration.SyncOperation | undefined;
 
@@ -50,34 +61,7 @@ describe("withOrchestratedSync", () => {
     );
 
     expect(result).toEqual({ _tag: "completed", value: "done" });
-    expect(executedOperation).toBe("sync");
-    await expect(access(Paths.defaultSyncQueuePath())).rejects.toThrow();
-  });
-
-  test("queues work when a temporary browser blocker is encountered", async () => {
-    const runtimeDir = await mkdtemp(join(tmpdir(), "bookmarks-runtime-"));
-    process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
-
-    const result = await run(
-      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "sync", () =>
-        Effect.fail(new Orchestration.TemporarySyncBlocker({ blockers: ["Safari"] })),
-      ),
-    );
-
-    expect(result._tag).toBe("deferred");
-    if (result._tag === "deferred") {
-      expect(result.notice.state).toBe("queued");
-      expect(result.notice.operation).toBe("sync");
-      expect(result.notice.message).toContain("queued");
-      expect(result.notice.blockers).toEqual(["Safari"]);
-    }
-
-    const queued = JSON.parse(await readFile(Paths.defaultSyncQueuePath(), "utf-8")) as {
-      readonly operation: string;
-      readonly blockers: readonly string[];
-    };
-    expect(queued.operation).toBe("sync");
-    expect(queued.blockers).toEqual(["Safari"]);
+    expect(executedOperation).toBe("pull");
   });
 
   test("returns a busy notice when another sync holds the lock", async () => {
@@ -132,6 +116,38 @@ describe("withOrchestratedSync", () => {
     );
 
     expect(result).toEqual({ _tag: "completed", value: "done" });
-    await expect(access(Paths.defaultSyncLockPath())).rejects.toThrow();
+    await expectMissing(Paths.defaultSyncLockPath());
+  });
+
+  test("treats malformed lock files as stale state and rewrites them", async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), "bookmarks-runtime-"));
+    process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
+
+    await writeFile(Paths.defaultSyncLockPath(), "{not-json", "utf-8");
+
+    const result = await run(
+      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "sync", () =>
+        Effect.succeed("done"),
+      ),
+    );
+
+    expect(result).toEqual({ _tag: "completed", value: "done" });
+    await expectMissing(Paths.defaultSyncLockPath());
+  });
+
+  test("clears the lock when the wrapped operation fails", async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), "bookmarks-runtime-"));
+    process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
+
+    await expectFailure(
+      run(
+        Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "sync", () =>
+          Effect.fail(new Error("boom")),
+        ),
+      ),
+      "boom",
+    );
+
+    await expectMissing(Paths.defaultSyncLockPath());
   });
 });

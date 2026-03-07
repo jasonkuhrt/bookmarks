@@ -980,8 +980,8 @@ export const next = (): Effect.Effect<WorkspaceNextResult, Error> =>
         },
         blockers: [],
         nextAction: runCommandAction(
-          "bookmarks import",
-          "Import current browser state into a workspace.",
+          "bookmarks sync",
+          "Sync current browser state into bookmarks.yaml. Use workspace import only when you want manual review.",
         ),
       };
     }

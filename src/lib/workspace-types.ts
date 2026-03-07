@@ -39,7 +39,6 @@ export interface WorkspacePlanBlocker {
     | "duplicate-url"
     | "unsupported-node"
     | "target-unavailable"
-    | "browser-running"
     | "permission-denied";
   readonly message: string;
   readonly location?: string;

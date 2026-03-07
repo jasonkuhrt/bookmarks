@@ -18,6 +18,7 @@ import * as Workspace from "../lib/workspace.ts";
 import * as YamlModule from "../lib/yaml.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
+const bunBinary = Bun.which("bun") ?? process.execPath;
 
 const runCommand = async (
   cwd: string,
@@ -176,18 +177,14 @@ describe("bookmarks CLI", () => {
       };
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const status = await runCommand(dir, [process.execPath, cliPath, "status"], cliEnv);
+      const status = await runCommand(dir, [bunBinary, cliPath, "status"], cliEnv);
       expect(status.exitCode).toBe(0);
       expect(status.stdout).toContain("chrome/default");
       expect(status.stdout).toContain("pending -> browser:");
       expect(status.stdout).toContain("pending -> yaml:");
       expect(status.stdout).toContain('Add "Top Link"');
 
-      const statusJson = await runCommand(
-        dir,
-        [process.execPath, cliPath, "status", "--json"],
-        cliEnv,
-      );
+      const statusJson = await runCommand(dir, [bunBinary, cliPath, "status", "--json"], cliEnv);
       expect(statusJson.exitCode).toBe(0);
       const parsedStatus = JSON.parse(statusJson.stdout) as {
         readonly yamlPath: string;
@@ -200,7 +197,7 @@ describe("bookmarks CLI", () => {
       expect(parsedStatus.targets[0]?.target.browser).toBe("chrome");
       expect(parsedStatus.targets[0]?.pendingToYaml.length).toBeGreaterThan(0);
 
-      const sync = await runCommand(dir, [process.execPath, cliPath, "sync", "--dry-run"], cliEnv);
+      const sync = await runCommand(dir, [bunBinary, cliPath, "sync", "--dry-run"], cliEnv);
       expect(sync.exitCode).toBe(0);
       expect(sync.stdout).toContain("Sync complete");
       expect(sync.stdout).toContain("chrome/default");
@@ -208,7 +205,7 @@ describe("bookmarks CLI", () => {
 
       const syncJson = await runCommand(
         dir,
-        [process.execPath, cliPath, "sync", "--dry-run", "--json"],
+        [bunBinary, cliPath, "sync", "--dry-run", "--json"],
         cliEnv,
       );
       expect(syncJson.exitCode).toBe(0);
@@ -235,7 +232,63 @@ describe("bookmarks CLI", () => {
     }
   });
 
-  test("sync --json reports automatic backups for managed mutations", async () => {
+  test("sync works outside git repos because git history is optional", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-non-git-sync-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const chromeDataDir = join(dir, "Chrome");
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks");
+    const backupDir = join(dir, "backups");
+    const runtimeDir = join(dir, "runtime");
+    const safariPath = join(dir, "Safari", "Bookmarks.plist");
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
+
+    try {
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true });
+      await copyChromeBookmarksFixture(chromePath);
+      await Bun.write(
+        join(chromeDataDir, "Local State"),
+        JSON.stringify({
+          profile: {
+            info_cache: {
+              Default: {},
+            },
+          },
+        }),
+      );
+
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_BACKUP_DIR: backupDir,
+        BOOKMARKS_RUNTIME_DIR: runtimeDir,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
+      };
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
+
+      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
+      expect(syncJson.exitCode).toBe(0);
+
+      const parsedSync = JSON.parse(syncJson.stdout) as {
+        readonly command: string;
+        readonly backup: {
+          readonly files: readonly string[];
+          readonly skipped: readonly string[];
+        } | null;
+      };
+      expect(parsedSync.command).toBe("sync");
+      expect(parsedSync.backup?.files).toHaveLength(1);
+      expect(parsedSync.backup?.skipped).toEqual(["yaml"]);
+
+      const yamlAfter = await readFile(yamlPath, "utf-8");
+      expect(yamlAfter).toContain("Top Link");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sync --json performs live sync with backups even when browsers are open", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-"));
     const yamlPath = join(dir, "bookmarks.yaml");
     const chromeDataDir = join(dir, "Chrome");
@@ -283,11 +336,11 @@ describe("bookmarks CLI", () => {
         BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
         BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
         BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
-        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
+        BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
       };
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const syncJson = await runCommand(dir, [process.execPath, cliPath, "sync", "--json"], cliEnv);
+      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
       expect(syncJson.exitCode).toBe(0);
 
       const parsedSync = JSON.parse(syncJson.stdout) as {
@@ -302,23 +355,143 @@ describe("bookmarks CLI", () => {
         } | null;
       };
 
-      const queued = parsedSync.orchestration?.state === "queued";
-
-      if (queued) {
-        expect(parsedSync.orchestration.blockers).toContain("Google Chrome");
-        expect(parsedSync.backup).toBeNull();
-      } else {
-        expect(parsedSync.backup?.backupDir).toBe(backupDir);
-        expect(parsedSync.backup?.files).toHaveLength(2);
-        expect(parsedSync.backup?.skipped).toHaveLength(0);
-      }
+      expect(parsedSync.orchestration).toBeNull();
+      expect(parsedSync.backup?.backupDir).toBe(backupDir);
+      expect(parsedSync.backup?.files).toHaveLength(2);
+      expect(parsedSync.backup?.skipped).toHaveLength(0);
 
       const yamlAfter = await readFile(yamlPath, "utf-8");
-      if (queued) {
-        expect(yamlAfter).not.toContain("Top Link");
-      } else {
-        expect(yamlAfter).toContain("Top Link");
-      }
+      expect(yamlAfter).toContain("Top Link");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sync falls back to a workspace import when browser state is not safely representable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-fallback-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const workspacePath = join(dir, "workspace.yaml");
+    const importLockPath = join(dir, "import.lock.json");
+    const publishPlanPath = join(dir, "publish.plan.json");
+    const chromeDataDir = join(dir, "Chrome");
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks");
+    const safariPath = join(dir, "Safari", "Bookmarks.plist");
+    const safariTabsDbPath = join(dir, "Safari", "SafariTabs.db");
+
+    try {
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true });
+      await Bun.write(
+        chromePath,
+        JSON.stringify(
+          {
+            checksum: "",
+            version: 1,
+            roots: {
+              bookmark_bar: {
+                type: "folder",
+                name: "Bookmarks Bar",
+                id: "1",
+                guid: "root-bookmark-bar",
+                date_added: "0",
+                date_modified: "0",
+                children: [
+                  {
+                    type: "separator",
+                    name: "",
+                    id: "2",
+                    guid: "separator",
+                    date_added: "0",
+                    date_modified: "0",
+                  },
+                ],
+              },
+              other: {
+                type: "folder",
+                name: "Other Bookmarks",
+                id: "3",
+                guid: "root-other",
+                date_added: "0",
+                date_modified: "0",
+                children: [],
+              },
+              synced: {
+                type: "folder",
+                name: "Mobile Bookmarks",
+                id: "4",
+                guid: "root-synced",
+                date_added: "0",
+                date_modified: "0",
+                children: [],
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      await Bun.write(
+        join(chromeDataDir, "Local State"),
+        JSON.stringify({
+          profile: {
+            info_cache: {
+              Default: {},
+            },
+          },
+        }),
+      );
+
+      await run(
+        YamlModule.save(
+          yamlPath,
+          BookmarksConfig.make({
+            all: new BookmarkTree({}),
+            chrome: ChromeBookmarks.make({
+              profiles: {
+                default: ChromeProfileBookmarks.make({}),
+              },
+            }),
+          }),
+        ),
+      );
+
+      await runGit(dir, "init", "-b", "main");
+      await runGit(dir, "config", "user.name", "Bookmarks Test");
+      await runGit(dir, "config", "user.email", "bookmarks-test@example.com");
+      await runGit(dir, "add", "bookmarks.yaml");
+      await runGit(dir, "commit", "-m", "baseline");
+
+      const cliEnv = {
+        BOOKMARKS_YAML_PATH: yamlPath,
+        BOOKMARKS_WORKSPACE_PATH: workspacePath,
+        BOOKMARKS_IMPORT_LOCK_PATH: importLockPath,
+        BOOKMARKS_PUBLISH_PLAN_PATH: publishPlanPath,
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+        BOOKMARKS_SAFARI_TABS_DB_PATH: safariTabsDbPath,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
+      };
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
+
+      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
+      expect(syncJson.exitCode).toBe(0);
+
+      const parsedSync = JSON.parse(syncJson.stdout) as {
+        readonly command: string;
+        readonly status: string;
+        readonly error: string;
+        readonly workspaceFallback: {
+          readonly workspacePath: string;
+          readonly importLockPath: string;
+          readonly targets: readonly string[];
+        };
+      };
+
+      expect(parsedSync.command).toBe("sync");
+      expect(parsedSync.status).toBe("workspace_fallback");
+      expect(parsedSync.error).toContain("Bookmark separators are not supported");
+      expect(parsedSync.workspaceFallback.workspacePath).toBe(workspacePath);
+      expect(parsedSync.workspaceFallback.importLockPath).toBe(importLockPath);
+      expect(parsedSync.workspaceFallback.targets).toEqual(["chrome/default"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -368,7 +541,7 @@ describe("bookmarks CLI", () => {
 
       const imported = await runCommand(
         dir,
-        [process.execPath, cliPath, "import", "chrome/default", "--json"],
+        [bunBinary, cliPath, "import", "chrome/default", "--json"],
         cliEnv,
       );
       expect(imported.exitCode).toBe(0);
@@ -377,11 +550,7 @@ describe("bookmarks CLI", () => {
       };
       expect(parsedImport.targets).toEqual(["chrome/default"]);
 
-      const nextNeedsReview = await runCommand(
-        dir,
-        [process.execPath, cliPath, "next", "--json"],
-        cliEnv,
-      );
+      const nextNeedsReview = await runCommand(dir, [bunBinary, cliPath, "next", "--json"], cliEnv);
       expect(nextNeedsReview.exitCode).toBe(0);
       const parsedNextNeedsReview = JSON.parse(nextNeedsReview.stdout) as {
         readonly state: string;
@@ -400,16 +569,12 @@ describe("bookmarks CLI", () => {
       };
       await run(Workspace.save(workspacePath, workspace));
 
-      const validated = await runCommand(
-        dir,
-        [process.execPath, cliPath, "validate", "--json"],
-        cliEnv,
-      );
+      const validated = await runCommand(dir, [bunBinary, cliPath, "validate", "--json"], cliEnv);
       expect(validated.exitCode).toBe(0);
       const parsedValidation = JSON.parse(validated.stdout) as { readonly valid: boolean };
       expect(parsedValidation.valid).toBe(true);
 
-      const planned = await runCommand(dir, [process.execPath, cliPath, "plan", "--json"], cliEnv);
+      const planned = await runCommand(dir, [bunBinary, cliPath, "plan", "--json"], cliEnv);
       const parsedPlan = JSON.parse(planned.stdout) as {
         readonly summary: { readonly blockerCount: number };
         readonly blockers?: ReadonlyArray<{ readonly code: string; readonly targetId?: string }>;
@@ -421,18 +586,14 @@ describe("bookmarks CLI", () => {
       expect(planned.exitCode).toBe(0);
       expect(parsedPlan.summary.blockerCount).toBe(0);
 
-      const published = await runCommand(
-        dir,
-        [process.execPath, cliPath, "publish", "--json"],
-        cliEnv,
-      );
+      const published = await runCommand(dir, [bunBinary, cliPath, "publish", "--json"], cliEnv);
       expect(published.exitCode).toBe(0);
       const parsedPublish = JSON.parse(published.stdout) as {
         readonly publishedTargets: readonly string[];
       };
       expect(parsedPublish.publishedTargets).toEqual(["chrome/default"]);
 
-      const nextDone = await runCommand(dir, [process.execPath, cliPath, "next", "--json"], cliEnv);
+      const nextDone = await runCommand(dir, [bunBinary, cliPath, "next", "--json"], cliEnv);
       expect(nextDone.exitCode).toBe(0);
       const parsedNextDone = JSON.parse(nextDone.stdout) as {
         readonly state: string;
@@ -487,7 +648,7 @@ describe("bookmarks CLI", () => {
 
       const imported = await runCommand(
         dir,
-        [process.execPath, cliPath, "import", "chrome/default", "--json"],
+        [bunBinary, cliPath, "import", "chrome/default", "--json"],
         cliEnv,
       );
       expect(imported.exitCode).toBe(0);
@@ -504,7 +665,7 @@ describe("bookmarks CLI", () => {
       };
       await run(Workspace.save(workspacePath, workspace));
 
-      const planned = await runCommand(dir, [process.execPath, cliPath, "plan", "--json"], {
+      const planned = await runCommand(dir, [bunBinary, cliPath, "plan", "--json"], {
         ...cliEnv,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
       });
@@ -520,7 +681,7 @@ describe("bookmarks CLI", () => {
       expect(parsedPlan.targets[0]?.status).toBe("ready");
       expect(parsedPlan.targets[0]?.blockers).toEqual([]);
 
-      const published = await runCommand(dir, [process.execPath, cliPath, "publish", "--json"], {
+      const published = await runCommand(dir, [bunBinary, cliPath, "publish", "--json"], {
         ...cliEnv,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome",
       });
@@ -575,11 +736,7 @@ describe("bookmarks CLI", () => {
       };
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const imported = await runCommand(
-        dir,
-        [process.execPath, cliPath, "import", "--json"],
-        cliEnv,
-      );
+      const imported = await runCommand(dir, [bunBinary, cliPath, "import", "--json"], cliEnv);
       expect(imported.exitCode).toBe(0);
       const parsedImport = JSON.parse(imported.stdout) as {
         readonly targets: readonly string[];
@@ -588,7 +745,7 @@ describe("bookmarks CLI", () => {
 
       const typo = await runCommand(
         dir,
-        [process.execPath, cliPath, "import", "chrome/defualt", "--json"],
+        [bunBinary, cliPath, "import", "chrome/defualt", "--json"],
         cliEnv,
       );
       expect(typo.exitCode).toBe(1);
@@ -664,11 +821,7 @@ describe("bookmarks CLI", () => {
       };
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const imported = await runCommand(
-        dir,
-        [process.execPath, cliPath, "import", "--json"],
-        cliEnv,
-      );
+      const imported = await runCommand(dir, [bunBinary, cliPath, "import", "--json"], cliEnv);
       expect(imported.exitCode).toBe(0);
       const parsedImport = JSON.parse(imported.stdout) as { readonly targets: readonly string[] };
       expect(parsedImport.targets).toEqual(["safari"]);

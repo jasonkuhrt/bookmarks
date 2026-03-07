@@ -79,7 +79,12 @@ export const readGitBaselineConfig = (
   yamlPath: string,
 ): Effect.Effect<BookmarksConfig | null, Error> =>
   Effect.gen(function* () {
-    const { repoRoot, relPath } = yield* resolveGitTarget(yamlPath);
+    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
+    if (!resolvedGitTarget) {
+      yield* Effect.log("bookmarks.yaml is not inside a git repo — using empty baseline");
+      return null;
+    }
+    const { repoRoot, relPath } = resolvedGitTarget;
 
     const raw = yield* Effect.tryPromise({
       try: () =>
@@ -132,14 +137,17 @@ const gitRepoRoot = (filePath: string): Effect.Effect<string, Error> =>
 /** Resolve a possibly symlinked home path to the repo-relative file path git expects. */
 const resolveGitTarget = (
   filePath: string,
-): Effect.Effect<{ repoRoot: string; relPath: string }, Error> =>
+): Effect.Effect<{ repoRoot: string; relPath: string } | undefined, Error> =>
   Effect.gen(function* () {
     const realDir = yield* Effect.tryPromise({
       try: () => Fs.realpath(Path.dirname(filePath)),
       catch: (e) => new Error(`Failed to resolve real path for ${filePath}: ${e}`),
     }).pipe(Effect.catchAll(() => Effect.succeed(Path.dirname(filePath))));
     const canonicalPath = Path.join(realDir, Path.basename(filePath));
-    const repoRoot = yield* gitRepoRoot(canonicalPath);
+    const repoRoot = yield* gitRepoRoot(canonicalPath).pipe(
+      Effect.catchAll(() => Effect.succeed(undefined)),
+    );
+    if (!repoRoot) return undefined;
     return {
       repoRoot,
       relPath: Path.relative(repoRoot, canonicalPath),
@@ -149,7 +157,12 @@ const resolveGitTarget = (
 /** Auto-commit bookmarks.yaml so the committed version becomes the new baseline. */
 export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const { repoRoot, relPath } = yield* resolveGitTarget(yamlPath);
+    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
+    if (!resolvedGitTarget) {
+      yield* Effect.log("Skipping auto-commit because bookmarks.yaml is not inside a git repo");
+      return;
+    }
+    const { repoRoot, relPath } = resolvedGitTarget;
 
     // Stage the file
     yield* Effect.tryPromise({
@@ -613,23 +626,6 @@ const ensurePermanentMutationSafety = (
     }
   });
 
-const ensureTemporaryMutationSafety = (
-  targets: readonly Targets.TargetDescriptor[],
-): Effect.Effect<void, Orchestration.TemporarySyncBlocker> =>
-  Effect.gen(function* () {
-    const runningBrowsers: string[] = [];
-
-    for (const browser of new Set(targets.map((target) => Targets.processNameOf(target.browser)))) {
-      if (yield* Permissions.checkBrowserRunning(browser)) {
-        runningBrowsers.push(browser);
-      }
-    }
-
-    if (runningBrowsers.length > 0) {
-      yield* new Orchestration.TemporarySyncBlocker({ blockers: runningBrowsers });
-    }
-  });
-
 const createMutationBackup = (
   config: SyncConfig,
   yamlConfig: BookmarksConfig,
@@ -652,7 +648,6 @@ const runManagedOperation = (
         config.requestedTargets,
       );
       yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets);
-      yield* ensureTemporaryMutationSafety(selectedTargets);
       const mutationBackup = yield* createMutationBackup(config, yamlConfig);
 
       const nextConfig = { ...config, yamlOverride: yamlConfig };
@@ -748,6 +743,19 @@ const isTreeEmpty = (tree: BookmarkTree): boolean =>
 
 const treeEquals = (left: BookmarkTree, right: BookmarkTree): boolean =>
   sectionKeys.every((sectionKey) => sectionsEqual(left[sectionKey], right[sectionKey]));
+
+const verifyTargetWrite = (
+  target: Targets.TargetDescriptor,
+  expectedTree: BookmarkTree,
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const readBack = yield* Targets.readTree(target);
+    if (!treeEquals(readBack, expectedTree)) {
+      return yield* Effect.fail(
+        new Error(`Post-write verification failed for ${Targets.displayNameOf(target)}`),
+      );
+    }
+  });
 
 const treeFromSections = (
   sections: Partial<Record<SectionKey, BookmarkSection | undefined>>,
@@ -947,20 +955,19 @@ const projectTree = (
     };
   });
 
-const syncTarget = (
+interface PlannedTargetSync {
+  readonly target: Targets.TargetDescriptor;
+  readonly tree: BookmarkTree;
+  readonly result: TargetResult;
+  readonly writePatches: readonly Patch.BookmarkPatch[];
+}
+
+const planSyncTarget = (
   target: Targets.TargetDescriptor,
   baselineTree: BookmarkTree,
   yamlTree: BookmarkTree,
   maxAge: Duration.Duration,
-  dryRun: boolean,
-): Effect.Effect<
-  {
-    readonly target: Targets.TargetDescriptor;
-    readonly tree: BookmarkTree;
-    readonly result: TargetResult;
-  },
-  Error
-> =>
+): Effect.Effect<PlannedTargetSync, Error> =>
   Effect.gen(function* () {
     const browserTree = yield* Targets.readTree(target);
     const yamlPatches = yield* Patch.generatePatches(
@@ -1029,14 +1036,6 @@ const syncTarget = (
     );
     const writeMode = finalProjection.exact ? ("patches" as const) : ("rewrite" as const);
 
-    if (!dryRun) {
-      if (writeMode === "rewrite") {
-        yield* Targets.writeTree(target, finalTree);
-      } else {
-        yield* Targets.applyPatches(target, finalProjection.patches);
-      }
-    }
-
     return {
       target,
       tree: finalTree,
@@ -1046,6 +1045,7 @@ const syncTarget = (
         graveyarded: resolution.graveyard,
         writeMode,
       },
+      writePatches: finalProjection.patches,
     };
   });
 
@@ -1101,6 +1101,7 @@ const pushTarget = (
       } else {
         yield* Targets.applyPatches(target, finalProjection.patches);
       }
+      yield* verifyTargetWrite(target, yamlTree);
     }
 
     return {
@@ -1144,6 +1145,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       yamlConfig,
       discoveredTargets.map(Targets.keyOf),
     );
+    const plannedTargetSyncs: PlannedTargetSync[] = [];
 
     for (const target of selectedTargets) {
       yield* Effect.log(`Syncing ${Targets.displayNameOf(target)}...`);
@@ -1152,19 +1154,22 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
         resolvedTargetOf(target),
       );
       const yamlTree = resolvedTrees[Targets.keyOf(target)] ?? emptyTree();
-      const targetSync = yield* syncTarget(
-        target,
-        baselineTree,
-        yamlTree,
-        maxAge,
-        config.dryRun ?? false,
-      );
+      const targetSync = yield* planSyncTarget(target, baselineTree, yamlTree, maxAge);
       resolvedTrees[Targets.keyOf(target)] = targetSync.tree;
+      plannedTargetSyncs.push(targetSync);
       targetResults.push(targetSync.result);
     }
 
     const nextConfig = decomposeResolvedTrees(yamlConfig, resolvedTrees);
     if (!config.dryRun) {
+      for (const targetSync of plannedTargetSyncs) {
+        if ((targetSync.result.writeMode ?? "patches") === "rewrite") {
+          yield* Targets.writeTree(targetSync.target, targetSync.tree);
+        } else {
+          yield* Targets.applyPatches(targetSync.target, targetSync.writePatches);
+        }
+        yield* verifyTargetWrite(targetSync.target, targetSync.tree);
+      }
       yield* saveConfig(config.yamlPath, nextConfig);
     }
 

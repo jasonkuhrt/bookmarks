@@ -66,13 +66,20 @@ const SAFARI_PLIST_PATH = join(homedir(), "Library/Safari/Bookmarks.plist");
 
 /** Check if Full Disk Access is granted by attempting to read Safari's plist. Returns true if accessible. */
 export const checkFullDiskAccess = (): Effect.Effect<boolean> =>
-  Effect.tryPromise({
-    try: async () => {
-      await access(SAFARI_PLIST_PATH);
-      return true;
-    },
-    catch: () => false,
-  }).pipe(Effect.catchAll(() => Effect.succeed(false)));
+  Effect.gen(function* () {
+    const forced = process.env["BOOKMARKS_FORCE_FULL_DISK_ACCESS"];
+    if (forced !== undefined) {
+      return forced === "1" || forced.toLowerCase() === "true";
+    }
+
+    return yield* Effect.tryPromise({
+      try: async () => {
+        await access(SAFARI_PLIST_PATH);
+        return true;
+      },
+      catch: () => false,
+    }).pipe(Effect.catchAll(() => Effect.succeed(false)));
+  });
 
 /** Assert Full Disk Access, failing with a {@link PermissionDenied} error if not granted. */
 export const requireFullDiskAccess = (): Effect.Effect<void, PermissionDenied> =>
