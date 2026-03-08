@@ -2,9 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { serialize } from "@plist/binary.serialize";
 import { Effect } from "effect";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  applyManagedConfigHeader,
+  DEFAULT_DAEMON_HEADER_STATE,
+  readDaemonHeaderState,
+} from "../lib/managed-config-header.ts";
 import { copyChromeBookmarksFixture } from "../lib/test-fixtures.ts";
 import {
   BookmarkLeaf,
@@ -730,6 +735,88 @@ describe("bookmarks CLI", () => {
       expect(targets).toHaveLength(1);
       const firstTarget = readObject(readFirstObject(targets, "targets"), "target");
       expect(readString(firstTarget, "browser")).toBe("safari");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("daemon status reconciles the managed header from observed runtime state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-daemon-status-"));
+    const homeDir = join(dir, "home");
+    const binDir = join(dir, "bin");
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const runtimeDir = join(dir, "runtime");
+    const launchctlStatePath = join(dir, "launchctl.state");
+    const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
+
+    try {
+      await mkdir(homeDir, { recursive: true });
+      await mkdir(binDir, { recursive: true });
+      await mkdir(runtimeDir, { recursive: true });
+
+      await writeFile(
+        join(binDir, "launchctl"),
+        `#!/bin/sh
+case "$1" in
+  list)
+    if [ -f '${launchctlStatePath}' ]; then
+      printf '%s\n' 'loaded'
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`,
+        { encoding: "utf-8", mode: 0o755 },
+      );
+      await writeFile(launchctlStatePath, "loaded\n", "utf-8");
+      await writeFile(
+        join(runtimeDir, "daemon.state.json"),
+        JSON.stringify(
+          {
+            pid: 12345,
+            phase: "queued",
+            startedAt: "2026-03-08T10:00:00.000Z",
+            lastEventAt: "2026-03-08T10:01:00.000Z",
+            nextSyncAt: "2026-03-08T10:03:00.000Z",
+            lastOutcome: "success",
+            yamlPath,
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      await writeFile(
+        yamlPath,
+        applyManagedConfigHeader("version: 2\nall: {}\n", DEFAULT_DAEMON_HEADER_STATE),
+        "utf-8",
+      );
+
+      const daemonStatus = await runCommand(
+        dir,
+        [bunBinary, cliPath, "daemon", "status", "--json"],
+        {
+          BOOKMARKS_RUNTIME_DIR: runtimeDir,
+          BOOKMARKS_YAML_PATH: yamlPath,
+          HOME: homeDir,
+          PATH: `${binDir}:${process.env["PATH"] ?? ""}`,
+        },
+      );
+
+      expect(daemonStatus.exitCode).toBe(0);
+      const parsedStatus = parseJsonObject(daemonStatus.stdout);
+      expect(readBoolean(parsedStatus, "running")).toBe(true);
+      expect(readString(parsedStatus, "phase")).toBe("queued");
+      expect(readString(parsedStatus, "yamlPath")).toBe(yamlPath);
+      expect(await readDaemonHeaderState(yamlPath)).toEqual({
+        status: "running",
+        phase: "queued",
+        nextSyncAt: "2026-03-08T10:03:00.000Z",
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

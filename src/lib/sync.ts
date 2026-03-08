@@ -239,7 +239,7 @@ const advanceSyncBaseline = (
 
     const baselinePath = Paths.defaultSyncBaselinePath();
     yield* Effect.log(`Saving managed sync baseline to ${baselinePath}...`);
-    yield* YamlModule.save(baselinePath, config);
+    yield* YamlModule.saveStateFile(baselinePath, config);
   });
 
 /** Auto-commit bookmarks.yaml so the committed version becomes the new baseline. */

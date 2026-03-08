@@ -11,7 +11,6 @@ git clone git@github.com:jasonkuhrt/bookmarks.git
 cd bookmarks
 just install
 just schema
-just hooks-install
 ```
 
 Optional global launcher:
@@ -58,8 +57,11 @@ Relevant commands bootstrap what they can safely bootstrap:
 The YAML file can reference the adjacent schema with:
 
 ```yaml
+# machine-managed: bookmarks daemon status=stopped; phase=stopped
 # yaml-language-server: $schema=./bookmarks.schema.json
 ```
+
+The top machine-managed comment reflects daemon UX state such as `stopped`, `starting`, `queued`, `syncing`, or `idle`.
 
 You can refresh the repo copy and managed copy explicitly:
 
@@ -125,6 +127,7 @@ bookmarks doctor --json
 bookmarks validate [--json]
 bookmarks backup [--json]
 bookmarks gc [--max-age=90d] [--json]
+bookmarks daemon start|stop|status
 ```
 
 Notes:
@@ -137,6 +140,23 @@ Notes:
 - `backup` is available when you want an extra snapshot on demand.
 - `doctor` runs against the actual configured targets from `bookmarks.yaml`, not hardcoded default browser paths.
 - runtime locking still serializes concurrent sync runs.
+
+## Daemon
+
+`bookmarks daemon start` installs a launchd-managed watcher process.
+
+What it does:
+
+- watches `bookmarks.yaml`
+- queues a sync 60 seconds after the last file edit instead of syncing on every keystroke
+- updates the machine-managed header at the top of `bookmarks.yaml` with watcher state
+- uses the normal `bookmarks status` check before syncing, so no-op edits do not create sync backups
+
+Manual immediate sync stays explicit:
+
+```bash
+bookmarks sync
+```
 
 ## Global Install Notes
 
@@ -173,7 +193,6 @@ Quality gates:
 
 - `just pre-commit` runs format, lint, and type checks
 - `just pre-push` runs the full `bun run check` gate
-- native git hooks live under `.beads/hooks`
 
 Direct commands, if needed:
 

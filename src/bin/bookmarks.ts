@@ -10,7 +10,7 @@
  *   status      show current state
  *   backup      timestamped backups
  *   gc          clean graveyard
- *   daemon      launchd lifecycle
+ *   daemon      launchd watcher lifecycle
  *   validate    validate bookmarks.yaml
  */
 
@@ -37,8 +37,10 @@ class CliExitError extends Data.TaggedError("CliExitError")<{}> {
 }
 import * as Daemon from "../lib/daemon.ts";
 import * as Doctor from "../lib/doctor.ts";
+import { writeManagedConfigHeader } from "../lib/managed-config-header.ts";
 import * as ManagedPaths from "../lib/managed-paths.ts";
 import * as Paths from "../lib/paths.ts";
+import { BookmarksConfig, BookmarkTree } from "../lib/schema/__.ts";
 import * as SyncModule from "../lib/sync.ts";
 import * as Targets from "../lib/targets.ts";
 import { UnsupportedBookmarks } from "../lib/unsupported.ts";
@@ -64,7 +66,7 @@ Commands:
   bookmarks status [target...] [--json]  show current state
   bookmarks backup [--json]              timestamped backups
   bookmarks gc [--max-age=90d] [--json]  clean graveyard
-  bookmarks daemon start|stop|status     launchd lifecycle
+  bookmarks daemon start|stop|status     launchd watcher lifecycle
   bookmarks doctor [--json]              pre-flight diagnostics
   bookmarks validate [--json]            validate bookmarks.yaml
 `.trim();
@@ -155,6 +157,17 @@ const ensureManagedFiles = (
     }
 
     return { yamlPath, schemaPath };
+  });
+
+const ensureManagedYamlFile = (yamlPath: string): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    if (yield* pathExists(yamlPath)) return;
+    yield* YamlModule.save(
+      yamlPath,
+      BookmarksConfig.make({
+        all: BookmarkTree.make({}),
+      }),
+    );
   });
 
 const parseMaxAge = (
@@ -298,10 +311,18 @@ const serializeStatus = (status: SyncModule.StatusResult) => ({
 });
 
 const serializeDaemonStatus = (status: Daemon.DaemonStatus) => ({
+  phase: status.phase,
+  pid: status.pid ?? null,
+  startedAt: Option.isSome(status.startedAt) ? status.startedAt.value.toJSON() : null,
+  lastEventAt: Option.isSome(status.lastEventAt) ? status.lastEventAt.value.toJSON() : null,
+  lastSyncAt: Option.isSome(status.lastSyncAt) ? status.lastSyncAt.value.toJSON() : null,
+  lastOutcome: status.lastOutcome ?? null,
+  lastError: status.lastError ?? null,
   running: status.running,
-  lastRun: Option.isSome(status.lastRun) ? status.lastRun.value.toJSON() : null,
-  nextRun: Option.isSome(status.nextRun) ? status.nextRun.value.toJSON() : null,
+  nextSyncAt: Option.isSome(status.nextSyncAt) ? status.nextSyncAt.value.toJSON() : null,
   plistPath: status.plistPath,
+  statePath: status.statePath,
+  yamlPath: status.yamlPath,
 });
 
 const printSyncSummary = (
@@ -449,41 +470,81 @@ const program = Effect.gen(function* () {
       }
       switch (subcommand) {
         case "start": {
+          const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
+          yield* ensureManagedYamlFile(managed.yamlPath);
           const config = yield* Daemon.defaultConfig();
           yield* Daemon.start(config);
+          yield* Effect.tryPromise({
+            try: () =>
+              writeManagedConfigHeader(managed.yamlPath, {
+                status: "running",
+                phase: "starting",
+              }),
+            catch: (e) =>
+              new Error(
+                `Failed to update daemon header in ${managed.yamlPath}: ${unknownMessage(e)}`,
+              ),
+          });
           if (flags.json) {
             yield* printJson({
+              phase: "starting",
               running: true,
               plistPath: "~/Library/LaunchAgents/com.jasonkuhrt.bookmarks-sync.plist",
             });
           } else {
             yield* Console.log(
-              `Daemon started (interval: 1h, plist: ~/Library/LaunchAgents/com.jasonkuhrt.bookmarks-sync.plist)`,
+              "Daemon started. Sync queues 60 seconds after the last bookmarks.yaml edit.",
             );
           }
           break;
         }
         case "stop": {
+          const yamlPath = Paths.defaultYamlPath();
           yield* Daemon.stop();
+          yield* Effect.tryPromise({
+            try: () =>
+              writeManagedConfigHeader(yamlPath, {
+                status: "stopped",
+                phase: "stopped",
+              }),
+            catch: (e) =>
+              new Error(`Failed to update daemon header in ${yamlPath}: ${unknownMessage(e)}`),
+          }).pipe(Effect.catchAll(() => Effect.void));
           if (flags.json) {
             yield* printJson({ running: false });
           } else {
-            yield* Console.log("Daemon stopped and plist removed.");
+            yield* Console.log("Daemon stopped.");
           }
           break;
         }
         case "status": {
           const st = yield* Daemon.status();
+          yield* Effect.tryPromise({
+            try: () =>
+              writeManagedConfigHeader(st.yamlPath, Daemon.daemonHeaderStateFromStatus(st)),
+            catch: (e) =>
+              new Error(`Failed to update daemon header in ${st.yamlPath}: ${unknownMessage(e)}`),
+          }).pipe(Effect.catchAll(() => Effect.void));
           if (flags.json) {
             yield* printJson(serializeDaemonStatus(st));
           } else {
             const formatOptDate = (opt: Option.Option<DateTime.Utc>): string =>
               Option.isSome(opt) ? DateTime.formatIso(opt.value) : "unknown";
             yield* Console.log(`Daemon status:`);
-            yield* Console.log(`  Running:  ${st.running ? "yes" : "no"}`);
-            yield* Console.log(`  Last run: ${formatOptDate(st.lastRun)}`);
-            yield* Console.log(`  Next run: ${formatOptDate(st.nextRun)}`);
-            yield* Console.log(`  Plist:    ${st.plistPath}`);
+            yield* Console.log(`  Running:    ${st.running ? "yes" : "no"}`);
+            yield* Console.log(`  Phase:      ${st.phase}`);
+            yield* Console.log(`  PID:        ${st.pid ?? "unknown"}`);
+            yield* Console.log(`  Started:    ${formatOptDate(st.startedAt)}`);
+            yield* Console.log(`  Last edit:  ${formatOptDate(st.lastEventAt)}`);
+            yield* Console.log(`  Last sync:  ${formatOptDate(st.lastSyncAt)}`);
+            yield* Console.log(`  Next sync:  ${formatOptDate(st.nextSyncAt)}`);
+            yield* Console.log(`  Outcome:    ${st.lastOutcome ?? "unknown"}`);
+            yield* Console.log(`  YAML:       ${st.yamlPath}`);
+            yield* Console.log(`  State:      ${st.statePath}`);
+            yield* Console.log(`  Plist:      ${st.plistPath}`);
+            if (st.lastError) {
+              yield* Console.log(`  Last error: ${st.lastError}`);
+            }
           }
           break;
         }

@@ -68,6 +68,9 @@ describe("paths", () => {
     expect(Paths.defaultSyncLockPath()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "runtime", "sync.lock.json"),
     );
+    expect(Paths.defaultDaemonStatePath()).toBe(
+      join(homedir(), ".local", "state", "bookmarks", "runtime", "daemon.state.json"),
+    );
     expect(Paths.defaultSafariPlistPath()).toBe(join(homedir(), "Library/Safari/Bookmarks.plist"));
     expect(Paths.defaultSafariTabsDbPath()).toBe(
       join(homedir(), "Library/Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db"),
@@ -119,6 +122,7 @@ describe("paths", () => {
     expect(Paths.defaultBackupDir()).toBe("/tmp/custom-backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/custom-runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/custom-runtime/sync.lock.json");
+    expect(Paths.defaultDaemonStatePath()).toBe("/tmp/custom-runtime/daemon.state.json");
     expect(Paths.defaultSafariPlistPath()).toBe("/tmp/Safari/Bookmarks.plist");
     expect(Paths.defaultSafariTabsDbPath()).toBe("/tmp/Safari/SafariTabs.db");
     expect(Paths.defaultChromeDataDir()).toBe("/tmp/Chrome");

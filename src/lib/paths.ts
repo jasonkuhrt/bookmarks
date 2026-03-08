@@ -30,6 +30,8 @@ export const defaultRuntimeDir = (): string =>
 
 export const defaultSyncLockPath = (): string => join(defaultRuntimeDir(), "sync.lock.json");
 
+export const defaultDaemonStatePath = (): string => join(defaultRuntimeDir(), "daemon.state.json");
+
 export const defaultSafariPlistPath = (): string =>
   process.env["BOOKMARKS_SAFARI_PLIST_PATH"] ?? join(homedir(), "Library/Safari/Bookmarks.plist");
 

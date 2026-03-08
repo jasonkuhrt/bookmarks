@@ -1,76 +1,105 @@
 /**
- * Launchd daemon lifecycle.
+ * Launchd-managed watcher daemon lifecycle.
  *
- * Generates, installs, loads, and unloads a launchd plist for
- * periodic bookmark sync. No hand-editing plist files -- the CLI owns the lifecycle.
+ * The launch agent owns a long-lived watcher process. The watcher queues a
+ * sync 60 seconds after the last semantic config-file edit and records runtime
+ * state in the managed runtime directory for CLI status and config-file UX.
  */
 
-import { DateTime, Duration, Effect, Option, pipe } from "effect";
+import { DateTime, Effect, Option, pipe } from "effect";
 import { execFile } from "node:child_process";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
-
-// -- Constants --
+import {
+  type DaemonHeaderState,
+  type DaemonPhase,
+  isDaemonPhase,
+} from "./managed-config-header.ts";
+import * as Paths from "./paths.ts";
 
 const LABEL = "com.jasonkuhrt.bookmarks-sync";
 const PLIST_FILENAME = `${LABEL}.plist`;
+const FORWARDED_ENVIRONMENT_KEYS = [
+  "HOME",
+  "PATH",
+  "XDG_CONFIG_HOME",
+  "XDG_STATE_HOME",
+  "BOOKMARKS_CONFIG_DIR",
+  "BOOKMARKS_STATE_DIR",
+  "BOOKMARKS_YAML_PATH",
+  "BOOKMARKS_SCHEMA_PATH",
+  "BOOKMARKS_SYNC_BASELINE_PATH",
+  "BOOKMARKS_BACKUP_DIR",
+  "BOOKMARKS_RUNTIME_DIR",
+  "BOOKMARKS_SAFARI_PLIST_PATH",
+  "BOOKMARKS_SAFARI_TABS_DB_PATH",
+  "BOOKMARKS_CHROME_DATA_DIR",
+  "BOOKMARKS_CHROME_BOOKMARKS_PATH",
+  "BOOKMARKS_FORCE_BROWSER_RUNNING",
+  "BOOKMARKS_DAEMON_SYNC_DELAY_MS",
+] as const;
+
+type DaemonOutcome = "deferred" | "failed" | "noop" | "success";
+
+export interface DaemonConfig {
+  readonly bunPath: string;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly logDir: string;
+  readonly runnerPath: string;
+  readonly workingDir: string;
+}
+
+interface DaemonRuntimeState {
+  readonly lastError?: string;
+  readonly lastEventAt?: string;
+  readonly lastOutcome?: DaemonOutcome;
+  readonly lastSyncAt?: string;
+  readonly nextSyncAt?: string;
+  readonly phase: DaemonPhase;
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly yamlPath: string;
+}
+
+export interface DaemonStatus {
+  readonly lastError: string | undefined;
+  readonly lastEventAt: Option.Option<DateTime.Utc>;
+  readonly lastOutcome: DaemonOutcome | undefined;
+  readonly lastSyncAt: Option.Option<DateTime.Utc>;
+  readonly nextSyncAt: Option.Option<DateTime.Utc>;
+  readonly phase: DaemonPhase;
+  readonly pid: number | undefined;
+  readonly plistPath: string;
+  readonly running: boolean;
+  readonly startedAt: Option.Option<DateTime.Utc>;
+  readonly statePath: string;
+  readonly yamlPath: string;
+}
+
 const homeDir = (): string => process.env["HOME"] ?? "";
 const plistDir = (): string => Path.join(homeDir(), "Library/LaunchAgents");
 const plistPath = (): string => Path.join(plistDir(), PLIST_FILENAME);
 const defaultLogDir = (): string => Path.join(homeDir(), "Library/Logs/bookmarks-sync");
-const stdoutLogPath = (): string => Path.join(defaultLogDir(), "bookmarks-sync.log");
+const defaultRunnerPath = (): string =>
+  process.env["BOOKMARKS_DAEMON_RUNNER_PATH"] ??
+  Path.resolve(import.meta.dirname, "../bin/bookmarks-daemon.ts");
+const defaultCliPath = (): string =>
+  process.env["BOOKMARKS_DAEMON_CLI_PATH"] ??
+  Path.resolve(import.meta.dirname, "../bin/bookmarks.ts");
 
-// -- Types --
+const messageFromUnknown = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
-export interface DaemonConfig {
-  /** Sync interval. Default: 1 hour. */
-  readonly interval: Duration.Duration;
-  /** Directory for stdout/stderr logs. */
-  readonly logDir: string;
-  /** Working directory for the sync process. */
-  readonly workingDir: string;
-  /** Absolute path to the bun binary. */
-  readonly bunPath: string;
-}
+const hasCode = (error: unknown, code: string): boolean =>
+  typeof error === "object" && error !== null && "code" in error && error.code === code;
 
-export interface DaemonStatus {
-  readonly running: boolean;
-  readonly lastRun: Option.Option<DateTime.Utc>;
-  readonly nextRun: Option.Option<DateTime.Utc>;
-  readonly plistPath: string;
-}
-
-// -- Helpers --
-
-const execFileEffect = (cmd: string, args: readonly string[]): Effect.Effect<string, Error> =>
-  Effect.tryPromise({
-    try: () =>
-      new Promise<string>((resolve, reject) => {
-        execFile(cmd, [...args], { encoding: "utf-8" }, (err, stdout) => {
-          if (err) reject(err);
-          else resolve(stdout);
-        });
-      }),
-    catch: (e) => new Error(`${cmd} ${args.join(" ")} failed`, { cause: e }),
-  });
-
-const writeFile = (filePath: string, content: string): Effect.Effect<void, Error> =>
-  Effect.tryPromise({
-    try: () => Fs.writeFile(filePath, content, "utf-8"),
-    catch: () => new Error(`Failed to write ${filePath}`),
-  });
-
-const removeFile = (filePath: string): Effect.Effect<void, Error> =>
-  Effect.tryPromise({
-    try: () => Fs.rm(filePath, { force: true }),
-    catch: () => new Error(`Failed to remove ${filePath}`),
-  });
-
-const mkdir = (dir: string): Effect.Effect<void, Error> =>
-  Effect.tryPromise({
-    try: () => Fs.mkdir(dir, { recursive: true }),
-    catch: () => new Error(`Failed to create directory ${dir}`),
-  }).pipe(Effect.asVoid);
+const escapeXml = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 
 const fileExists = (filePath: string): Effect.Effect<boolean, Error> =>
   Effect.tryPromise({
@@ -82,84 +111,208 @@ const fileExists = (filePath: string): Effect.Effect<boolean, Error> =>
         return false;
       }
     },
-    catch: () => new Error(`Failed to check ${filePath}`),
+    catch: (error) => new Error(`Failed to inspect ${filePath}: ${messageFromUnknown(error)}`),
+  });
+
+const mkdir = (dir: string): Effect.Effect<void, Error> =>
+  Effect.tryPromise({
+    try: () => Fs.mkdir(dir, { recursive: true }),
+    catch: (error) => new Error(`Failed to create directory ${dir}: ${messageFromUnknown(error)}`),
+  }).pipe(Effect.asVoid);
+
+const writeFile = (filePath: string, content: string): Effect.Effect<void, Error> =>
+  Effect.tryPromise({
+    try: () => Fs.writeFile(filePath, content, "utf-8"),
+    catch: (error) => new Error(`Failed to write ${filePath}: ${messageFromUnknown(error)}`),
+  });
+
+const removeFile = (filePath: string): Effect.Effect<void, Error> =>
+  Effect.tryPromise({
+    try: () => Fs.rm(filePath, { force: true }),
+    catch: (error) => new Error(`Failed to remove ${filePath}: ${messageFromUnknown(error)}`),
+  });
+
+const execFileEffect = (cmd: string, args: readonly string[]): Effect.Effect<string, Error> =>
+  Effect.tryPromise({
+    try: () =>
+      new Promise<string>((resolve, reject) => {
+        execFile(cmd, [...args], { encoding: "utf-8" }, (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout);
+        });
+      }),
+    catch: (error) =>
+      new Error(`${cmd} ${args.join(" ")} failed: ${messageFromUnknown(error)}`, {
+        cause: error,
+      }),
   });
 
 const resolveBunPath = (): Effect.Effect<string, Error> =>
   pipe(
     execFileEffect("which", ["bun"]),
-    Effect.map((s) => s.trim()),
+    Effect.map((stdout) => stdout.trim()),
     Effect.catchAll(() => Effect.succeed(process.execPath)),
   );
 
-// -- Plist generation --
+const forwardedEnvironment = (): Record<string, string> =>
+  FORWARDED_ENVIRONMENT_KEYS.reduce<Record<string, string>>(
+    (environment, key) => {
+      const value = process.env[key];
+      if (value) environment[key] = value;
+      return environment;
+    },
+    {
+      BOOKMARKS_DAEMON_CLI_PATH: defaultCliPath(),
+    },
+  );
 
-/** Generate a launchd plist XML string from the given config. */
+const statePath = (): string => Paths.defaultDaemonStatePath();
+
+const toUtcOption = (value: string | undefined): Option.Option<DateTime.Utc> =>
+  value ? pipe(DateTime.make(value), Option.map(DateTime.toUtc)) : Option.none<DateTime.Utc>();
+
+const readRuntimeState = (): Effect.Effect<DaemonRuntimeState | undefined, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        const raw = await Fs.readFile(statePath(), "utf-8");
+        return decodeRuntimeState(JSON.parse(raw) as unknown);
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      }
+    },
+    catch: (error) =>
+      new Error(`Failed to read daemon state at ${statePath()}: ${messageFromUnknown(error)}`),
+  });
+
+export const daemonHeaderStateFromStatus = (status: DaemonStatus): DaemonHeaderState => ({
+  status: status.running ? "running" : "stopped",
+  phase: status.running ? status.phase : "stopped",
+  ...(Option.isSome(status.nextSyncAt)
+    ? { nextSyncAt: DateTime.formatIso(status.nextSyncAt.value) }
+    : {}),
+});
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const decodeRuntimeState = (value: unknown): DaemonRuntimeState => {
+  if (!isRecord(value)) {
+    throw new Error("Daemon state file is not a JSON object");
+  }
+  const phase = value["phase"];
+  const parsedPhase = typeof phase === "string" ? phase : undefined;
+  const pid = value["pid"];
+  const startedAt = value["startedAt"];
+  const yamlPath = value["yamlPath"];
+  if (
+    !isDaemonPhase(parsedPhase) ||
+    typeof pid !== "number" ||
+    typeof startedAt !== "string" ||
+    typeof yamlPath !== "string"
+  ) {
+    throw new Error("Daemon state file is missing required fields");
+  }
+  if (
+    (value["lastError"] !== undefined && typeof value["lastError"] !== "string") ||
+    (value["lastEventAt"] !== undefined && typeof value["lastEventAt"] !== "string") ||
+    (value["lastOutcome"] !== undefined &&
+      value["lastOutcome"] !== "deferred" &&
+      value["lastOutcome"] !== "failed" &&
+      value["lastOutcome"] !== "noop" &&
+      value["lastOutcome"] !== "success") ||
+    (value["lastSyncAt"] !== undefined && typeof value["lastSyncAt"] !== "string") ||
+    (value["nextSyncAt"] !== undefined && typeof value["nextSyncAt"] !== "string")
+  ) {
+    throw new Error("Daemon state file has invalid optional fields");
+  }
+
+  return {
+    phase: parsedPhase,
+    pid,
+    startedAt,
+    yamlPath,
+    ...(value["lastError"] ? { lastError: value["lastError"] } : {}),
+    ...(value["lastEventAt"] ? { lastEventAt: value["lastEventAt"] } : {}),
+    ...(value["lastOutcome"] ? { lastOutcome: value["lastOutcome"] as DaemonOutcome } : {}),
+    ...(value["lastSyncAt"] ? { lastSyncAt: value["lastSyncAt"] } : {}),
+    ...(value["nextSyncAt"] ? { nextSyncAt: value["nextSyncAt"] } : {}),
+  };
+};
+
 export const generatePlist = (config: DaemonConfig): string => {
-  const intervalSeconds = Math.round(Duration.toSeconds(config.interval));
+  const environmentEntries = Object.entries(config.environment).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
   const stdoutLog = Path.join(config.logDir, "bookmarks-sync.log");
   const stderrLog = Path.join(config.logDir, "bookmarks-sync.error.log");
+  const environmentBlock =
+    environmentEntries.length === 0
+      ? ""
+      : `    <key>EnvironmentVariables</key>
+    <dict>
+${environmentEntries
+  .map(
+    ([key, value]) =>
+      `        <key>${escapeXml(key)}</key>\n        <string>${escapeXml(value)}</string>`,
+  )
+  .join("\n")}
+    </dict>
+`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${LABEL}</string>
+    <string>${escapeXml(LABEL)}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${config.bunPath}</string>
-        <string>run</string>
-        <string>bookmarks</string>
-        <string>sync</string>
+        <string>${escapeXml(config.bunPath)}</string>
+        <string>${escapeXml(config.runnerPath)}</string>
     </array>
-    <key>StartInterval</key>
-    <integer>${intervalSeconds}</integer>
+${environmentBlock}    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StandardOutPath</key>
-    <string>${stdoutLog}</string>
+    <string>${escapeXml(stdoutLog)}</string>
     <key>StandardErrorPath</key>
-    <string>${stderrLog}</string>
+    <string>${escapeXml(stderrLog)}</string>
     <key>WorkingDirectory</key>
-    <string>${config.workingDir}</string>
+    <string>${escapeXml(config.workingDir)}</string>
 </dict>
 </plist>
 `;
 };
 
-// -- Default config --
-
-/** Build a DaemonConfig with sensible defaults. */
 export const defaultConfig = (): Effect.Effect<DaemonConfig, Error> =>
   Effect.gen(function* () {
     const bunPath = yield* resolveBunPath();
-    const workingDir = Path.resolve(import.meta.dirname, "../..");
     return {
-      interval: Duration.hours(1),
-      logDir: defaultLogDir(),
-      workingDir,
       bunPath,
+      environment: forwardedEnvironment(),
+      logDir: defaultLogDir(),
+      runnerPath: defaultRunnerPath(),
+      workingDir: Path.resolve(import.meta.dirname, "../.."),
     };
   });
 
-// -- Lifecycle --
-
-/** Generate + install + load the launchd plist. */
 export const start = (config: DaemonConfig): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    // Ensure directories exist
     yield* mkdir(plistDir());
     yield* mkdir(config.logDir);
 
-    // Generate and write plist
-    const plistContent = generatePlist(config);
     const installedPlistPath = plistPath();
-    yield* writeFile(installedPlistPath, plistContent);
-
-    // Load via launchctl
+    yield* pipe(
+      execFileEffect("launchctl", ["unload", installedPlistPath]),
+      Effect.catchAll(() => Effect.void),
+    );
+    yield* writeFile(installedPlistPath, generatePlist(config));
     yield* execFileEffect("launchctl", ["load", installedPlistPath]);
   });
 
-/** Unload the launchd plist and remove the file. */
 export const stop = (): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     const installedPlistPath = plistPath();
@@ -170,87 +323,43 @@ export const stop = (): Effect.Effect<void, Error> =>
       );
     }
 
-    // Unload via launchctl (ignore error if not loaded)
     yield* pipe(
       execFileEffect("launchctl", ["unload", installedPlistPath]),
       Effect.catchAll(() => Effect.void),
     );
-
-    // Remove plist file
     yield* removeFile(installedPlistPath);
+    yield* pipe(
+      removeFile(statePath()),
+      Effect.catchAll(() => Effect.void),
+    );
   });
 
-/** Check daemon status: running, last run, next run. */
 export const status = (): Effect.Effect<DaemonStatus, Error> =>
   Effect.gen(function* () {
-    // Check if the label is loaded in launchctl
     const running = yield* pipe(
       execFileEffect("launchctl", ["list", LABEL]),
       Effect.map(() => true),
       Effect.catchAll(() => Effect.succeed(false)),
     );
-
-    // Parse last run from stdout log (last line with a timestamp)
-    const lastRun = yield* pipe(
-      Effect.tryPromise({
-        try: () => Fs.readFile(stdoutLogPath(), "utf-8"),
-        catch: () => new Error("Failed to read log"),
-      }),
-      Effect.map((content) => parseLastRunTimestamp(content)),
-      Effect.catchAll(() => Effect.succeed(Option.none<DateTime.Utc>())),
-    );
-
-    // Compute next run: lastRun + interval from plist (or none if not running)
-    const nextRun = yield* pipe(
-      running
-        ? pipe(
-            readIntervalFromPlist(),
-            Effect.map((intervalSeconds) =>
-              Option.map(lastRun, (last) =>
-                DateTime.addDuration(last, Duration.seconds(intervalSeconds)),
-              ),
-            ),
-          )
-        : Effect.succeed(Option.none<DateTime.Utc>()),
-      Effect.catchAll(() => Effect.succeed(Option.none<DateTime.Utc>())),
+    const runtimeState = yield* pipe(
+      readRuntimeState(),
+      Effect.catchAll(() => Effect.succeed(undefined)),
     );
 
     return {
+      lastError: runtimeState?.lastError,
+      lastEventAt: toUtcOption(runtimeState?.lastEventAt),
+      lastOutcome: runtimeState?.lastOutcome,
+      lastSyncAt: toUtcOption(runtimeState?.lastSyncAt),
+      nextSyncAt: toUtcOption(runtimeState?.nextSyncAt),
+      phase: running ? (runtimeState?.phase ?? "starting") : "stopped",
+      pid: runtimeState?.pid,
+      plistPath: installedPlistPath(),
       running,
-      lastRun,
-      nextRun,
-      plistPath: plistPath(),
+      startedAt: toUtcOption(runtimeState?.startedAt),
+      statePath: statePath(),
+      yamlPath: runtimeState?.yamlPath ?? Paths.defaultYamlPath(),
     };
   });
 
-// -- Internal helpers --
-
-/** Parse the most recent timestamp from the sync log. */
-const parseLastRunTimestamp = (logContent: string): Option.Option<DateTime.Utc> => {
-  // Look for ISO-8601 timestamps or "Sync complete" lines with dates
-  const lines = logContent.trim().split("\n").reverse();
-  for (const line of lines) {
-    // Try to find an ISO timestamp at the start of a line
-    const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?)/);
-    const isoTimestamp = isoMatch?.[1];
-    if (isoTimestamp) {
-      return pipe(DateTime.make(isoTimestamp), Option.map(DateTime.toUtc));
-    }
-    // Fallback: try the modification time approach -- we'll use file stat instead
-  }
-  return Option.none();
-};
-
-/** Read the StartInterval from the installed plist file. */
-const readIntervalFromPlist = (): Effect.Effect<number, Error> =>
-  pipe(
-    Effect.tryPromise({
-      try: () => Fs.readFile(plistPath(), "utf-8"),
-      catch: () => new Error("Failed to read plist"),
-    }),
-    Effect.flatMap((content) => {
-      const match = content.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
-      if (!match) return Effect.fail(new Error("StartInterval not found in plist"));
-      return Effect.succeed(Number(match[1]));
-    }),
-  );
+const installedPlistPath = (): string => plistPath();

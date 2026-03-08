@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SCHEMA_MODELINE } from "./managed-config-header.ts";
 import {
   BookmarkFolder,
   BookmarkLeaf,
@@ -163,8 +164,33 @@ describe("yaml", () => {
 
       await run(YamlModule.save(yamlPath, config));
       const loaded = await run(YamlModule.load(yamlPath));
+      const saved = await readFile(yamlPath, "utf-8");
 
       expect(loaded).toEqual(config);
+      expect(saved).toStartWith(
+        "# machine-managed: bookmarks daemon status=stopped; phase=stopped\n",
+      );
+      expect(saved).toContain(`${SCHEMA_MODELINE}\nversion: 2\n`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("saveStateFile writes plain YAML without the managed config header", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-yaml-state-"));
+    const yamlPath = join(dir, "sync-baseline.yaml");
+
+    try {
+      const config = BookmarksConfig.make({
+        all: new BookmarkTree({}),
+      });
+
+      await run(YamlModule.saveStateFile(yamlPath, config));
+      const saved = await readFile(yamlPath, "utf-8");
+
+      expect(saved).toStartWith("version: 2\n");
+      expect(saved).not.toContain("machine-managed: bookmarks daemon");
+      expect(saved).not.toContain(SCHEMA_MODELINE);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

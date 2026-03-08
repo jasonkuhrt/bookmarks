@@ -8,6 +8,11 @@
 import { Effect, Schema } from "effect";
 import * as Yaml from "yaml";
 import * as Fs from "node:fs/promises";
+import {
+  applyManagedConfigHeader,
+  DEFAULT_DAEMON_HEADER_STATE,
+  readDaemonHeaderState,
+} from "./managed-config-header.ts";
 import * as ManagedPaths from "./managed-paths.ts";
 import type { BookmarkSection } from "./schema/__.ts";
 import {
@@ -266,35 +271,66 @@ export const load = (path: string): Effect.Effect<BookmarksConfig, Error> =>
     return yield* decodeDocument(parsed, path);
   });
 
-const SCHEMA_MODELINE = "# yaml-language-server: $schema=./bookmarks.schema.json\n";
+interface SaveOptions {
+  readonly managedHeader: boolean;
+}
+
+const defaultSaveOptions: SaveOptions = {
+  managedHeader: true,
+};
+
+const encodeConfig = (config: BookmarksConfig): Effect.Effect<unknown, Error> =>
+  Schema.encode(BookmarksConfig)(
+    BookmarksConfig.make({
+      version: 2,
+      all: config.all,
+      safari: config.safari ? SafariBookmarks.make(config.safari) : undefined,
+      chrome: config.chrome
+        ? ChromeBookmarks.make({
+            enabled: config.chrome.enabled,
+            bar: config.chrome.bar,
+            menu: config.chrome.menu,
+            mobile: config.chrome.mobile,
+            profiles: config.chrome.profiles
+              ? Object.fromEntries(
+                  Object.entries(config.chrome.profiles).map(([profile, profileConfig]) => [
+                    profile,
+                    ChromeProfileBookmarks.make(profileConfig),
+                  ]),
+                )
+              : undefined,
+          })
+        : undefined,
+    }),
+  ).pipe(Effect.mapError((e) => new Error(`Schema encoding failed: ${e.message}`)));
 
 /** Write a BookmarksConfig back to bookmarks.yaml. */
 export const save = (path: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
+  saveWithOptions(path, config, defaultSaveOptions);
+
+export const saveStateFile = (path: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
+  saveWithOptions(path, config, {
+    managedHeader: false,
+  });
+
+const saveWithOptions = (
+  path: string,
+  config: BookmarksConfig,
+  options: SaveOptions,
+): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const encoded = yield* Schema.encode(BookmarksConfig)(
-      BookmarksConfig.make({
-        version: 2,
-        all: config.all,
-        safari: config.safari ? SafariBookmarks.make(config.safari) : undefined,
-        chrome: config.chrome
-          ? ChromeBookmarks.make({
-              enabled: config.chrome.enabled,
-              bar: config.chrome.bar,
-              menu: config.chrome.menu,
-              mobile: config.chrome.mobile,
-              profiles: config.chrome.profiles
-                ? Object.fromEntries(
-                    Object.entries(config.chrome.profiles).map(([profile, profileConfig]) => [
-                      profile,
-                      ChromeProfileBookmarks.make(profileConfig),
-                    ]),
-                  )
-                : undefined,
-            })
-          : undefined,
-      }),
-    ).pipe(Effect.mapError((e) => new Error(`Schema encoding failed: ${e.message}`)));
-    const yamlStr = SCHEMA_MODELINE + Yaml.stringify(encoded, { indent: 2 });
+    const encoded = yield* encodeConfig(config);
+    const body = Yaml.stringify(encoded, { indent: 2 });
+    const existingHeader = options.managedHeader
+      ? yield* Effect.tryPromise({
+          try: () => readDaemonHeaderState(path),
+          catch: (error) =>
+            new Error(`Failed to inspect managed header at ${path}: ${messageFromUnknown(error)}`),
+        })
+      : undefined;
+    const yamlStr = options.managedHeader
+      ? applyManagedConfigHeader(body, existingHeader ?? DEFAULT_DAEMON_HEADER_STATE)
+      : body;
     yield* ManagedPaths.ensureParentDir(path);
     yield* Effect.tryPromise({
       try: () => Fs.writeFile(path, yamlStr, "utf-8"),
