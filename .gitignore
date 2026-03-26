@@ -3,7 +3,3 @@ coverage/
 build/
 *.log
 .serena/
-
-# Dolt database files (added by bd init)
-.dolt/
-*.db

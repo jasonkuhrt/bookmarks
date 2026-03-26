@@ -56,6 +56,3 @@ pre-commit: format-check lint typecheck
 pre-push: check
 
 quality: check
-
-hooks-install:
-  git config core.hooksPath .beads/hooks
