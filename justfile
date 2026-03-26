@@ -6,6 +6,9 @@ default:
 install:
   bun install
 
+hooks-install:
+  git-hooks install
+
 install-global:
   bun install -g .
 

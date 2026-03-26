@@ -180,6 +180,7 @@ Primary workflows are exposed through the root `justfile`:
 
 ```bash
 just install
+just hooks-install
 just install-global
 just build
 just schema
@@ -193,6 +194,7 @@ Quality gates:
 
 - `just pre-commit` runs format, lint, and type checks
 - `just pre-push` runs the full `bun run check` gate
+- tracked `.git-hooks/pre-commit.d/` hooks run staged formatting and linting, staged core-module coverage, staged type checks, and safety guards once `just hooks-install` has been run
 
 Direct commands, if needed:
 
