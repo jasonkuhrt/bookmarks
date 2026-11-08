@@ -14,6 +14,9 @@ import { Effect } from "effect";
 import * as Paths from "../lib/paths.ts";
 import * as Permissions from "../lib/permissions.ts";
 import * as Targets from "../lib/targets.ts";
+import * as Canonical from "../lib/canonical.ts";
+import * as Chrome from "../lib/chrome.ts";
+import * as Safari from "../lib/safari.ts";
 
 const DEFAULT_SYNC_DELAY_MS = 60_000;
 const BUSY_RETRY_DELAY_MS = 5_000;
@@ -115,14 +118,33 @@ const daemonBrowserExitPollMs = (): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : BROWSER_EXIT_POLL_MS;
 };
 
-/** The bookmark files of every discovered browser target, which a browser edit rewrites. */
-const browserBookmarkFiles = async (): Promise<readonly string[]> => {
+/** Every discovered browser target, whose bookmark file a browser edit rewrites. */
+const browserTargets = async (): Promise<readonly Targets.TargetDescriptor[]> => {
   try {
-    const targets = await Effect.runPromise(Targets.discoverTargets());
-    return targets.map((target) => target.path);
+    return await Effect.runPromise(Targets.discoverTargets());
   } catch (error) {
     console.error(`Failed to discover browser bookmark files: ${messageFromUnknown(error)}`);
     return [];
+  }
+};
+
+/**
+ * The bookmarks a browser's file holds, in canonical form. Browsers also rewrite the file for
+ * metadata (Chrome Sync's state, last-used times), which must not queue a sync. Undefined when
+ * the file can't be read, which counts as a change.
+ */
+const bookmarksFingerprint = async (
+  target: Targets.TargetDescriptor,
+): Promise<string | undefined> => {
+  try {
+    const tree = await Effect.runPromise(
+      target.browser === "safari"
+        ? Safari.readBookmarks(target.path)
+        : Chrome.readBookmarks(target.path),
+    );
+    return JSON.stringify(Canonical.canonicalTree(tree));
+  } catch {
+    return undefined;
   }
 };
 
@@ -387,7 +409,11 @@ const runWatcherProcess = async (): Promise<never> => {
     await scheduleSync(delayMs);
   };
 
-  const onBrowserChange = async () => {
+  const fingerprints = new Map<string, string | undefined>();
+  const onBrowserChange = async (target: Targets.TargetDescriptor) => {
+    const fingerprint = await bookmarksFingerprint(target);
+    if (fingerprint !== undefined && fingerprint === fingerprints.get(target.path)) return;
+    fingerprints.set(target.path, fingerprint);
     errorRetryCount = 0;
     await scheduleSync(delayMs, new Date().toISOString());
   };
@@ -429,13 +455,17 @@ const runWatcherProcess = async (): Promise<never> => {
    * is picked up without a restart.
    */
   const watchBrowserFiles = async () => {
-    for (const filePath of await browserBookmarkFiles()) {
-      if (watchedBrowserFiles.has(filePath)) continue;
+    const targets = await browserTargets();
+    const current = await Promise.all(targets.map(bookmarksFingerprint));
+    for (const [index, target] of targets.entries()) {
+      // What the browser holds now is what the sync just saw or wrote.
+      fingerprints.set(target.path, current[index]);
+      if (watchedBrowserFiles.has(target.path)) continue;
       try {
-        watchers.push(watchFile(filePath, onBrowserChange));
-        watchedBrowserFiles.add(filePath);
+        watchers.push(watchFile(target.path, () => onBrowserChange(target)));
+        watchedBrowserFiles.add(target.path);
       } catch (error) {
-        console.error(`Failed to watch ${filePath}: ${messageFromUnknown(error)}`);
+        console.error(`Failed to watch ${target.path}: ${messageFromUnknown(error)}`);
       }
     }
   };

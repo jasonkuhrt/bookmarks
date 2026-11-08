@@ -624,7 +624,7 @@ const program = Effect.gen(function* () {
               yield* Console.log(`  Last error: ${st.lastError}`);
               if (/operation not permitted/i.test(st.lastError)) {
                 yield* Console.log(
-                  `  macOS denied a read. Give Full Disk Access to ${st.launcherPath}, then run bookmarks daemon start.`,
+                  `  macOS denied a read. Give Full Disk Access to ${st.launcherPath}; the daemon retries on its own.`,
                 );
               }
             }

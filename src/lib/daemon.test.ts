@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { serialize } from "@plist/binary.serialize";
 import { DateTime, Effect, Option } from "effect";
 import {
   access,
@@ -546,11 +547,79 @@ console.log(reply);
     }
   });
 
-  test("watcher syncs after Chrome or Safari rewrites its bookmark file", async () => {
+  test("watcher syncs when Chrome's or Safari's bookmarks change, not when only their metadata does", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-browsers-"));
     const chromeDataDir = join(dir, "Chrome");
     const chromePath = join(chromeDataDir, "Default", "Bookmarks");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
+    const chromeFile = (
+      bar: readonly { readonly name: string; readonly url: string }[],
+      syncMetadata: string,
+    ) =>
+      JSON.stringify({
+        checksum: "",
+        version: 1,
+        sync_metadata: syncMetadata,
+        roots: {
+          bookmark_bar: {
+            type: "folder",
+            name: "Bookmarks Bar",
+            id: "1",
+            guid: "bar",
+            date_added: "0",
+            date_modified: "0",
+            children: bar.map((bookmark, index) => ({
+              type: "url",
+              id: String(index + 10),
+              guid: `leaf-${index}`,
+              date_added: "0",
+              ...bookmark,
+            })),
+          },
+          other: {
+            type: "folder",
+            name: "Other Bookmarks",
+            id: "2",
+            guid: "other",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+          synced: {
+            type: "folder",
+            name: "Mobile Bookmarks",
+            id: "3",
+            guid: "mobile",
+            date_added: "0",
+            date_modified: "0",
+            children: [],
+          },
+        },
+      });
+    const safariFile = (title: string) =>
+      new Uint8Array(
+        serialize({
+          Children: [
+            {
+              WebBookmarkType: "WebBookmarkTypeList",
+              Title: "BookmarksBar",
+              Children: [
+                {
+                  WebBookmarkType: "WebBookmarkTypeLeaf",
+                  URLString: "https://a.example/",
+                  URIDictionary: { title },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    // Browsers save through a temporary file they rename over the real one.
+    const replace = async (path: string, contents: string | Uint8Array) => {
+      await writeFile(`${path}.tmp`, contents);
+      await rename(`${path}.tmp`, path);
+    };
+
     try {
       await mkdir(join(chromeDataDir, "Default"), { recursive: true });
       await mkdir(join(dir, "Safari"), { recursive: true });
@@ -558,8 +627,8 @@ console.log(reply);
         join(chromeDataDir, "Local State"),
         JSON.stringify({ profile: { info_cache: { Default: {} } } }),
       );
-      await writeFile(chromePath, "{}");
-      await writeFile(safariPath, "plist");
+      await writeFile(chromePath, chromeFile([{ name: "A", url: "https://a.example/" }], "one"));
+      await writeFile(safariPath, safariFile("A"));
       const cli = await writeFakeCli(dir, [syncDone]);
       const proc = await startWatcher(dir, cli.path, {
         BOOKMARKS_DAEMON_SYNC_DELAY_MS: "100",
@@ -568,15 +637,17 @@ console.log(reply);
       });
       try {
         await waitFor(async () => (await cli.syncs()) === 1);
-        await Bun.sleep(200);
+        await Bun.sleep(300);
 
-        // Chrome saves through a temporary file it renames over Bookmarks.
-        await writeFile(`${chromePath}.tmp`, '{"edited":true}');
-        await rename(`${chromePath}.tmp`, chromePath);
+        await replace(chromePath, chromeFile([{ name: "A", url: "https://a.example/" }], "two"));
+        await Bun.sleep(600);
+        expect(await cli.syncs()).toBe(1);
+
+        await replace(chromePath, chromeFile([{ name: "B", url: "https://a.example/" }], "two"));
         await waitFor(async () => (await cli.syncs()) === 2);
 
-        await Bun.sleep(200);
-        await writeFile(safariPath, "edited plist");
+        await Bun.sleep(300);
+        await replace(safariPath, safariFile("Renamed in Safari"));
         await waitFor(async () => (await cli.syncs()) === 3);
       } finally {
         await stopWatcher(proc);
