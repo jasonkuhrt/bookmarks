@@ -10,7 +10,7 @@ import {
   stripManagedConfigHeader,
   writeManagedConfigHeader,
 } from "../lib/managed-config-header.ts";
-import { Effect, Option, Schema } from "effect";
+import { Effect, HashMap, Option, Schema } from "effect";
 import * as ChromeNativeRuntime from "../lib/chrome-native-runtime.ts";
 import * as Safari from "../lib/safari.ts";
 import * as Fingerprint from "../lib/fingerprint.ts";
@@ -266,7 +266,7 @@ const runWatcherProcess = async (): Promise<never> => {
   ]);
   /** Per watched file, the fingerprints of what a sync has taken in or is queued to. */
   const settled = new Map<string, ReadonlySet<string>>();
-  const expectedFinal = new Map<string, string>();
+  let expectedFinal = HashMap.empty<string, string>();
   const settle = (path: string, fingerprint: string | undefined): void => {
     settled.set(path, new Set(fingerprint === undefined ? [] : [fingerprint]));
   };
@@ -277,13 +277,13 @@ const runWatcherProcess = async (): Promise<never> => {
   const isNewContent = (path: string, fingerprint: string | undefined): boolean => {
     if (fingerprint !== undefined && settled.get(path)?.has(fingerprint)) {
       // Once the final write is visible, an older state is a new edit again.
-      if (expectedFinal.get(path) === fingerprint) {
+      if (Option.contains(HashMap.get(expectedFinal, path), fingerprint)) {
         settle(path, fingerprint);
-        expectedFinal.delete(path);
+        expectedFinal = HashMap.remove(expectedFinal, path);
       }
       return false;
     }
-    expectedFinal.delete(path);
+    expectedFinal = HashMap.remove(expectedFinal, path);
     settle(path, fingerprint);
     return true;
   };
@@ -306,8 +306,8 @@ const runWatcherProcess = async (): Promise<never> => {
     if (Option.isSome(snapshot))
       for (const file of snapshot.value.files) {
         if (file.finalFingerprint !== undefined)
-          expectedFinal.set(file.path, file.finalFingerprint);
-        else expectedFinal.delete(file.path);
+          expectedFinal = HashMap.set(expectedFinal, file.path, file.finalFingerprint);
+        else expectedFinal = HashMap.remove(expectedFinal, file.path);
       }
     const current = await fingerprintWatchedFiles();
     let unsynced = false;

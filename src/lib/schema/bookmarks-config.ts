@@ -1,17 +1,17 @@
 import * as Schema from "effect/Schema";
-import { BookmarkTree } from "./bookmark-tree.ts";
-import { BookmarkSection } from "./bookmark-structure.ts";
+import * as BookmarkTree from "./bookmark-tree.ts";
+import * as BookmarkStructure from "./bookmark-structure.ts";
+import * as ReadingListItem from "./reading-list-item.ts";
 
-const BarSection = Schema.optional(BookmarkSection);
-const MenuSection = Schema.optional(BookmarkSection);
-import { ReadingListItem } from "./reading-list-item.ts";
+const BarSection = Schema.optional(BookmarkStructure.BookmarkSection);
+const MenuSection = Schema.optional(BookmarkStructure.BookmarkSection);
 
 export const SharedBookmarks = Schema.Struct({
-  ...BookmarkTree.fields,
-  reading_list: Schema.optional(Schema.Array(ReadingListItem)),
+  ...BookmarkTree.BookmarkTree.fields,
+  reading_list: Schema.optional(Schema.Array(ReadingListItem.ReadingListItem)),
 });
 export type SharedBookmarks = typeof SharedBookmarks.Type;
-const MobileSection = Schema.optional(BookmarkSection);
+const MobileSection = Schema.optional(BookmarkStructure.BookmarkSection);
 
 export class SafariBookmarks extends Schema.Class<SafariBookmarks>("SafariBookmarks")({
   enabled: Schema.optional(Schema.Boolean),

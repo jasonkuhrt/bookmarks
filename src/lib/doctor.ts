@@ -7,6 +7,7 @@
  */
 
 import { Effect, Either } from "effect";
+import * as Arr from "effect/Array";
 import * as Path from "node:path";
 import * as ChromeNative from "./chrome-native.ts";
 import * as Paths from "./paths.ts";
@@ -220,17 +221,15 @@ export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult, E
     const pairedChromeTargets = yield* Effect.filter(enabledTargets, (target) =>
       target.browser === "chrome" ? ChromeNative.isPaired(target.path) : Effect.succeed(false),
     ).pipe(Effect.either);
-    const browserChecks = [
-      ...new Set(
-        enabledTargets
-          .filter(
-            (target) =>
-              target.browser !== "chrome" ||
-              (Either.isRight(pairedChromeTargets) && !pairedChromeTargets.right.includes(target)),
-          )
-          .map((target) => Targets.processNameOf(target.browser)),
-      ),
-    ];
+    const browserChecks = Arr.dedupe(
+      enabledTargets
+        .filter(
+          (target) =>
+            target.browser !== "chrome" ||
+            (Either.isRight(pairedChromeTargets) && !pairedChromeTargets.right.includes(target)),
+        )
+        .map((target) => Targets.processNameOf(target.browser)),
+    );
 
     const checks = yield* Effect.all(
       [

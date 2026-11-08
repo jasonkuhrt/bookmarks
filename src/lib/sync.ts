@@ -10,13 +10,14 @@
  * only; it is never the baseline.
  */
 
-import { Array as Arr, DateTime, Duration, Effect, HashSet, Option } from "effect";
+import { DateTime, Duration, Effect, HashMap, HashSet, Option } from "effect";
+import * as Arr from "effect/Array";
 import { execFile } from "node:child_process";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import * as Canonical from "./canonical.ts";
 import * as ReadingList from "./reading-list.ts";
-import { readingListStampPath } from "./chrome-native-runtime.ts";
+import * as ChromeNativeRuntime from "./chrome-native-runtime.ts";
 import * as Baseline from "./baseline.ts";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
@@ -1201,7 +1202,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const merges: TargetMerge[] = [];
     // Paired Chrome's file trails the live tree a merge reads. What the file held just before
     // that read is taken in too, so the daemon reads its later save of it as no edit.
-    const filesBeforeRead = new Map<string, BookmarkTree>();
+    let filesBeforeRead = HashMap.empty<string, BookmarkTree>();
     for (const target of selectedTargets) {
       yield* Effect.log(`Merging ${Targets.displayNameOf(target)}...`);
       if (
@@ -1210,7 +1211,8 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
         (yield* ChromeNative.isPaired(target.path))
       ) {
         const fileTree = yield* Effect.option(Targets.readFileTree(target));
-        if (Option.isSome(fileTree)) filesBeforeRead.set(target.path, fileTree.value);
+        if (Option.isSome(fileTree))
+          filesBeforeRead = HashMap.set(filesBeforeRead, target.path, fileTree.value);
       }
       const yamlTree = yield* YamlModule.resolveTarget(nextConfig, resolvedTargetOf(target));
       const merge = yield* mergeTarget(
@@ -1308,28 +1310,26 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
             : undefined;
         if (binding)
           snapshotFiles.push({
-            path: readingListStampPath(binding.instanceId),
+            path: ChromeNativeRuntime.readingListStampPath(binding.instanceId),
             fingerprints: [ReadingList.fingerprint(settledState.readingList)],
             finalFingerprint: ReadingList.fingerprint(settledState.readingList),
           });
-        const fileBeforeRead = filesBeforeRead.get(plan.target.path);
+        const fileBeforeRead = HashMap.get(filesBeforeRead, plan.target.path);
         snapshotFiles.push({
           path: plan.target.path,
           finalFingerprint:
             plan.target.browser === "safari"
               ? Fingerprint.ofState(settledState)
               : Fingerprint.ofTree(settledState.tree),
-          fingerprints: [
-            ...new Set(
-              [plan.browserState, settledState]
-                .map((state) =>
-                  plan.target.browser === "safari"
-                    ? Fingerprint.ofState(state)
-                    : Fingerprint.ofTree(state.tree),
-                )
-                .concat(fileBeforeRead ? [Fingerprint.ofTree(fileBeforeRead)] : []),
-            ),
-          ],
+          fingerprints: Arr.dedupe(
+            [plan.browserState, settledState]
+              .map((state) =>
+                plan.target.browser === "safari"
+                  ? Fingerprint.ofState(state)
+                  : Fingerprint.ofTree(state.tree),
+              )
+              .concat(Option.toArray(fileBeforeRead).map(Fingerprint.ofTree)),
+          ),
         });
       }
     }

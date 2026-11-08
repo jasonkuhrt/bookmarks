@@ -3,15 +3,7 @@ import * as ChromeReadingList from "../src/lib/chrome-reading-list.ts";
 import * as ReadingList from "../src/lib/reading-list.ts";
 import { TargetState } from "../src/lib/schema/__.ts";
 import * as ChromeNativeModel from "../src/lib/chrome-native-model.ts";
-import {
-  HelloSchema,
-  InstanceIdSchema,
-  NativeRequestSchema,
-  ExtensionResponseSchema,
-  protocolVersion,
-  type NativeRequest,
-  type NativeResponse,
-} from "../src/lib/chrome-native-protocol.ts";
+import * as Protocol from "../src/lib/chrome-native-protocol.ts";
 
 const nativeHostName = "com.jasonkuhrt.bookmarks";
 const instanceIdStorageKey = "nativeBridgeInstanceId";
@@ -226,7 +218,7 @@ const getInstanceId = (): Effect.Effect<string, Error, ChromeExtension> =>
   Effect.gen(function* () {
     const api = yield* ChromeExtension;
     const stored = yield* api.loadInstanceId;
-    if (Schema.is(InstanceIdSchema)(stored)) return stored;
+    if (Schema.is(Protocol.InstanceIdSchema)(stored)) return stored;
     const instanceId = yield* api.newInstanceId;
     yield* api.saveInstanceId(instanceId);
     return instanceId;
@@ -241,9 +233,9 @@ const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "Chrome bookmark operation failed.";
 
 const operation = (
-  request: NativeRequest,
+  request: Protocol.NativeRequest,
 ): Effect.Effect<
-  NativeResponse,
+  Protocol.NativeResponse,
   never,
   ChromeNativeModel.ChromeBookmarksApi | ChromeReadingList.Api
 > => {
@@ -291,7 +283,7 @@ const handleMessage = (
   Effect.gen(function* () {
     const api = yield* ChromeExtension;
     const request = yield* Effect.try({
-      try: () => Schema.decodeUnknownSync(NativeRequestSchema)(message),
+      try: () => Schema.decodeUnknownSync(Protocol.NativeRequestSchema)(message),
       catch: () => new Error("Invalid native request."),
     }).pipe(
       Effect.catchAll((error) => {
@@ -300,7 +292,11 @@ const handleMessage = (
         return api
           .postMessage(
             port,
-            Schema.encodeSync(ExtensionResponseSchema)({ id, ok: false, error: error.message }),
+            Schema.encodeSync(Protocol.ExtensionResponseSchema)({
+              id,
+              ok: false,
+              error: error.message,
+            }),
           )
           .pipe(Effect.as(undefined));
       }),
@@ -308,7 +304,7 @@ const handleMessage = (
     if (request === undefined) return;
     const response = yield* operation(request);
     if (response.ok) yield* announceReadingList(port);
-    yield* api.postMessage(port, Schema.encodeSync(ExtensionResponseSchema)(response));
+    yield* api.postMessage(port, Schema.encodeSync(Protocol.ExtensionResponseSchema)(response));
   });
 
 let connectedPort: NativePort | undefined;
@@ -363,9 +359,9 @@ export const openConnection = (
     });
     yield* api.postMessage(
       port,
-      Schema.encodeSync(HelloSchema)({
+      Schema.encodeSync(Protocol.HelloSchema)({
         type: "hello",
-        version: protocolVersion,
+        version: Protocol.protocolVersion,
         instanceId,
         capabilities: ["readingList"],
       }),

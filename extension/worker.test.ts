@@ -1,12 +1,6 @@
 import { expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
-import {
-  ChromeExtension,
-  openConnection,
-  watchReadingListChanges,
-  type ChromeExtensionApi,
-  type NativePort,
-} from "./worker.ts";
+import * as Worker from "./worker.ts";
 import * as ChromeReadingList from "../src/lib/chrome-reading-list.ts";
 import * as ReadingList from "../src/lib/reading-list.ts";
 import { ReadingListItem } from "../src/lib/schema/__.ts";
@@ -14,9 +8,9 @@ import { ReadingListItem } from "../src/lib/schema/__.ts";
 test("the worker announces Reading List changes on initial connection, events and reconnect", async () => {
   let entries: readonly ChromeReadingList.Entry[] = [];
   let changed = () => {};
-  let connected: NativePort | undefined;
+  let connected: Worker.NativePort | undefined;
   const messages: unknown[] = [];
-  const api: ChromeExtensionApi = {
+  const api: Worker.ChromeExtensionApi = {
     addReadingListListener: (listener) =>
       Effect.sync(() => {
         changed = listener;
@@ -49,7 +43,7 @@ test("the worker announces Reading List changes on initial connection, events an
       }),
   };
   const layer = Layer.merge(
-    Layer.succeed(ChromeExtension, api),
+    Layer.succeed(Worker.ChromeExtension, api),
     Layer.succeed(ChromeReadingList.ChromeReadingList, {
       query: () => Effect.sync(() => entries),
       addEntry: () => Effect.die("Unexpected write"),
@@ -59,7 +53,7 @@ test("the worker announces Reading List changes on initial connection, events an
   );
   const connect = () =>
     Effect.runPromise(
-      openConnection(
+      Worker.openConnection(
         () => {},
         () => {},
         (port) => {
@@ -67,7 +61,9 @@ test("the worker announces Reading List changes on initial connection, events an
         },
       ).pipe(Effect.provide(layer)),
     );
-  await Effect.runPromise(watchReadingListChanges(() => connected).pipe(Effect.provide(layer)));
+  await Effect.runPromise(
+    Worker.watchReadingListChanges(() => connected).pipe(Effect.provide(layer)),
+  );
   await connect();
   expect(messages).toContainEqual({ type: "readingListChanged", fingerprint: "[]" });
   entries = [{ url: "https://a.example/", title: "A", hasBeenRead: true, creationTime: 20 }];

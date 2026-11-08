@@ -3,7 +3,7 @@ import { DateTime, Effect, Layer, Schema } from "effect";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NativeRequestSchema } from "./chrome-native-protocol.ts";
+import * as Protocol from "./chrome-native-protocol.ts";
 import * as Native from "./chrome-native.ts";
 import { ChromeBridgeRuntime, type Runtime } from "./chrome-native-runtime.ts";
 import * as Patch from "./patch.ts";
@@ -300,7 +300,7 @@ test("tree-only writes preserve a populated native Reading List", async () => {
   let live = before;
   const layer = makeLayer((_id, request) =>
     Effect.sync(() => {
-      const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
+      const decoded = Schema.decodeUnknownSync(Protocol.NativeRequestSchema)(request);
       if (decoded.operation === "reconcile") {
         expect(decoded.expectedReadingList).toEqual(readingList);
         expect(decoded.readingList).toEqual(readingList);
