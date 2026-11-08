@@ -97,6 +97,56 @@ describe("absorbTargetTree", () => {
     expect(names(fromSafari.all.mobile)).toEqual(["Phone"]);
   });
 
+  test("a shared folder renamed in one browser stays shared, next to a browser-only folder", async () => {
+    const config = BookmarksConfig.make({
+      all: BookmarkTree.make({ bar: [folder("Shared", [leaf("A")])] }),
+      safari: SafariBookmarks.make({ bar: [folder("Local", [leaf("B")])] }),
+    });
+    const safariTree = BookmarkTree.make({
+      bar: [folder("Renamed", [leaf("A")]), folder("Local", [leaf("B")])],
+    });
+
+    const next = Layers.absorbTargetTree(config, safari, safariTree);
+
+    expect(next.all.bar).toEqual([folder("Renamed", [leaf("A")])]);
+    expect(next.safari?.bar).toEqual([folder("Local", [leaf("B")])]);
+    expect((await resolve(next, chrome)).bar).toEqual([folder("Renamed", [leaf("A")])]);
+    expect(await resolve(next, safari)).toEqual(safariTree);
+  });
+
+  test("a shared bookmark renamed in one browser stays shared", async () => {
+    const config = BookmarksConfig.make({
+      all: BookmarkTree.make({ bar: [leaf("A")] }),
+      safari: SafariBookmarks.make({ bar: [leaf("B")] }),
+    });
+    const renamed = BookmarkLeaf.make({ name: "A renamed", url: leaf("A").url });
+
+    const next = Layers.absorbTargetTree(
+      config,
+      safari,
+      BookmarkTree.make({ bar: [renamed, leaf("B")] }),
+    );
+
+    expect(next.all.bar).toEqual([renamed]);
+    expect(next.safari?.bar).toEqual([leaf("B")]);
+  });
+
+  test("a browser-only folder renamed in that browser stays browser-only", () => {
+    const config = BookmarksConfig.make({
+      all: BookmarkTree.make({ bar: [folder("Shared", [leaf("A")])] }),
+      safari: SafariBookmarks.make({ bar: [folder("Local", [leaf("B")])] }),
+    });
+
+    const next = Layers.absorbTargetTree(
+      config,
+      safari,
+      BookmarkTree.make({ bar: [folder("Shared", [leaf("A")]), folder("Mine", [leaf("B")])] }),
+    );
+
+    expect(next.all.bar).toEqual([folder("Shared", [leaf("A")])]);
+    expect(next.safari?.bar).toEqual([folder("Mine", [leaf("B")])]);
+  });
+
   test("a deleted top-level folder leaves its layer", () => {
     const config = BookmarksConfig.make({
       all: BookmarkTree.make({ bar: [folder("Keep", []), folder("Drop", [leaf("A")])] }),

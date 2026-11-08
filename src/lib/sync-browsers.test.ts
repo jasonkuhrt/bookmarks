@@ -16,6 +16,7 @@ import {
   BookmarkTree,
   ChromeBookmarks,
   ChromeProfileBookmarks,
+  SafariBookmarks,
 } from "./schema/__.ts";
 import * as Sync from "./sync.ts";
 import * as Targets from "./targets.ts";
@@ -192,6 +193,58 @@ describe("sync across browsers", () => {
     expect(settled.yamlChanged).toBe(false);
     expect(settled.applied).toEqual([]);
     expect(settled.backup).toBeUndefined();
+  });
+
+  test("a shared folder renamed in Safari keeps its bookmarks in Chrome, beside a Safari-only folder", async () => {
+    await run(
+      YamlModule.save(
+        world.yamlPath,
+        BookmarksConfig.make({
+          all: BookmarkTree.make({ bar: [folder("Shared", [leaf("A")])] }),
+          safari: SafariBookmarks.make({ bar: [folder("Local", [leaf("B")])] }),
+          chrome: ChromeBookmarks.make({ profiles: { default: ChromeProfileBookmarks.make({}) } }),
+        }),
+      ),
+    );
+    await writeSafari(
+      world.safariPath,
+      BookmarkTree.make({ bar: [folder("Shared", [leaf("A")]), folder("Local", [leaf("B")])] }),
+    );
+    await run(
+      Chrome.writeTree(
+        world.chromePath,
+        BookmarkTree.make({ bar: [folder("Shared", [leaf("A")])] }),
+      ),
+    );
+    await syncNow();
+
+    await writeSafari(
+      world.safariPath,
+      BookmarkTree.make({ bar: [folder("Renamed", [leaf("A")]), folder("Local", [leaf("B")])] }),
+    );
+    await syncNow();
+
+    expect((await readChrome()).bar).toEqual([folder("Renamed", [leaf("A")])]);
+    const yaml = await readYaml();
+    expect(yaml.all.bar).toEqual([folder("Renamed", [leaf("A")])]);
+    expect(yaml.safari?.bar).toEqual([folder("Local", [leaf("B")])]);
+  });
+
+  test("a shared folder renamed in Safari reaches Chrome when the YAML has only the shared layer", async () => {
+    const start = BookmarkTree.make({ bar: [folder("Shared", [leaf("A")])] });
+    await run(YamlModule.save(world.yamlPath, sharedConfig(start)));
+    await writeSafari(world.safariPath, start);
+    await run(Chrome.writeTree(world.chromePath, start));
+    await syncNow();
+
+    await writeSafari(
+      world.safariPath,
+      BookmarkTree.make({ bar: [folder("Renamed", [leaf("A")])] }),
+    );
+    await syncNow();
+
+    expect((await readChrome()).bar).toEqual([folder("Renamed", [leaf("A")])]);
+    expect((await readYaml()).all.bar).toEqual([folder("Renamed", [leaf("A")])]);
   });
 
   test("a deletion in Safari reaches Chrome", async () => {

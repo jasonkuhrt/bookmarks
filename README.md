@@ -107,7 +107,7 @@ What sync does:
 - reads the managed `bookmarks.yaml`
 - discovers Safari once and all discovered Chrome profiles
 - merges each target three ways: its baseline, the YAML, and the browser
-- writes each target's result back into the YAML layer it came from, so an edit in one browser to a shared folder lands in `all` and reaches every other browser
+- writes each target's result back into the YAML layer it came from, so an edit in one browser to a shared folder lands in `all` and reaches every other browser; a folder renamed in one browser keeps the layer its bookmarks came from
 - sends destructive losers to the graveyard instead of dropping them
 - creates backups before mutation, and none when nothing changes
 - updates paired Chrome profiles through Chrome's bookmark API; writes Safari's file while Safari is closed

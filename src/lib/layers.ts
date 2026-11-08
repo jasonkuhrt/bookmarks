@@ -11,6 +11,7 @@
 
 import {
   BookmarkFolder,
+  BookmarkLeaf,
   type BookmarkNode,
   type BookmarkSection,
   BookmarksConfig,
@@ -197,11 +198,36 @@ const identityOf = (node: BookmarkNode): string =>
     ? JSON.stringify(["folder", node.name])
     : JSON.stringify(["leaf", node.url, node.name]);
 
+const leavesOf = (node: BookmarkNode): readonly BookmarkLeaf[] =>
+  BookmarkLeaf.is(node) ? [node] : node.children.flatMap(leavesOf);
+
+const leafKey = (leaf: BookmarkLeaf): string => JSON.stringify([leaf.url, leaf.name]);
+
 /**
- * The layer index for each merged top-level node. A node that existed keeps its layer. A new
- * node joins the layer of the node before it (or after it, at the start), so additions to a
- * shared section stay shared. Layers must appear in order, so a node placed before a node of
- * an outer layer moves out to that layer: a reorder never hides a shared node from a browser.
+ * The outermost layer each bookmark lived in before the merge, by URL and name, and by URL
+ * alone for a bookmark whose name changed.
+ */
+const bookmarkLayers = (layerNodes: readonly BookmarkSection[]) => {
+  const byKey = new Map<string, number>();
+  const byUrl = new Map<string, number>();
+  layerNodes.forEach((nodes, layer) => {
+    for (const leaf of nodes.flatMap(leavesOf)) {
+      if (!byKey.has(leafKey(leaf))) byKey.set(leafKey(leaf), layer);
+      if (!byUrl.has(leaf.url)) byUrl.set(leaf.url, layer);
+    }
+  });
+  return (leaf: BookmarkLeaf): number | undefined =>
+    byKey.get(leafKey(leaf)) ?? byUrl.get(leaf.url);
+};
+
+/**
+ * The layer index for each merged top-level node. A node that existed keeps its layer. A node
+ * renamed in a browser, or made of bookmarks moved there, takes the outermost layer its
+ * bookmarks came from, so renaming a shared folder never hides its bookmarks from another
+ * browser. A new node joins the layer of the node before it (or after it, at the start), so
+ * additions to a shared section stay shared. Layers must appear in order, so a node placed
+ * before a node of an outer layer moves out to that layer: a reorder never hides a shared node
+ * from a browser.
  */
 export const assignLayers = (
   layerNodes: readonly BookmarkSection[],
@@ -216,8 +242,16 @@ export const assignLayers = (
       else available.set(key, [layer]);
     }
   });
+  const layerOfBookmark = bookmarkLayers(layerNodes);
+  const provenance = (node: BookmarkNode): number | undefined => {
+    const layers = leavesOf(node).flatMap((leaf) => {
+      const layer = layerOfBookmark(leaf);
+      return layer === undefined ? [] : [layer];
+    });
+    return layers.length > 0 ? Math.min(...layers) : undefined;
+  };
 
-  const found = merged.map((node) => available.get(identityOf(node))?.shift());
+  const found = merged.map((node) => available.get(identityOf(node))?.shift() ?? provenance(node));
   const assigned: number[] = [];
   let previous: number | undefined;
   for (const layer of found) {
