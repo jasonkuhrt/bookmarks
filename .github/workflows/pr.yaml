@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - run: bun run check:cov
+      - run: bun run test:coverage
   exports:
     runs-on: ubuntu-latest
     steps:
