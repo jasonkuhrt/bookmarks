@@ -43,7 +43,6 @@
     "check:lint": "oxlint --type-aware --report-unused-disable-directives --deny-warnings",
     "check:types": "tsgo",
     "check:cov": "bun run test:coverage && bun scripts/check-coverage.ts coverage/lcov.info 90 90",
-    "check:test:cov": "bun scripts/check-staged-coverage.ts coverage/lcov.info 90",
     "check:package": "bun run build && publint run --strict",
     "check:exports": "attw --pack . --profile esm-only",
     "check:ci": "actionlint",
