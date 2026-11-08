@@ -195,6 +195,8 @@ What it does:
 - when a sync leaves writes for an open browser, waits (`phase=waiting`) and syncs again once that browser quits; paired Chrome can stay open
 - retries a failed sync with backoff, up to every 5 minutes
 
+launchd runs a small signed launcher, `~/.local/state/bookmarks/bin/bookmarks-sync`, which runs the daemon as its child. macOS checks a read of Safari's or Chrome's bookmarks against that launcher, so it needs **Full Disk Access** once (System Settings → Privacy & Security → Full Disk Access → add the launcher). It is signed with your Apple Development certificate and a fixed identifier, so the grant survives rebuilds and bun upgrades. Until it is granted, `bookmarks daemon status` shows the denied read.
+
 Manual immediate sync stays explicit:
 
 ```bash

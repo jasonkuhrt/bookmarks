@@ -8,6 +8,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -80,6 +81,7 @@ const waitFor = async (
 
 const setupDaemonEnv = async (): Promise<{
   readonly bunPath: string;
+  readonly launcherPath: string;
   readonly cleanup: () => Promise<void>;
   readonly homeDir: string;
   readonly module: DaemonModule;
@@ -95,6 +97,8 @@ const setupDaemonEnv = async (): Promise<{
   const originalXdgConfigHome = process.env["XDG_CONFIG_HOME"];
   const originalXdgStateHome = process.env["XDG_STATE_HOME"];
   const originalConfigDir = process.env["BOOKMARKS_CONFIG_DIR"];
+  const originalLauncherPath = process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"];
+  const launcherPath = join(binDir, "bookmarks-sync");
   const originalStateDir = process.env["BOOKMARKS_STATE_DIR"];
 
   await mkdir(homeDir, { recursive: true });
@@ -144,10 +148,15 @@ esac
   // These tests check the paths derived from HOME, under the sandbox the test preload set up.
   delete process.env["BOOKMARKS_CONFIG_DIR"];
   delete process.env["BOOKMARKS_STATE_DIR"];
+  // A prebuilt launcher: these tests check the plist and launchctl calls, not the build.
+  process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"] = launcherPath;
 
   return {
     bunPath,
+    launcherPath,
     cleanup: async () => {
+      if (originalLauncherPath === undefined) delete process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"];
+      else process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"] = originalLauncherPath;
       if (originalConfigDir === undefined) delete process.env["BOOKMARKS_CONFIG_DIR"];
       else process.env["BOOKMARKS_CONFIG_DIR"] = originalConfigDir;
       if (originalStateDir === undefined) delete process.env["BOOKMARKS_STATE_DIR"];
@@ -177,6 +186,7 @@ describe("daemon", () => {
   test("generatePlist embeds the watcher daemon contract", () => {
     const plist = StaticDaemon.generatePlist({
       bunPath: "/usr/local/bin/bun",
+      launcherPath: "/state/bin/bookmarks-sync",
       environment: {
         BOOKMARKS_DAEMON_CLI_PATH: "/repo/src/bin/bookmarks.ts",
         BOOKMARKS_YAML_PATH: "/tmp/bookmarks.yaml",
@@ -187,13 +197,41 @@ describe("daemon", () => {
       workingDir: "/tmp/test-workdir",
     });
 
-    expect(plist).toContain("/usr/local/bin/bun");
-    expect(plist).toContain("/repo/src/bin/bookmarks-daemon.ts");
+    // launchd runs the launcher, which holds Full Disk Access and runs bun as its child.
+    expect(plist).toMatch(
+      /<string>\/state\/bin\/bookmarks-sync<\/string>\s*<string>\/usr\/local\/bin\/bun<\/string>\s*<string>\/repo\/src\/bin\/bookmarks-daemon.ts<\/string>/,
+    );
     expect(plist).toContain("<key>KeepAlive</key>");
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<key>EnvironmentVariables</key>");
     expect(plist).not.toContain("StartInterval");
   });
+
+  test("the launcher is built and signed once, runs its arguments as a child, and keeps their exit status", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-launcher-"));
+    const launcherPath = join(dir, "bin", "bookmarks-sync");
+    const original = process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"];
+    delete process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"];
+
+    try {
+      await run(StaticDaemon.ensureLauncher(launcherPath));
+      const built = await stat(launcherPath);
+      await run(StaticDaemon.ensureLauncher(launcherPath));
+      expect((await stat(launcherPath)).mtimeMs).toBe(built.mtimeMs);
+
+      const signature = Bun.spawnSync(["codesign", "-dr", "-", launcherPath]);
+      expect(signature.stdout.toString() + signature.stderr.toString()).toContain(
+        'identifier "com.jasonkuhrt.bookmarks-sync"',
+      );
+      const child = Bun.spawnSync([launcherPath, "/bin/sh", "-c", "echo from-child; exit 7"]);
+      expect(child.stdout.toString()).toBe("from-child\n");
+      expect(child.exitCode).toBe(7);
+    } finally {
+      if (original === undefined) delete process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"];
+      else process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"] = original;
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("defaultConfig resolves bun from PATH and points launchd at the daemon runner", async () => {
     const env = await setupDaemonEnv();
@@ -216,6 +254,7 @@ describe("daemon", () => {
     const plistPath = join(env.homeDir, "Library/LaunchAgents/com.jasonkuhrt.bookmarks-sync.plist");
     const config = {
       bunPath: env.bunPath,
+      launcherPath: env.launcherPath,
       environment: {
         BOOKMARKS_DAEMON_CLI_PATH: join(process.cwd(), "src", "bin", "bookmarks.ts"),
         PATH: process.env["PATH"] ?? "",
@@ -349,6 +388,7 @@ describe("daemon", () => {
       await run(
         env.module.start({
           bunPath: env.bunPath,
+          launcherPath: env.launcherPath,
           environment: {
             BOOKMARKS_DAEMON_CLI_PATH: join(process.cwd(), "src", "bin", "bookmarks.ts"),
             PATH: process.env["PATH"] ?? "",
@@ -390,6 +430,7 @@ describe("daemon", () => {
       nextSyncAt: Option.some(DateTime.unsafeMake("2026-03-08T10:03:00.000Z")),
       phase: "queued",
       pid: 123,
+      launcherPath: "/state/bin/bookmarks-sync",
       plistPath: "/tmp/com.example.plist",
       running: true,
       startedAt: Option.none(),

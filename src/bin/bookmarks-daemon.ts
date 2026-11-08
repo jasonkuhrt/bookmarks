@@ -348,6 +348,7 @@ const runWatcherProcess = async (): Promise<never> => {
       }
 
       errorRetryCount = 0;
+      await watchBrowserFiles();
       await updateState({
         lastError: undefined,
         lastOutcome: changedAnything(syncResult) ? "success" : "noop",
@@ -421,13 +422,24 @@ const runWatcherProcess = async (): Promise<never> => {
     });
 
   const watchers = [watchFile(yamlPath, onYamlChange)];
-  for (const filePath of await browserBookmarkFiles()) {
-    try {
-      watchers.push(watchFile(filePath, onBrowserChange));
-    } catch (error) {
-      console.error(`Failed to watch ${filePath}: ${messageFromUnknown(error)}`);
+  const watchedBrowserFiles = new Set<string>();
+  /**
+   * Watch every browser bookmark file not watched yet. Runs at start and after each sync, so a
+   * new Chrome profile, or a file macOS only lets the daemon see once it has Full Disk Access,
+   * is picked up without a restart.
+   */
+  const watchBrowserFiles = async () => {
+    for (const filePath of await browserBookmarkFiles()) {
+      if (watchedBrowserFiles.has(filePath)) continue;
+      try {
+        watchers.push(watchFile(filePath, onBrowserChange));
+        watchedBrowserFiles.add(filePath);
+      } catch (error) {
+        console.error(`Failed to watch ${filePath}: ${messageFromUnknown(error)}`);
+      }
     }
-  }
+  };
+  await watchBrowserFiles();
 
   const cleanup = async (exitCode: number) => {
     for (const watcher of watchers) watcher.close();

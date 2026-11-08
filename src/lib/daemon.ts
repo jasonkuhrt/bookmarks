@@ -8,6 +8,7 @@
 
 import { DateTime, Effect, Option, pipe } from "effect";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import {
@@ -18,6 +19,8 @@ import {
 import * as Paths from "./paths.ts";
 
 const LABEL = "com.jasonkuhrt.bookmarks-sync";
+/** The launcher's code-signing identifier: Full Disk Access granted to it survives rebuilds. */
+const LAUNCHER_IDENTIFIER = "com.jasonkuhrt.bookmarks-sync";
 const PLIST_FILENAME = `${LABEL}.plist`;
 const FORWARDED_ENVIRONMENT_KEYS = [
   "HOME",
@@ -44,6 +47,8 @@ type DaemonOutcome = "deferred" | "failed" | "noop" | "success";
 
 export interface DaemonConfig {
   readonly bunPath: string;
+  /** The signed program launchd runs, which holds the Full Disk Access grant. */
+  readonly launcherPath: string;
   readonly environment: Readonly<Record<string, string>>;
   readonly logDir: string;
   readonly runnerPath: string;
@@ -70,6 +75,7 @@ export interface DaemonStatus {
   readonly nextSyncAt: Option.Option<DateTime.Utc>;
   readonly phase: DaemonPhase;
   readonly pid: number | undefined;
+  readonly launcherPath: string;
   readonly plistPath: string;
   readonly running: boolean;
   readonly startedAt: Option.Option<DateTime.Utc>;
@@ -84,6 +90,11 @@ const defaultLogDir = (): string => Path.join(homeDir(), "Library/Logs/bookmarks
 const defaultRunnerPath = (): string =>
   process.env["BOOKMARKS_DAEMON_RUNNER_PATH"] ??
   Path.resolve(import.meta.dirname, "../bin/bookmarks-daemon.ts");
+const launcherSourcePath = (): string =>
+  Path.resolve(import.meta.dirname, "../launcher/bookmarks-sync.c");
+export const defaultLauncherPath = (): string =>
+  process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"] ??
+  Path.join(Paths.defaultStateDir(), "bin", "bookmarks-sync");
 const defaultCliPath = (): string =>
   process.env["BOOKMARKS_DAEMON_CLI_PATH"] ??
   Path.resolve(import.meta.dirname, "../bin/bookmarks.ts");
@@ -270,6 +281,7 @@ ${environmentEntries
     <string>${escapeXml(LABEL)}</string>
     <key>ProgramArguments</key>
     <array>
+        <string>${escapeXml(config.launcherPath)}</string>
         <string>${escapeXml(config.bunPath)}</string>
         <string>${escapeXml(config.runnerPath)}</string>
     </array>
@@ -293,6 +305,7 @@ export const defaultConfig = (): Effect.Effect<DaemonConfig, Error> =>
     const bunPath = yield* resolveBunPath();
     return {
       bunPath,
+      launcherPath: defaultLauncherPath(),
       environment: forwardedEnvironment(),
       logDir: defaultLogDir(),
       runnerPath: defaultRunnerPath(),
@@ -300,10 +313,68 @@ export const defaultConfig = (): Effect.Effect<DaemonConfig, Error> =>
     };
   });
 
+const readText = (filePath: string): Effect.Effect<string | undefined, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        return await Fs.readFile(filePath, "utf-8");
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      }
+    },
+    catch: (error) => new Error(`Failed to read ${filePath}: ${messageFromUnknown(error)}`),
+  });
+
+/** The first Apple Development identity in the keychain, else ad-hoc signing (`-`). */
+const signingIdentity = (): Effect.Effect<string, Error> =>
+  pipe(
+    execFileEffect("security", ["find-identity", "-v", "-p", "codesigning"]),
+    Effect.map((stdout) => /"(Apple Development: [^"]+)"/.exec(stdout)?.[1] ?? "-"),
+    Effect.catchAll(() => Effect.succeed("-")),
+  );
+
+/**
+ * Build and sign the launcher when it is missing or its source changed. Signed with an Apple
+ * Development certificate and a fixed identifier, its Full Disk Access grant outlives the
+ * rebuild; an ad-hoc signature would tie the grant to this one build.
+ */
+export const ensureLauncher = (launcherPath: string): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    if (process.env["BOOKMARKS_DAEMON_LAUNCHER_PATH"] !== undefined) return;
+    const source = yield* readText(launcherSourcePath());
+    if (source === undefined) {
+      return yield* Effect.fail(new Error(`Missing launcher source ${launcherSourcePath()}`));
+    }
+    const sourceHash = createHash("sha256").update(source).digest("hex");
+    const stampPath = `${launcherPath}.source-sha256`;
+    if ((yield* fileExists(launcherPath)) && (yield* readText(stampPath))?.trim() === sourceHash)
+      return;
+
+    yield* mkdir(Path.dirname(launcherPath));
+    const buildPath = `${launcherPath}.build`;
+    yield* execFileEffect("cc", ["-O2", "-o", buildPath, launcherSourcePath()]);
+    yield* execFileEffect("codesign", [
+      "--force",
+      "--sign",
+      yield* signingIdentity(),
+      "--identifier",
+      LAUNCHER_IDENTIFIER,
+      buildPath,
+    ]);
+    yield* Effect.tryPromise({
+      try: () => Fs.rename(buildPath, launcherPath),
+      catch: (error) =>
+        new Error(`Failed to install ${launcherPath}: ${messageFromUnknown(error)}`),
+    });
+    yield* writeFile(stampPath, `${sourceHash}\n`);
+  });
+
 export const start = (config: DaemonConfig): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     yield* mkdir(plistDir());
     yield* mkdir(config.logDir);
+    yield* ensureLauncher(config.launcherPath);
 
     const installedPlistPath = plistPath();
     yield* pipe(
@@ -355,6 +426,7 @@ export const status = (): Effect.Effect<DaemonStatus, Error> =>
       nextSyncAt: toUtcOption(runtimeState?.nextSyncAt),
       phase: running ? (runtimeState?.phase ?? "starting") : "stopped",
       pid: runtimeState?.pid,
+      launcherPath: defaultLauncherPath(),
       plistPath: installedPlistPath(),
       running,
       startedAt: toUtcOption(runtimeState?.startedAt),
