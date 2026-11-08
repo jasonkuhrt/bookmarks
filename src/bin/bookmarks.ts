@@ -310,6 +310,7 @@ const serializeSyncResult = (
     applied: targetResult.applied.map(serializePatch),
     graveyarded: targetResult.graveyarded.map(serializePatch),
   })),
+  snapshot: result.snapshot ?? null,
 });
 
 const serializeStatus = (status: SyncModule.StatusResult) => ({

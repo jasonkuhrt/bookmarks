@@ -19,6 +19,7 @@ import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
 import * as Chrome from "./chrome.ts";
 import * as ChromeNative from "./chrome-native.ts";
+import * as Fingerprint from "./fingerprint.ts";
 import * as Graveyard from "./graveyard.ts";
 import * as Layers from "./layers.ts";
 import { stripManagedConfigHeader } from "./managed-config-header.ts";
@@ -49,6 +50,11 @@ export interface SyncResult {
   readonly yamlChanged?: boolean;
   /** Targets whose browser was open, so their changes wait until it closes. */
   readonly waiting?: readonly WaitingTarget[];
+  /**
+   * For each file a finished sync covered, what it read there and left there. The daemon queues
+   * another sync only for content outside it.
+   */
+  readonly snapshot?: Fingerprint.SyncSnapshot;
 }
 
 export interface WaitingTarget {
@@ -1137,8 +1143,19 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
 
     let nextConfig = yamlConfig;
     const merges: TargetMerge[] = [];
+    // Paired Chrome's file trails the live tree a merge reads. What the file held just before
+    // that read is taken in too, so the daemon reads its later save of it as no edit.
+    const filesBeforeRead = new Map<string, BookmarkTree>();
     for (const target of selectedTargets) {
       yield* Effect.log(`Merging ${Targets.displayNameOf(target)}...`);
+      if (
+        !config.dryRun &&
+        target.browser === "chrome" &&
+        (yield* ChromeNative.isPaired(target.path))
+      ) {
+        const fileTree = yield* Effect.option(Targets.readFileTree(target));
+        if (fileTree._tag === "Some") filesBeforeRead.set(target.path, fileTree.value);
+      }
       const yamlTree = yield* YamlModule.resolveTarget(nextConfig, resolvedTargetOf(target));
       const merge = yield* mergeTarget(
         target,
@@ -1156,7 +1173,9 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       plans.push(yield* planWrite(merge.target, merge.browserTree, desiredTree));
     }
 
-    const yamlChanged = (yield* renderConfig(nextConfig)) !== (yield* renderConfig(yamlConfig));
+    const nextYamlText = yield* renderConfig(nextConfig);
+    const yamlChanged = nextYamlText !== (yield* renderConfig(yamlConfig));
+    const snapshotFiles: Fingerprint.SyncSnapshot["files"][number][] = [];
     const waiting: WaitingTarget[] = [];
     const waitFor = (plan: PlannedWrite, browser: string): void => {
       waiting.push({ target: plan.target, browser, pending: plan.writePatches.length || 1 });
@@ -1173,6 +1192,13 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       // fails keeps its old baseline, so the next sync reads the YAML as ahead of it, and a
       // target already written never reads the YAML's next edit against a stale baseline.
       if (yamlChanged) yield* saveConfig(config.yamlPath, nextConfig);
+      const yamlTextLeft = yamlChanged ? nextYamlText : yamlTextAtLoad;
+      if (yamlTextLeft !== undefined) {
+        snapshotFiles.push({
+          path: config.yamlPath,
+          fingerprints: [Fingerprint.ofText(yamlTextLeft)],
+        });
+      }
       let savedBaselines = baselines;
       for (const plan of plans) {
         const key = Targets.keyOf(plan.target);
@@ -1190,6 +1216,17 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
           waitFor(plan, openBrowser);
         }
         savedBaselines = yield* saveBaseline(savedBaselines, key, settledTree);
+        const fileBeforeRead = filesBeforeRead.get(plan.target.path);
+        snapshotFiles.push({
+          path: plan.target.path,
+          fingerprints: [
+            ...new Set(
+              [plan.browserTree, ...(fileBeforeRead ? [fileBeforeRead] : []), settledTree].map(
+                Fingerprint.ofTree,
+              ),
+            ),
+          ],
+        });
       }
     }
 
@@ -1202,6 +1239,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       targets: targetResults,
       yamlChanged,
       ...(waiting.length > 0 ? { waiting } : {}),
+      ...(config.dryRun ? {} : { snapshot: { files: snapshotFiles } }),
     };
   });
 

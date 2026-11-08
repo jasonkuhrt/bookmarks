@@ -189,7 +189,8 @@ What it does:
 
 - syncs once when it starts, so changes made while it was down are not left waiting for an edit
 - watches `bookmarks.yaml` and every discovered browser's bookmark file (Safari's `Bookmarks.plist`, each Chrome profile's `Bookmarks`)
-- queues a sync 60 seconds after the last edit to any of them instead of syncing on every keystroke
+- queues a sync 60 seconds after the last edit to any of them instead of syncing on every keystroke; a browser rewriting its file without changing its bookmarks is no edit
+- after each sync, compares every watched file with what the sync read there and left there (`snapshot` in `sync --json`), and queues another sync for anything else, so an edit saved while a sync ran is never lost, even when its file event arrives late
 - updates the machine-managed header at the top of `bookmarks.yaml` with watcher state
 - runs `bookmarks sync`, which makes no backup when nothing changes
 - when a sync leaves writes for an open browser, waits (`phase=waiting`) and syncs again once that browser quits; paired Chrome can stay open

@@ -347,9 +347,30 @@ const readChromeNative = (target: TargetDescriptor): Effect.Effect<BookmarkTree,
 export const readTree = (target: TargetDescriptor): Effect.Effect<BookmarkTree, Error> => {
   switch (target.browser) {
     case "safari":
-      return Safari.readBookmarks(target.path).pipe(Effect.map(Canonical.canonicalTree));
+      return readFileTree(target);
     case "chrome":
       return readChromeNative(target).pipe(
+        Effect.map((native) => Canonical.canonicalTree(fromChromeLayout(native))),
+      );
+    default:
+      return Effect.fail(
+        new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
+      );
+  }
+};
+
+/**
+ * What a target's bookmark file holds, in the engine's layout and canonical form, read from
+ * the file itself even for paired Chrome, whose file trails its live bookmarks.
+ */
+export const readFileTree = (
+  target: Pick<TargetDescriptor, "browser" | "profile" | "path">,
+): Effect.Effect<BookmarkTree, Error> => {
+  switch (target.browser) {
+    case "safari":
+      return Safari.readBookmarks(target.path).pipe(Effect.map(Canonical.canonicalTree));
+    case "chrome":
+      return Chrome.readBookmarks(target.path).pipe(
         Effect.map((native) => Canonical.canonicalTree(fromChromeLayout(native))),
       );
     default:

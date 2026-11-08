@@ -10,13 +10,16 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as StaticDaemon from "./daemon.ts";
+import * as Fingerprint from "./fingerprint.ts";
 import { readDaemonHeaderState } from "./managed-config-header.ts";
 import { BookmarkTree, BookmarksConfig } from "./schema/__.ts";
+import * as Targets from "./targets.ts";
 import * as YamlModule from "./yaml.ts";
 
 interface RuntimeStateView {
@@ -79,6 +82,52 @@ const waitFor = async (
 
   await poll();
 };
+
+/** A Chrome Bookmarks file whose bar holds `bar`, with Chrome Sync's metadata blob. */
+const chromeFile = (
+  bar: readonly { readonly name: string; readonly url: string }[],
+  syncMetadata = "",
+) =>
+  JSON.stringify({
+    checksum: "",
+    version: 1,
+    sync_metadata: syncMetadata,
+    roots: {
+      bookmark_bar: {
+        type: "folder",
+        name: "Bookmarks Bar",
+        id: "1",
+        guid: "bar",
+        date_added: "0",
+        date_modified: "0",
+        children: bar.map((bookmark, index) => ({
+          type: "url",
+          id: String(index + 10),
+          guid: `leaf-${index}`,
+          date_added: "0",
+          ...bookmark,
+        })),
+      },
+      other: {
+        type: "folder",
+        name: "Other Bookmarks",
+        id: "2",
+        guid: "other",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+      synced: {
+        type: "folder",
+        name: "Mobile Bookmarks",
+        id: "3",
+        guid: "mobile",
+        date_added: "0",
+        date_modified: "0",
+        children: [],
+      },
+    },
+  });
 
 const setupDaemonEnv = async (): Promise<{
   readonly bunPath: string;
@@ -446,19 +495,25 @@ describe("daemon", () => {
     });
   });
 
-  const syncDone = JSON.stringify({
+  const syncDoneReply = {
     orchestration: null,
     applied: [],
     graveyarded: [],
     targets: [],
     yamlChanged: false,
     waiting: [],
-  });
+  };
+  const syncDone = JSON.stringify(syncDoneReply);
 
-  /** A stand-in CLI: each `sync` appends a line to its log and prints the next scripted reply. */
+  /**
+   * A stand-in CLI: each `sync` appends a line to its log, runs the script for its turn (the
+   * sync's own reads and writes, or a browser's edit while it runs), and prints the next
+   * scripted reply.
+   */
   const writeFakeCli = async (
     dir: string,
     replies: readonly string[],
+    scripts: readonly string[] = [],
   ): Promise<{ readonly path: string; readonly syncs: () => Promise<number> }> => {
     const path = join(dir, "fake-cli.ts");
     const logPath = join(dir, "syncs.log");
@@ -475,7 +530,9 @@ if (command !== "sync") {
 }
 const previous = existsSync(logPath) ? await readFile(logPath, "utf-8") : "";
 await writeFile(logPath, previous + "sync\\n", "utf-8");
-const reply = replies[Math.min(previous.split("\\n").length - 1, replies.length - 1)];
+const turn = previous.split("\\n").length - 1;
+${scripts.map((script, turn) => `if (turn === ${turn}) {\n${script}\n}`).join("\n")}
+const reply = replies[Math.min(turn, replies.length - 1)];
 if (reply.startsWith("fail:")) {
   console.error(JSON.stringify({ error: reply.slice(5) }));
   process.exit(1);
@@ -552,50 +609,6 @@ console.log(reply);
     const chromeDataDir = join(dir, "Chrome");
     const chromePath = join(chromeDataDir, "Default", "Bookmarks");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
-    const chromeFile = (
-      bar: readonly { readonly name: string; readonly url: string }[],
-      syncMetadata: string,
-    ) =>
-      JSON.stringify({
-        checksum: "",
-        version: 1,
-        sync_metadata: syncMetadata,
-        roots: {
-          bookmark_bar: {
-            type: "folder",
-            name: "Bookmarks Bar",
-            id: "1",
-            guid: "bar",
-            date_added: "0",
-            date_modified: "0",
-            children: bar.map((bookmark, index) => ({
-              type: "url",
-              id: String(index + 10),
-              guid: `leaf-${index}`,
-              date_added: "0",
-              ...bookmark,
-            })),
-          },
-          other: {
-            type: "folder",
-            name: "Other Bookmarks",
-            id: "2",
-            guid: "other",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-          synced: {
-            type: "folder",
-            name: "Mobile Bookmarks",
-            id: "3",
-            guid: "mobile",
-            date_added: "0",
-            date_modified: "0",
-            children: [],
-          },
-        },
-      });
     const safariFile = (title: string) =>
       new Uint8Array(
         serialize({
@@ -649,6 +662,57 @@ console.log(reply);
         await Bun.sleep(300);
         await replace(safariPath, safariFile("Renamed in Safari"));
         await waitFor(async () => (await cli.syncs()) === 3);
+      } finally {
+        await stopWatcher(proc);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("watcher syncs again for a browser edit the sync never read, though no event reports it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-unread-edit-"));
+    const chromeDataDir = join(dir, "Chrome");
+    const chromePath = join(chromeDataDir, "Default", "Bookmarks");
+    // The profile's file links to one outside its folder: an edit there raises no event.
+    const realPath = join(dir, "elsewhere", "Bookmarks");
+    const chrome = { browser: "chrome", profile: "default", path: chromePath } as const;
+    const a = { name: "A", url: "https://a.example/" };
+    const b = { name: "B", url: "https://b.example/" };
+    const fingerprintOf = async (bar: readonly (typeof a)[]) => {
+      await writeFile(realPath, chromeFile(bar));
+      return Fingerprint.ofTree(await run(Targets.readFileTree(chrome)));
+    };
+    const read = (fingerprint: string) =>
+      JSON.stringify({
+        ...syncDoneReply,
+        snapshot: { files: [{ path: chromePath, fingerprints: [fingerprint] }] },
+      });
+
+    try {
+      await mkdir(join(chromeDataDir, "Default"), { recursive: true });
+      await mkdir(join(dir, "elsewhere"));
+      await writeFile(
+        join(chromeDataDir, "Local State"),
+        JSON.stringify({ profile: { info_cache: { Default: {} } } }),
+      );
+      await symlink(realPath, chromePath);
+      const withB = await fingerprintOf([a, b]);
+      const withoutB = await fingerprintOf([a]);
+      // The first sync reads A, and Chrome saves B before the sync ends.
+      const cli = await writeFakeCli(
+        dir,
+        [read(withoutB), read(withB)],
+        [`await writeFile(${JSON.stringify(realPath)}, ${JSON.stringify(chromeFile([a, b]))});`],
+      );
+      const proc = await startWatcher(dir, cli.path, {
+        BOOKMARKS_DAEMON_SYNC_DELAY_MS: "100",
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+      });
+      try {
+        await waitFor(async () => (await cli.syncs()) === 2);
+        await Bun.sleep(400);
+        expect(await cli.syncs()).toBe(2);
       } finally {
         await stopWatcher(proc);
       }

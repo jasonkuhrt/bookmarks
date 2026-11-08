@@ -5,6 +5,8 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Chrome from "./chrome.ts";
+import * as Fingerprint from "./fingerprint.ts";
+import { stripManagedConfigHeader } from "./managed-config-header.ts";
 import { NativeRequestSchema } from "./chrome-native-protocol.ts";
 import { ChromeBridgeRuntime } from "./chrome-native-runtime.ts";
 import * as Safari from "./safari.ts";
@@ -520,6 +522,67 @@ describe("sync across browsers", () => {
     } finally {
       process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
     }
+  });
+
+  test("a sync's snapshot holds what every file it covered now holds", async () => {
+    const safari = { browser: "safari", path: world.safariPath } as const;
+    const chrome = { browser: "chrome", profile: "default", path: world.chromePath } as const;
+    const fileFingerprints = async () => ({
+      [world.yamlPath]: Fingerprint.ofText(
+        stripManagedConfigHeader(await readFile(world.yamlPath, "utf-8")),
+      ),
+      [world.safariPath]: Fingerprint.ofTree(await run(Targets.readFileTree(safari))),
+      [world.chromePath]: Fingerprint.ofTree(await run(Targets.readFileTree(chrome))),
+    });
+    const start = BookmarkTree.make({
+      bar: [leaf("A")],
+      menu: [leaf("Menu Item")],
+      reading_list: [leaf("Article")],
+    });
+    await run(YamlModule.save(world.yamlPath, sharedConfig(start)));
+    await writeSafari(world.safariPath, start);
+    await syncNow();
+
+    // Chrome's edit reaches the YAML and Safari, so the sync writes all three files.
+    await run(
+      Chrome.writeTree(
+        world.chromePath,
+        Targets.toChromeLayout(
+          BookmarkTree.make({
+            bar: [leaf("A"), leaf("B")],
+            menu: start.menu,
+            reading_list: start.reading_list,
+          }),
+        ),
+      ),
+    );
+    const result = await syncNow();
+
+    expect(result.yamlChanged).toBe(true);
+    const snapshot = new Map(
+      (result.snapshot?.files ?? []).map((file) => [file.path, file.fingerprints]),
+    );
+    for (const [path, fingerprint] of Object.entries(await fileFingerprints())) {
+      expect(snapshot.get(path)).toContain(fingerprint);
+    }
+  });
+
+  test("a paired Chrome's snapshot holds what its file held before the sync read it live", async () => {
+    const start = BookmarkTree.make({ bar: [leaf("A")] });
+    await run(YamlModule.save(world.yamlPath, sharedConfig(start)));
+    await writeSafari(world.safariPath, start);
+    const chrome = pairedChrome(BookmarkTree.make({ bar: [leaf("A"), leaf("Live")] }));
+    const fileBefore = Fingerprint.ofTree(
+      await run(
+        Targets.readFileTree({ browser: "chrome", profile: "default", path: world.chromePath }),
+      ),
+    );
+
+    const result = await run(syncThrough(chrome.layer));
+
+    const chromeFile = result.snapshot?.files.find((file) => file.path === world.chromePath);
+    expect(chromeFile?.fingerprints).toContain(fileBefore);
+    expect(chromeFile?.fingerprints).toContain(Fingerprint.ofTree(chrome.live()));
   });
 
   test("a YAML edit made while a sync runs is never overwritten", async () => {

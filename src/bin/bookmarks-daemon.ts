@@ -10,13 +10,11 @@ import {
   stripManagedConfigHeader,
   writeManagedConfigHeader,
 } from "../lib/managed-config-header.ts";
-import { Effect } from "effect";
+import { Effect, Option, Schema } from "effect";
+import * as Fingerprint from "../lib/fingerprint.ts";
 import * as Paths from "../lib/paths.ts";
 import * as Permissions from "../lib/permissions.ts";
 import * as Targets from "../lib/targets.ts";
-import * as Canonical from "../lib/canonical.ts";
-import * as Chrome from "../lib/chrome.ts";
-import * as Safari from "../lib/safari.ts";
 
 const DEFAULT_SYNC_DELAY_MS = 60_000;
 const BUSY_RETRY_DELAY_MS = 5_000;
@@ -82,9 +80,17 @@ const isDeferredSync = (syncResult: Record<string, unknown>): boolean => {
   );
 };
 
-const readComparableConfigText = async (yamlPath: string): Promise<string | undefined> => {
+/** What a finished sync read and left in each file it covered, when it said. */
+const snapshotOf = (syncResult: Record<string, unknown>): Option.Option<Fingerprint.SyncSnapshot> =>
+  Schema.decodeUnknownOption(Fingerprint.SyncSnapshot)(syncResult["snapshot"]);
+
+/**
+ * bookmarks.yaml's fingerprint, without the daemon's own header, so a header update is no
+ * edit. Undefined when the file can't be read.
+ */
+const yamlFingerprint = async (yamlPath: string): Promise<string | undefined> => {
   try {
-    return stripManagedConfigHeader(await Fs.readFile(yamlPath, "utf-8"));
+    return Fingerprint.ofText(stripManagedConfigHeader(await Fs.readFile(yamlPath, "utf-8")));
   } catch {
     return undefined;
   }
@@ -129,20 +135,15 @@ const browserTargets = async (): Promise<readonly Targets.TargetDescriptor[]> =>
 };
 
 /**
- * The bookmarks a browser's file holds, in canonical form. Browsers also rewrite the file for
- * metadata (Chrome Sync's state, last-used times), which must not queue a sync. Undefined when
- * the file can't be read, which counts as a change.
+ * The fingerprint of the bookmarks a browser's file holds. Browsers also rewrite the file for
+ * metadata (Chrome Sync's state, last-used times), which leaves it unchanged. Undefined when
+ * the file can't be read.
  */
 const bookmarksFingerprint = async (
   target: Targets.TargetDescriptor,
 ): Promise<string | undefined> => {
   try {
-    const tree = await Effect.runPromise(
-      target.browser === "safari"
-        ? Safari.readBookmarks(target.path)
-        : Chrome.readBookmarks(target.path),
-    );
-    return JSON.stringify(Canonical.canonicalTree(tree));
+    return Fingerprint.ofTree(await Effect.runPromise(Targets.readFileTree(target)));
   } catch {
     return undefined;
   }
@@ -235,7 +236,6 @@ const runWatcherProcess = async (): Promise<never> => {
     startedAt: new Date().toISOString(),
     yamlPath,
   };
-  let lastComparableText = (await readComparableConfigText(yamlPath)) ?? "";
   let queueTimer: ReturnType<typeof setTimeout> | undefined;
   let browserExitTimer: ReturnType<typeof setInterval> | undefined;
   let flushInProgress = false;
@@ -250,6 +250,58 @@ const runWatcherProcess = async (): Promise<never> => {
   }
 
   let pendingSchedule: ScheduleRequest | undefined;
+
+  /** Every watched file, with how to fingerprint what it holds. */
+  const watchedFiles = new Map<string, () => Promise<string | undefined>>([
+    [yamlPath, () => yamlFingerprint(yamlPath)],
+  ]);
+  /** Per watched file, the fingerprints of what a sync has taken in or is queued to. */
+  const settled = new Map<string, ReadonlySet<string>>();
+  const settle = (path: string, fingerprint: string | undefined): void => {
+    settled.set(path, new Set(fingerprint === undefined ? [] : [fingerprint]));
+  };
+  /**
+   * Whether a file holds content no sync has taken in or is queued to; such content is recorded,
+   * so one edit queues one sync. A file that can't be read always counts as changed.
+   */
+  const isNewContent = (path: string, fingerprint: string | undefined): boolean => {
+    if (fingerprint !== undefined && settled.get(path)?.has(fingerprint)) return false;
+    settle(path, fingerprint);
+    return true;
+  };
+  /**
+   * After a sync, each file it covered is settled at what it read and left there; any other file
+   * keeps what was settled when the sync began. A file holding anything else has an edit the
+   * sync never took in, whether or not its event has arrived, so it queues the next sync.
+   */
+  const settleAfterSync = async (
+    before: ReadonlyMap<string, ReadonlySet<string>>,
+    snapshot: Option.Option<Fingerprint.SyncSnapshot>,
+  ): Promise<boolean> => {
+    const covered = new Map(
+      Option.match(snapshot, {
+        onNone: () => [],
+        onSome: ({ files }) =>
+          files.map((file) => [file.path, new Set(file.fingerprints)] as const),
+      }),
+    );
+    const current = await fingerprintWatchedFiles();
+    let unsynced = false;
+    for (const [path, fingerprint] of current) {
+      settled.set(path, covered.get(path) ?? before.get(path) ?? new Set());
+      // A file that can't be read can't be compared; its next event queues a sync.
+      if (fingerprint !== undefined && isNewContent(path, fingerprint)) unsynced = true;
+    }
+    return unsynced;
+  };
+  const fingerprintWatchedFiles = async (): Promise<ReadonlyMap<string, string | undefined>> =>
+    new Map(
+      await Promise.all(
+        [...watchedFiles].map(
+          async ([path, fingerprintOf]) => [path, await fingerprintOf()] as const,
+        ),
+      ),
+    );
 
   const persistState = async (nextState: DaemonRuntimeState): Promise<void> => {
     state = pruneUndefined(nextState);
@@ -352,6 +404,7 @@ const runWatcherProcess = async (): Promise<never> => {
       return;
     }
     flushInProgress = true;
+    const settledBefore = new Map(settled);
 
     try {
       await updateState({
@@ -360,8 +413,6 @@ const runWatcherProcess = async (): Promise<never> => {
       });
 
       const syncResult = await runCliJson(["sync", "--json"]);
-      // The sync's own YAML write is not an edit to sync again.
-      lastComparableText = (await readComparableConfigText(yamlPath)) ?? lastComparableText;
       if (isDeferredSync(syncResult)) {
         errorRetryCount = 0;
         await updateState({ lastOutcome: "deferred" });
@@ -371,12 +422,14 @@ const runWatcherProcess = async (): Promise<never> => {
 
       errorRetryCount = 0;
       await watchBrowserFiles();
+      const unsynced = await settleAfterSync(settledBefore, snapshotOf(syncResult));
       await updateState({
         lastError: undefined,
         lastOutcome: changedAnything(syncResult) ? "success" : "noop",
         lastSyncAt: new Date().toISOString(),
         phase: "idle",
       });
+      if (unsynced) await scheduleSync(delayMs, new Date().toISOString());
       const waiting = waitingBrowsers(syncResult);
       if (waiting.size > 0 && pendingSchedule === undefined) await waitForBrowsersToQuit(waiting);
     } catch (error) {
@@ -401,19 +454,13 @@ const runWatcherProcess = async (): Promise<never> => {
   };
 
   const onYamlChange = async () => {
-    const comparableText = await readComparableConfigText(yamlPath);
-    // The daemon's own header updates leave the bookmarks unchanged.
-    if (comparableText !== undefined && comparableText === lastComparableText) return;
-    if (comparableText !== undefined) lastComparableText = comparableText;
+    if (!isNewContent(yamlPath, await yamlFingerprint(yamlPath))) return;
     errorRetryCount = 0;
     await scheduleSync(delayMs);
   };
 
-  const fingerprints = new Map<string, string | undefined>();
   const onBrowserChange = async (target: Targets.TargetDescriptor) => {
-    const fingerprint = await bookmarksFingerprint(target);
-    if (fingerprint !== undefined && fingerprint === fingerprints.get(target.path)) return;
-    fingerprints.set(target.path, fingerprint);
+    if (!isNewContent(target.path, await bookmarksFingerprint(target))) return;
     errorRetryCount = 0;
     await scheduleSync(delayMs, new Date().toISOString());
   };
@@ -448,28 +495,24 @@ const runWatcherProcess = async (): Promise<never> => {
     });
 
   const watchers = [watchFile(yamlPath, onYamlChange)];
-  const watchedBrowserFiles = new Set<string>();
   /**
    * Watch every browser bookmark file not watched yet. Runs at start and after each sync, so a
    * new Chrome profile, or a file macOS only lets the daemon see once it has Full Disk Access,
    * is picked up without a restart.
    */
   const watchBrowserFiles = async () => {
-    const targets = await browserTargets();
-    const current = await Promise.all(targets.map(bookmarksFingerprint));
-    for (const [index, target] of targets.entries()) {
-      // What the browser holds now is what the sync just saw or wrote.
-      fingerprints.set(target.path, current[index]);
-      if (watchedBrowserFiles.has(target.path)) continue;
+    for (const target of await browserTargets()) {
+      if (watchedFiles.has(target.path)) continue;
       try {
         watchers.push(watchFile(target.path, () => onBrowserChange(target)));
-        watchedBrowserFiles.add(target.path);
+        watchedFiles.set(target.path, () => bookmarksFingerprint(target));
       } catch (error) {
         console.error(`Failed to watch ${target.path}: ${messageFromUnknown(error)}`);
       }
     }
   };
   await watchBrowserFiles();
+  for (const [path, fingerprint] of await fingerprintWatchedFiles()) settle(path, fingerprint);
 
   const cleanup = async (exitCode: number) => {
     for (const watcher of watchers) watcher.close();
