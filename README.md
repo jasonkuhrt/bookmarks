@@ -205,7 +205,7 @@ bookmarks sync
 
 ## Global Install Notes
 
-On this machine, `bun install -g .` creates a launcher that points back to the repo source. Normal edits under `src/` are picked up immediately by the global `bookmarks` command.
+`just install-global` runs `bun link`, which links the global package to this checkout, so the global `bookmarks` command and the daemon run the repo's `src/` as it is. (`bun install -g .` instead hard-links a copy, which drifts from the repo whenever a file is replaced rather than edited in place, as git and formatters do.)
 
 Rerun `just install-global` when launcher wiring changes, for example after changing:
 

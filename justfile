@@ -10,7 +10,7 @@ hooks-install:
   git-hooks install
 
 install-global:
-  bun install -g .
+  bun link
 
 build:
   bun run build
