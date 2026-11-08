@@ -16,6 +16,12 @@ export const bindingsPath = (): string => Path.join(Paths.defaultConfigDir(), "c
 export const socketPath = (instanceId: string): string =>
   Path.join(bridgeDirectory(), `${Schema.decodeUnknownSync(InstanceIdSchema)(instanceId)}.sock`);
 
+export const readingListStampPath = (instanceId: string): string =>
+  Path.join(
+    Paths.defaultRuntimeDir(),
+    `${Schema.decodeUnknownSync(InstanceIdSchema)(instanceId)}.reading-list`,
+  );
+
 export interface Runtime {
   readonly loadBindings: Effect.Effect<readonly Binding[], Error>;
   readonly saveBindings: (bindings: readonly Binding[]) => Effect.Effect<void, Error>;

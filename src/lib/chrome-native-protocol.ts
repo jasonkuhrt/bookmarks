@@ -1,7 +1,7 @@
 import { Schema } from "effect";
-import { BookmarkTree } from "./schema/__.ts";
+import { BookmarkTree, ReadingListItem, TargetState } from "./schema/__.ts";
 
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 export const maxMessageBytes = 1_000_000;
 export const InstanceIdSchema = Schema.String.pipe(
   Schema.pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
@@ -10,6 +10,7 @@ export const HelloSchema = Schema.Struct({
   type: Schema.Literal("hello"),
   version: Schema.Literal(protocolVersion),
   instanceId: InstanceIdSchema,
+  capabilities: Schema.Array(Schema.String),
 });
 export const NativeRequestSchema = Schema.Union(
   Schema.Struct({ id: Schema.String, operation: Schema.Literal("snapshot") }),
@@ -18,14 +19,28 @@ export const NativeRequestSchema = Schema.Union(
     operation: Schema.Literal("reconcile"),
     expectedTree: BookmarkTree,
     tree: BookmarkTree,
+    expectedReadingList: Schema.Array(ReadingListItem),
+    readingList: Schema.Array(ReadingListItem),
   }),
 );
 export type NativeRequest = typeof NativeRequestSchema.Type;
-export const NativeResponseSchema = Schema.Union(
-  Schema.Struct({ id: Schema.String, ok: Schema.Literal(true), value: BookmarkTree }),
+export const ExtensionResponseSchema = Schema.Union(
+  Schema.Struct({ id: Schema.String, ok: Schema.Literal(true), value: TargetState }),
   Schema.Struct({ id: Schema.String, ok: Schema.Literal(false), error: Schema.String }),
 );
-export type NativeResponse = typeof NativeResponseSchema.Type;
+export type NativeResponse = typeof ExtensionResponseSchema.Type;
+export const NativeResponseSchema = Schema.extend(
+  ExtensionResponseSchema,
+  Schema.Struct({
+    hostVersion: Schema.Literal(protocolVersion),
+    version: Schema.Literal(protocolVersion),
+    capabilities: Schema.Array(Schema.String),
+  }),
+);
+export const ReadingListChangedSchema = Schema.Struct({
+  type: Schema.Literal("readingListChanged"),
+  fingerprint: Schema.String,
+});
 
 /** Native messaging uses a length-prefixed JSON frame on Chrome's stdio pipe. */
 export const encodeFrame = (value: unknown): Uint8Array => {

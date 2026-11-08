@@ -9,6 +9,8 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
+  SharedBookmarks,
+  ReadingListItem,
 } from "./schema/__.ts";
 import * as YamlModule from "./yaml.ts";
 
@@ -73,27 +75,24 @@ describe("absorbTargetTree", () => {
     expect(await resolve(next, safari)).toEqual(safariTree);
   });
 
-  test("Chrome's reading list is the shared one, and sections a browser lacks are untouched", async () => {
+  test("tree absorption leaves the separate shared Reading List untouched", () => {
+    const items = [
+      ReadingListItem.make({ name: "Article", url: "https://article.example/", read: true }),
+    ];
     const config = BookmarksConfig.make({
-      all: BookmarkTree.make({ reading_list: [leaf("Article")], mobile: [leaf("Phone")] }),
+      all: SharedBookmarks.make({ reading_list: items, mobile: [leaf("Phone")] }),
     });
-
     const fromChrome = Layers.absorbTargetTree(
       config,
       chrome,
-      BookmarkTree.make({
-        reading_list: [leaf("Article"), leaf("Later")],
-        mobile: [leaf("Phone")],
-      }),
+      BookmarkTree.make({ mobile: [leaf("Phone")] }),
     );
-    expect(names(fromChrome.all.reading_list)).toEqual(["Article", "Later"]);
-
     const fromSafari = Layers.absorbTargetTree(
       fromChrome,
       safari,
-      BookmarkTree.make({ reading_list: [leaf("Later")] }),
+      BookmarkTree.make({ bar: [leaf("Later")] }),
     );
-    expect(names(fromSafari.all.reading_list)).toEqual(["Later"]);
+    expect(fromSafari.all.reading_list).toEqual(items);
     expect(names(fromSafari.all.mobile)).toEqual(["Phone"]);
   });
 

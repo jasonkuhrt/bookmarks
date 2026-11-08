@@ -9,7 +9,9 @@
  * read-back check.
  */
 
+import * as ReadingList from "./reading-list.ts";
 import {
+  SharedBookmarks,
   BookmarkFolder,
   BookmarkLeaf,
   type BookmarkNode,
@@ -70,21 +72,26 @@ export const canonicalTree = (tree: BookmarkTree): BookmarkTree =>
   BookmarkTree.make({
     ...(tree.bar ? { bar: tree.bar.map(canonicalNode) } : {}),
     ...(tree.menu ? { menu: tree.menu.map(canonicalNode) } : {}),
-    ...(tree.reading_list ? { reading_list: tree.reading_list.map(canonicalNode) } : {}),
     ...(tree.mobile ? { mobile: tree.mobile.map(canonicalNode) } : {}),
   });
 
 export const canonicalConfig = (config: BookmarksConfig): BookmarksConfig =>
   BookmarksConfig.make({
     version: config.version,
-    all: canonicalTree(config.all),
+    all: SharedBookmarks.make({
+      bar: canonicalSection(config.all.bar),
+      menu: canonicalSection(config.all.menu),
+      mobile: canonicalSection(config.all.mobile),
+      reading_list: config.all.reading_list
+        ? ReadingList.canonical(config.all.reading_list)
+        : undefined,
+    }),
     ...(config.safari
       ? {
           safari: SafariBookmarks.make({
             enabled: config.safari.enabled,
             bar: canonicalSection(config.safari.bar),
             menu: canonicalSection(config.safari.menu),
-            reading_list: canonicalSection(config.safari.reading_list),
           }),
         }
       : {}),

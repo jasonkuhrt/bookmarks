@@ -18,7 +18,11 @@ import {
   BookmarkTree,
   ChromeBookmarks,
   ChromeProfileBookmarks,
+  ReadingListItem,
+  TargetState,
+  SharedBookmarks,
 } from "../lib/schema/__.ts";
+import * as Baseline from "../lib/baseline.ts";
 import * as YamlModule from "../lib/yaml.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
@@ -309,7 +313,7 @@ describe("bookmarks CLI", () => {
       expect(sync.exitCode).toBe(0);
       expect(sync.stdout).toContain("Sync complete");
       expect(sync.stdout).toContain("chrome/default");
-      expect(sync.stdout).toContain('Add "Top Link"');
+      expect(sync.stdout).toContain('Add "Docs"');
 
       const syncJson = await runCommand(
         dir,
@@ -320,9 +324,8 @@ describe("bookmarks CLI", () => {
       const parsedSync = parseJsonObject(syncJson.stdout);
       expect(readString(parsedSync, "command")).toBe("sync");
       expect(readBoolean(parsedSync, "dryRun")).toBe(true);
-      const preview = expectPresent(readNullableObject(parsedSync, "preview"), "Expected preview");
-      const firstPreviewTarget = readFirstObject(readArray(preview, "targets"), "preview.targets");
-      expect(readArray(firstPreviewTarget, "pendingToYaml").length).toBeGreaterThan(0);
+      expect(readBoolean(parsedSync, "yamlChanged")).toBe(true);
+      expect(readArray(parsedSync, "targets").length).toBeGreaterThan(0);
 
       const schema = await readFile(schemaPath, "utf-8");
       expect(schema).toContain('"$schema"');
@@ -391,7 +394,6 @@ describe("bookmarks CLI", () => {
       expect(preview.exitCode).toBe(0);
       const parsedPreview = parseJsonObject(preview.stdout);
       expect(readString(parsedPreview, "mode")).toBe("from-yaml");
-      expect(readNullableObject(parsedPreview, "preview")).toBeNull();
       const previewTarget = readFirstObject(readArray(parsedPreview, "targets"), "targets");
       expect(readString(readObject(previewTarget, "target"), "profile")).toBe("profile-1");
       expect(readArray(previewTarget, "applied").length).toBeGreaterThan(0);
@@ -921,4 +923,83 @@ esac
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+test("dry-run human and JSON output show the actual Reading List plan", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-reading-list-"));
+  const yamlPath = join(dir, "bookmarks.yaml");
+  const safariPath = join(dir, "Safari", "Bookmarks.plist");
+  const baselinePath = join(dir, "state", "sync-baseline.yaml");
+  const article = (name: string, read: boolean, id: string) =>
+    ReadingListItem.make({ name, read, url: `https://${id}.example/` });
+  const observed = [
+    article("B", false, "b"),
+    article("C", false, "c"),
+    article("D", true, "d"),
+    article("E", false, "e"),
+  ];
+  const desired = [
+    article("A", false, "a"),
+    article("Renamed B", false, "b"),
+    article("C", true, "c"),
+    article("D", false, "d"),
+  ];
+  try {
+    await mkdir(join(dir, "Safari"), { recursive: true });
+    await Bun.write(
+      safariPath,
+      serialize({
+        Children: [
+          {
+            WebBookmarkType: "WebBookmarkTypeList",
+            Title: "com.apple.ReadingList",
+            Children: observed.map((item) => ({
+              WebBookmarkType: "WebBookmarkTypeLeaf",
+              URLString: item.url,
+              URIDictionary: { title: item.name },
+              ReadingList: item.read ? { DateLastViewed: new Date("2026-01-01T00:00:00Z") } : {},
+            })),
+          },
+        ],
+      }),
+    );
+    const safariBefore = await Bun.file(safariPath).arrayBuffer();
+    await run(
+      YamlModule.save(
+        yamlPath,
+        BookmarksConfig.make({ all: SharedBookmarks.make({ reading_list: desired }) }),
+      ),
+    );
+    await run(
+      Baseline.save(
+        { safari: TargetState.make({ tree: BookmarkTree.make({}), readingList: observed }) },
+        baselinePath,
+      ),
+    );
+    const env = withCliEnv(dir, {
+      BOOKMARKS_CONFIG_DIR: join(dir, "config"),
+      BOOKMARKS_RUNTIME_DIR: join(dir, "runtime"),
+      BOOKMARKS_YAML_PATH: yamlPath,
+      BOOKMARKS_SCHEMA_PATH: join(dir, "schema.json"),
+      BOOKMARKS_CHROME_DATA_DIR: join(dir, "absent"),
+      BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+    });
+    const cli = join(import.meta.dir, "bookmarks.ts");
+    const human = await runCommand(dir, [bunBinary, cli, "sync", "--dry-run"], env);
+    expect(human.exitCode).toBe(0);
+    for (const word of ["added", "removed", "renamed", "marked read", "marked unread"])
+      expect(human.stdout).toContain(word);
+    const json = await runCommand(dir, [bunBinary, cli, "sync", "--dry-run", "--json"], env);
+    expect(json.exitCode).toBe(0);
+    const result = parseJsonObject(json.stdout);
+    const target = readFirstObject(readArray(result, "targets"), "targets");
+    expect(
+      readArray(target, "readingListChanges")
+        .map((change) => readString(readObject({ change }, "change"), "tag"))
+        .sort(),
+    ).toEqual(["Added", "MarkedRead", "MarkedUnread", "Removed", "Renamed"]);
+    expect(await Bun.file(safariPath).arrayBuffer()).toEqual(safariBefore);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

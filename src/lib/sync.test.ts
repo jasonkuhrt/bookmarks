@@ -1,3 +1,4 @@
+import { TargetState } from "./schema/__.ts";
 import { describe, expect, test } from "bun:test";
 import { DateTime, Effect, Layer, Schema } from "effect";
 import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -925,14 +926,28 @@ describe("push", () => {
         Effect.sync(() => {
           const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
           if (decoded.operation === "snapshot") {
-            return { id: decoded.id, ok: true as const, value: liveTree };
+            return {
+              id: decoded.id,
+              ok: true as const,
+              value: TargetState.make({ tree: liveTree, readingList: [] }),
+              version: 2,
+              hostVersion: 2,
+              capabilities: ["readingList"],
+            };
           }
 
           reconcileCalls += 1;
           expect(decoded.expectedTree).toEqual(liveTree);
           expect(decoded.tree).toEqual(canonicalDesiredTree);
           if (persistReconciliation) liveTree = decoded.tree;
-          return { id: decoded.id, ok: true as const, value: decoded.tree };
+          return {
+            id: decoded.id,
+            ok: true as const,
+            value: TargetState.make({ tree: decoded.tree, readingList: [] }),
+            version: 2,
+            hostVersion: 2,
+            capabilities: ["readingList"],
+          };
         }),
       launch: () => Effect.die("Unexpected browser launch"),
     });
@@ -968,13 +983,15 @@ describe("push", () => {
       );
       expect(liveBackupPath).toBeDefined();
       if (!liveBackupPath) throw new Error("Expected a live Chrome tree backup");
-      const liveBackup = Schema.decodeUnknownSync(BookmarkTree)(
+      const liveBackup = Schema.decodeUnknownSync(TargetState)(
         JSON.parse(await readFile(liveBackupPath, "utf-8")),
-      );
+      ).tree;
       expect(liveBackup).toEqual(initialTree);
 
       const baseline = await run(Baseline.load(syncBaselinePath));
-      expect(baseline).toEqual({ "chrome/default": canonicalDesiredTree });
+      expect(baseline).toEqual({
+        "chrome/default": TargetState.make({ tree: canonicalDesiredTree, readingList: [] }),
+      });
 
       const status = await Effect.runPromise(Sync.status({ yamlPath }).pipe(Effect.provide(layer)));
       expect(status.targets[0]?.yamlPatches).toEqual([]);
@@ -1725,7 +1742,7 @@ describe("sync", () => {
 
       expect(await Bun.file(syncBaselinePath).exists()).toBe(true);
       const initialBaseline = await run(Baseline.load(syncBaselinePath));
-      expect(initialBaseline["chrome/default"]?.bar?.map((node) => node.name)).toEqual([
+      expect(initialBaseline["chrome/default"]?.tree.bar?.map((node) => node.name)).toEqual([
         "Existing Empty",
         "Imported",
       ]);
@@ -1746,7 +1763,12 @@ describe("sync", () => {
       expect(browserTree).toEqual(updatedConfig.all);
 
       const managedBaseline = await run(Baseline.load(syncBaselinePath));
-      expect(managedBaseline).toEqual({ "chrome/default": updatedConfig.all });
+      expect(managedBaseline).toEqual({
+        "chrome/default": TargetState.make({
+          tree: BookmarkTree.make(updatedConfig.all),
+          readingList: [],
+        }),
+      });
     } finally {
       discovery.restore();
       if (originalBackupDir === undefined) {
@@ -1829,7 +1851,11 @@ describe("status and backup", () => {
         ),
       );
 
-      await run(Baseline.save({ "chrome/default": BookmarkTree.make({}) }));
+      await run(
+        Baseline.save({
+          "chrome/default": TargetState.make({ tree: BookmarkTree.make({}), readingList: [] }),
+        }),
+      );
 
       const result = await run(
         Sync.backup({

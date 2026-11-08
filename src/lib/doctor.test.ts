@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as ChromeBridge from "./chrome-native-runtime.ts";
+import * as ChromeNativeProtocol from "./chrome-native-protocol.ts";
 import * as Doctor from "./doctor.ts";
 import {
   BookmarkTree,
@@ -11,6 +12,7 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
+  TargetState,
 } from "./schema/__.ts";
 import { copyChromeBookmarksFixture } from "./test-fixtures.ts";
 import * as YamlModule from "./yaml.ts";
@@ -94,7 +96,14 @@ const pairedRuntime = (
   request: () => response,
 });
 
-const connected = Effect.succeed({ id: "cli", ok: true, value: BookmarkTree.make({}) });
+const connected = Effect.succeed({
+  id: "cli",
+  ok: true,
+  value: TargetState.make({ tree: BookmarkTree.make({}), readingList: [] }),
+  version: ChromeNativeProtocol.protocolVersion,
+  hostVersion: ChromeNativeProtocol.protocolVersion,
+  capabilities: ["readingList"],
+});
 
 // -- DoctorCheck / DoctorResult types --
 

@@ -15,18 +15,19 @@ import {
   type BookmarkNode,
   type BookmarkSection,
   BookmarksConfig,
-  BookmarkTree,
+  type BookmarkTree,
+  SharedBookmarks,
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
 } from "./schema/__.ts";
 
-export const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
+export const sectionKeys = ["bar", "menu", "mobile"] as const;
 export type SectionKey = (typeof sectionKeys)[number];
 
 const supportedSectionsByBrowser: Record<string, readonly SectionKey[]> = {
-  safari: ["bar", "menu", "reading_list"],
-  chrome: ["bar", "menu", "reading_list", "mobile"],
+  safari: ["bar", "menu"],
+  chrome: ["bar", "menu", "mobile"],
 };
 
 export const sectionKeysForBrowser = (browser: string): readonly SectionKey[] =>
@@ -44,8 +45,7 @@ type Layer =
   | { readonly _tag: "chromeProfile"; readonly profile: string };
 
 /**
- * The layers a target reads a section from, outermost first. Chrome's reading list is the
- * shared one only: the YAML has no Chrome-specific reading list.
+ * The layers a target reads a bookmark section from, outermost first.
  */
 const layersFor = (target: LayerTarget, section: SectionKey): readonly Layer[] => {
   if (!sectionKeysForBrowser(target.browser).includes(section)) return [];
@@ -53,7 +53,6 @@ const layersFor = (target: LayerTarget, section: SectionKey): readonly Layer[] =
     case "safari":
       return [{ _tag: "all" }, { _tag: "safari" }];
     case "chrome":
-      if (section === "reading_list") return [{ _tag: "all" }];
       return target.profile
         ? [{ _tag: "all" }, { _tag: "chrome" }, { _tag: "chromeProfile", profile: target.profile }]
         : [{ _tag: "all" }, { _tag: "chrome" }];
@@ -73,11 +72,9 @@ const layerSection = (
     case "safari":
       return section === "mobile" ? undefined : config.safari?.[section];
     case "chrome":
-      return section === "reading_list" ? undefined : config.chrome?.[section];
+      return config.chrome?.[section];
     case "chromeProfile":
-      return section === "reading_list"
-        ? undefined
-        : config.chrome?.profiles?.[layer.profile]?.[section];
+      return config.chrome?.profiles?.[layer.profile]?.[section];
   }
 };
 
@@ -101,7 +98,7 @@ const withLayerSection = (
       const all = config.all;
       return BookmarksConfig.make({
         version: config.version,
-        all: BookmarkTree.make({
+        all: SharedBookmarks.make({
           bar: all.bar,
           menu: all.menu,
           reading_list: all.reading_list,
@@ -125,7 +122,6 @@ const withLayerSection = (
               enabled: safari?.enabled,
               bar: safari?.bar,
               menu: safari?.menu,
-              reading_list: safari?.reading_list,
             },
             section,
             nodes,
@@ -135,7 +131,6 @@ const withLayerSection = (
       });
     }
     case "chrome": {
-      if (section === "reading_list") return config;
       if (!config.chrome && nodes.length === 0) return config;
       const chrome = config.chrome;
       return BookmarksConfig.make({
@@ -158,7 +153,6 @@ const withLayerSection = (
       });
     }
     case "chromeProfile": {
-      if (section === "reading_list") return config;
       const existing = config.chrome?.profiles?.[layer.profile];
       if (!existing && nodes.length === 0) return config;
       const chrome = config.chrome;

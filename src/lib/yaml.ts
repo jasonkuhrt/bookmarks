@@ -97,9 +97,7 @@ const ensureChromeTreeDoesNotUseReadingList = (
   label: string,
 ): void => {
   if (tree?.["reading_list"] !== undefined) {
-    throw new Error(
-      `${label} cannot define reading_list. Use top-level all.reading_list or safari.reading_list instead.`,
-    );
+    throw new Error(`${label} cannot define reading_list. Use shared all.reading_list instead.`);
   }
 };
 
@@ -192,6 +190,7 @@ const normalizeDocument = (value: unknown): unknown => {
       : {}),
   };
 
+  ensureChromeTreeDoesNotUseReadingList(normalized.safari, "safari");
   const chrome = normalized["chrome"];
   if (chrome && isRecord(chrome)) {
     ensureChromeTreeDoesNotUseReadingList(chrome, "chrome");
@@ -209,13 +208,10 @@ const normalizeDocument = (value: unknown): unknown => {
   return normalized;
 };
 
-const treeFrom = (
-  value: Pick<BookmarkTree, "bar" | "menu" | "reading_list" | "mobile"> | undefined,
-): BookmarkTree =>
+const treeFrom = (value: Pick<BookmarkTree, "bar" | "menu" | "mobile"> | undefined): BookmarkTree =>
   BookmarkTree.make({
     bar: value?.bar,
     menu: value?.menu,
-    reading_list: value?.reading_list,
     mobile: value?.mobile,
   });
 
@@ -224,7 +220,6 @@ const projectTreeForBrowser = (tree: BookmarkTree, browser: string): BookmarkTre
   return BookmarkTree.make({
     bar: supportedSections.has("bar") ? tree.bar : undefined,
     menu: supportedSections.has("menu") ? tree.menu : undefined,
-    reading_list: supportedSections.has("reading_list") ? tree.reading_list : undefined,
     mobile: supportedSections.has("mobile") ? tree.mobile : undefined,
   });
 };
@@ -233,7 +228,6 @@ const mergeTrees = (base: BookmarkTree, overlay: BookmarkTree): BookmarkTree =>
   BookmarkTree.make({
     bar: mergeSection(base.bar, overlay.bar),
     menu: mergeSection(base.menu, overlay.menu),
-    reading_list: mergeSection(base.reading_list, overlay.reading_list),
     mobile: mergeSection(base.mobile, overlay.mobile),
   });
 
@@ -246,7 +240,9 @@ export const decodeDocument = (
       try: () => normalizeDocument(value),
       catch: (error) => new Error(`Failed to normalize ${source}: ${messageFromUnknown(error)}`),
     });
-    return yield* Schema.decodeUnknown(BookmarksConfig)(normalized).pipe(
+    return yield* Schema.decodeUnknown(BookmarksConfig)(normalized, {
+      onExcessProperty: "error",
+    }).pipe(
       Effect.mapError((e) => new Error(`Schema validation failed for ${source}: ${e.message}`)),
     );
   });
@@ -262,10 +258,14 @@ export const load = (path: string): Effect.Effect<BookmarksConfig, Error> =>
       try: () => Yaml.parse(raw) as unknown,
       catch: (error) => new Error(`Failed to parse ${path}: ${messageFromUnknown(error)}`),
     });
-    return Canonical.canonicalConfig(yield* decodeDocument(parsed, path));
+    const config = yield* decodeDocument(parsed, path);
+    return yield* Effect.try({
+      try: () => Canonical.canonicalConfig(config),
+      catch: (cause) => new Error(messageFromUnknown(cause)),
+    });
   });
 
-const encodeConfig = (config: BookmarksConfig): Effect.Effect<unknown, Error> =>
+const encodeConfig = (config: BookmarksConfig) =>
   Schema.encode(BookmarksConfig)(
     BookmarksConfig.make({
       version: 2,
@@ -292,7 +292,26 @@ const encodeConfig = (config: BookmarksConfig): Effect.Effect<unknown, Error> =>
 
 /** The YAML body a config saves as, without the managed header: equal text, equal bookmarks. */
 export const render = (config: BookmarksConfig): Effect.Effect<string, Error> =>
-  encodeConfig(config).pipe(Effect.map((encoded) => Yaml.stringify(encoded, { indent: 2 })));
+  Effect.try({
+    try: () => Canonical.canonicalConfig(config),
+    catch: (cause) => new Error(messageFromUnknown(cause)),
+  }).pipe(
+    Effect.flatMap(encodeConfig),
+    Effect.map((encoded) =>
+      Yaml.stringify(
+        {
+          ...encoded,
+          all: {
+            ...encoded.all,
+            reading_list: encoded.all.reading_list?.map(({ read, ...item }) =>
+              read ? { ...item, read: true } : item,
+            ),
+          },
+        },
+        { indent: 2 },
+      ),
+    ),
+  );
 
 /** Write a BookmarksConfig back to bookmarks.yaml, keeping the daemon's managed header. */
 export const save = (path: string, config: BookmarksConfig): Effect.Effect<void, Error> =>

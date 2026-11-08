@@ -91,7 +91,6 @@ describe("schema models", () => {
       enabled: true,
       bar: [new BookmarkLeaf({ name: "Bar", url: "https://bar.example" })],
       menu: [new BookmarkLeaf({ name: "Menu", url: "https://menu.example" })],
-      reading_list: [new BookmarkLeaf({ name: "Read", url: "https://read.example" })],
     });
     const defaultProfile = new ChromeProfileBookmarks({
       enabled: true,
@@ -124,7 +123,6 @@ describe("schema models", () => {
       enabled: true,
       bar: [{ _tag: "BookmarkLeaf", name: "Bar", url: "https://bar.example" }],
       menu: [{ _tag: "BookmarkLeaf", name: "Menu", url: "https://menu.example" }],
-      reading_list: [{ _tag: "BookmarkLeaf", name: "Read", url: "https://read.example" }],
     });
     const defaultProfile = Schema.decodeUnknownSync(ChromeProfileBookmarks)({
       enabled: true,
@@ -158,7 +156,6 @@ describe("schema models", () => {
         enabled: true,
         bar: [{ _tag: "BookmarkLeaf", name: "Bar", url: "https://bar.example" }],
         menu: [{ _tag: "BookmarkLeaf", name: "Menu", url: "https://menu.example" }],
-        reading_list: [{ _tag: "BookmarkLeaf", name: "Read", url: "https://read.example" }],
       },
       chrome: {
         enabled: true,

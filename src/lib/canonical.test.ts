@@ -8,6 +8,8 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
+  SharedBookmarks,
+  ReadingListItem,
 } from "./schema/__.ts";
 
 const pinboardAsTyped =
@@ -53,7 +55,6 @@ test("trees and configs are canonical in every section and overlay, idempotently
         children: [BookmarkLeaf.make({ name: "Example", url: "https://EXAMPLE.com" })],
       }),
     ],
-    reading_list: [BookmarkLeaf.make({ name: "A\nB", url: pinboardAsTyped })],
   });
   const tree = Canonical.canonicalTree(raw);
   expect(tree).toEqual(
@@ -64,24 +65,33 @@ test("trees and configs are canonical in every section and overlay, idempotently
           children: [BookmarkLeaf.make({ name: "Example", url: "https://example.com/" })],
         }),
       ],
-      reading_list: [BookmarkLeaf.make({ name: "A B", url: pinboardAsChromeStores })],
     }),
   );
   expect(Canonical.canonicalTree(tree)).toEqual(tree);
 
   const config = Canonical.canonicalConfig(
     BookmarksConfig.make({
-      all: raw,
-      safari: SafariBookmarks.make({ enabled: true, reading_list: raw.reading_list }),
+      all: SharedBookmarks.make({
+        bar: raw.bar,
+        menu: raw.menu,
+        mobile: raw.mobile,
+        reading_list: [
+          ReadingListItem.make({ name: " A  B ", url: "https://EXAMPLE.com", read: true }),
+        ],
+      }),
+      safari: SafariBookmarks.make({ enabled: true, bar: raw.bar }),
       chrome: ChromeBookmarks.make({
         menu: raw.bar,
-        profiles: { work: ChromeProfileBookmarks.make({ bar: raw.reading_list }) },
+        profiles: { work: ChromeProfileBookmarks.make({ bar: raw.bar }) },
       }),
     }),
   );
-  expect(config.all).toEqual(tree);
+  expect(Canonical.canonicalTree(config.all)).toEqual(tree);
+  expect(config.all.reading_list).toEqual([
+    ReadingListItem.make({ name: "A B", url: "https://example.com/", read: true }),
+  ]);
   expect(config.safari?.enabled).toBe(true);
-  expect(config.safari?.reading_list).toEqual(tree.reading_list);
+  expect(config.safari?.bar).toEqual(tree.bar);
   expect(config.chrome?.menu).toEqual(tree.bar);
-  expect(config.chrome?.profiles?.["work"]?.bar).toEqual(tree.reading_list);
+  expect(config.chrome?.profiles?.["work"]?.bar).toEqual(tree.bar);
 });

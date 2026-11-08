@@ -3,7 +3,7 @@
 import { Context, Effect, Schema } from "effect";
 import * as Fs from "node:fs/promises";
 import * as Net from "node:net";
-import { bridgeDirectory, socketPath } from "../lib/chrome-native-runtime.ts";
+import { bridgeDirectory, socketPath, readingListStampPath } from "../lib/chrome-native-runtime.ts";
 import { extensionId } from "../lib/chrome-native-setup.ts";
 import {
   encodeFrame,
@@ -11,7 +11,9 @@ import {
   makeFrameDecoder,
   maxMessageBytes,
   NativeRequestSchema,
-  NativeResponseSchema,
+  ExtensionResponseSchema,
+  ReadingListChangedSchema,
+  protocolVersion,
 } from "../lib/chrome-native-protocol.ts";
 
 const runLive = () =>
@@ -28,6 +30,9 @@ const runLive = () =>
     let server: Net.Server | undefined;
     let ownedPath: string | undefined;
     let ownedInode: number | undefined;
+    let hello: typeof HelloSchema.Type | undefined;
+    const settled = async (): Promise<void> => undefined;
+    let incoming = settled();
     let initialized = false;
     let stopped = false;
 
@@ -129,36 +134,65 @@ const runLive = () =>
         stop(error);
       });
     };
-    const listenOrStop = async (instanceId: string) => {
+    const receive = async (value: unknown): Promise<void> => {
+      if (!initialized) {
+        hello = Schema.decodeUnknownSync(HelloSchema)(value);
+        initialized = true;
+        clearTimeout(handshakeTimer);
+        await listen(hello.instanceId);
+        return;
+      }
+      const change = Schema.decodeUnknownOption(ReadingListChangedSchema)(value);
+      if (change._tag === "Some" && hello) {
+        const path = readingListStampPath(hello.instanceId);
+        const temporary = `${path}.${process.pid}.tmp`;
+        await Fs.writeFile(temporary, change.value.fingerprint + "\n", { mode: 0o600 });
+        await Fs.rename(temporary, path);
+        return;
+      }
+      const response = Schema.decodeUnknownSync(ExtensionResponseSchema)(value);
+      const request = pending.get(response.id);
+      if (!request) return;
+      pending.delete(response.id);
+      request.socket.end(
+        JSON.stringify({
+          ...response,
+          id: request.clientId,
+          hostVersion: protocolVersion,
+          version: hello?.version,
+          capabilities: hello?.capabilities,
+        }) + "\n",
+      );
+    };
+    const receiveAfter = async (
+      previous: Promise<void>,
+      values: readonly unknown[],
+    ): Promise<void> => {
       try {
-        await listen(instanceId);
-      } catch (error) {
-        stop(error instanceof Error ? error : new Error(String(error)));
+        await previous;
+        // Frame order includes durable stamps before the following response is visible to CLI.
+        await Effect.runPromise(
+          Effect.forEach(values, (value) => Effect.promise(() => receive(value)), {
+            discard: true,
+          }),
+        );
+      } catch {
+        stop(new Error("Invalid native message from Chrome bookmarks extension."));
       }
     };
-
     process.stdin.on("data", (chunk: Buffer) => {
       try {
-        for (const value of decode(chunk)) {
-          if (!initialized) {
-            const hello = Schema.decodeUnknownSync(HelloSchema)(value);
-            initialized = true;
-            clearTimeout(handshakeTimer);
-            void listenOrStop(hello.instanceId);
-            continue;
-          }
-          const response = Schema.decodeUnknownSync(NativeResponseSchema)(value);
-          const request = pending.get(response.id);
-          if (!request) continue;
-          pending.delete(response.id);
-          request.socket.end(JSON.stringify({ ...response, id: request.clientId }) + "\n");
-        }
+        incoming = receiveAfter(incoming, decode(chunk));
       } catch {
         stop(new Error("Invalid native message from Chrome bookmarks extension."));
       }
     });
-    process.stdin.on("end", () => {
+    const finishInput = async () => {
+      await incoming;
       stop();
+    };
+    process.stdin.on("end", () => {
+      void finishInput();
     });
     process.stdin.on("error", (error) => {
       stop(error);

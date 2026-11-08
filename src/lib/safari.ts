@@ -8,12 +8,19 @@
 
 import { parse } from "@plist/binary.parse";
 import { serialize } from "@plist/binary.serialize";
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, HashMap, Option, Schema } from "effect";
 import { rename } from "node:fs/promises";
 import * as Canonical from "./canonical.ts";
+import * as ReadingList from "./reading-list.ts";
 import * as Patch from "./patch.ts";
 import type { BookmarkNode, BookmarkSection } from "./schema/__.ts";
-import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
+import {
+  BookmarkFolder,
+  BookmarkLeaf,
+  BookmarkTree,
+  ReadingListItem,
+  TargetState,
+} from "./schema/__.ts";
 import { separatorIssue, UnsupportedBookmarks, unsupportedNodeIssue } from "./unsupported.ts";
 import type { BookmarkIssue } from "./unsupported.ts";
 
@@ -191,19 +198,17 @@ const SafariFolderTransform = Schema.transform(
 
 const SECTION_TITLE_TO_KEY: Record<string, keyof Omit<BookmarkTree, "_tag">> = {
   BookmarksBar: "bar",
-  "com.apple.ReadingList": "reading_list",
 };
 
 const SECTION_KEY_TO_TITLE = {
   bar: "BookmarksBar",
   menu: "BookmarksMenu",
-  reading_list: "com.apple.ReadingList",
 };
 
 // -- readBookmarks --
 
 /** Read Safari bookmarks from a binary plist path into a clean BookmarkTree. */
-export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Error> =>
+export const readState = (plistPath: string): Effect.Effect<TargetState, Error> =>
   Effect.gen(function* () {
     const data = yield* Effect.tryPromise({
       try: () => Bun.file(plistPath).arrayBuffer(),
@@ -214,10 +219,28 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
     const children = readRootChildren(root, plistPath);
     const issues = scanNodes(children, "root");
 
-    const sections: Partial<Record<"bar" | "menu" | "reading_list" | "mobile", BookmarkSection>> =
-      {};
+    const sections: Partial<Record<"bar" | "menu" | "mobile", BookmarkSection>> = {};
 
+    const readingList: ReadingListItem[] = [];
     for (const child of children) {
+      if (plistString(child, "Title") === "com.apple.ReadingList") {
+        for (const node of plistDictChildren(child) ?? []) {
+          if (plistString(node, "WebBookmarkType") !== "WebBookmarkTypeLeaf")
+            return yield* Effect.fail(
+              new Error("Safari Reading List must contain flat HTTP(S) items."),
+            );
+          const url = plistString(node, "URLString") ?? "";
+          const name = plistString(plistDict(node, "URIDictionary") ?? {}, "title") ?? "";
+          readingList.push(
+            ReadingListItem.make({
+              name,
+              url,
+              read: "DateLastViewed" in (plistDict(node, "ReadingList") ?? {}),
+            }),
+          );
+        }
+        continue;
+      }
       const type = plistString(child, "WebBookmarkType");
       if (type === "WebBookmarkTypeProxy") continue;
 
@@ -257,12 +280,18 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
       );
     }
 
-    return BookmarkTree.make({
-      bar: sections.bar,
-      menu: sections.menu,
-      reading_list: sections.reading_list,
+    return yield* Effect.try({
+      try: () =>
+        TargetState.make({
+          tree: BookmarkTree.make({ bar: sections.bar, menu: sections.menu }),
+          readingList: ReadingList.canonical(readingList),
+        }),
+      catch: (cause) => new Error(messageFromUnknown(cause)),
     });
   });
+
+export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Error> =>
+  readState(plistPath).pipe(Effect.map((state) => state.tree));
 
 /** Root-level managed menu nodes cannot always be patched without changing merged menu ordering. */
 export const requiresFullRewrite = (
@@ -397,7 +426,7 @@ export const applyPatches = (
     });
   });
 
-export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<void, Error> =>
+export const writeState = (plistPath: string, state: TargetState): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     const data = yield* Effect.tryPromise({
       try: () => Bun.file(plistPath).arrayBuffer(),
@@ -406,6 +435,12 @@ export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<
 
     const root = parsePlistRoot(data, plistPath);
     const children = readRootChildren(root, plistPath);
+    const tree = state.tree;
+    const now = DateTime.toDateUtc(yield* DateTime.now);
+    const items = yield* Effect.try({
+      try: () => ReadingList.canonical(state.readingList),
+      catch: (cause) => new Error(messageFromUnknown(cause)),
+    });
     const lookup = collectSafariNodes(children);
     const leafAssignments = assignSafariLeaves(tree, lookup);
     const leafAssignmentIndex = { value: 0 };
@@ -422,15 +457,21 @@ export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<
       otherSection,
       buildSafariChildren(tree.menu, "menu", lookup, leafAssignments, leafAssignmentIndex),
     );
+    const readingNodes = existingReadingNodes(readingListSection);
     setSectionChildren(
       readingListSection,
-      buildSafariChildren(
-        tree.reading_list,
-        "reading_list",
-        lookup,
-        leafAssignments,
-        leafAssignmentIndex,
-      ),
+      items.map((item) => {
+        const existing = Option.getOrUndefined(HashMap.get(readingNodes, item.url));
+        const node = existing ?? makeSafariLeafNode(item.url, item.name);
+        node["URLString"] = item.url;
+        node["URIDictionary"] = { ...(plistDict(node, "URIDictionary") ?? {}), title: item.name };
+        const metadata = plistDict(node, "ReadingList") ?? { DateAdded: now };
+        if (item.read) {
+          if (!("DateLastViewed" in metadata)) metadata["DateLastViewed"] = now;
+        } else delete metadata["DateLastViewed"];
+        node["ReadingList"] = metadata;
+        return node;
+      }),
     );
 
     root["Children"] = [
@@ -504,7 +545,6 @@ const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
 
     if (type === "WebBookmarkTypeList" && title === "com.apple.ReadingList") {
       lookup.sectionsByTitle.set(title, child);
-      collectSafariChildren(childNodes, "reading_list", lookup);
       continue;
     }
 
@@ -584,7 +624,6 @@ const assignSafariLeaves = (
   const desired: Array<{ readonly leaf: BookmarkLeaf; readonly path: string }> = [];
   collectDomainLeaves(tree.bar, "bar", desired);
   collectDomainLeaves(tree.menu, "menu", desired);
-  collectDomainLeaves(tree.reading_list, "reading_list", desired);
 
   const assignments: Array<PlistDict | undefined> = desired.map(() => undefined);
   const used: PlistDict[] = [];
@@ -721,7 +760,7 @@ function decodeNodes(children: PlistDict[]): BookmarkNode[] {
 /** Parse a domain path like "bar/Dev" into Safari section title + folder path. */
 const parseDomainPath = (path: string): { sectionTitle: string; folderPath: string[] } => {
   const [sectionKey, ...rest] = path.split("/");
-  if (sectionKey !== "bar" && sectionKey !== "menu" && sectionKey !== "reading_list") {
+  if (sectionKey !== "bar" && sectionKey !== "menu") {
     throw new Error(`Invalid Safari bookmark path "${path}".`);
   }
   const sectionTitle = SECTION_KEY_TO_TITLE[sectionKey];
@@ -855,3 +894,18 @@ const extractLeafReference = (
   if (!location) return undefined;
   return location.children.splice(location.index, 1)[0];
 };
+
+const existingReadingNodes = (section: PlistDict) =>
+  HashMap.fromIterable(
+    (plistDictChildren(section) ?? []).map(
+      (node) => [Canonical.canonicalUrl(plistString(node, "URLString") ?? ""), node] as const,
+    ),
+  );
+
+/** Tree-only callers retain the separate Reading List domain. */
+export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<void, Error> =>
+  readState(plistPath).pipe(
+    Effect.flatMap((state) =>
+      writeState(plistPath, TargetState.make({ readingList: state.readingList, tree })),
+    ),
+  );

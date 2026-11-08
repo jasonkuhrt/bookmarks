@@ -4,6 +4,9 @@ import { Effect, Layer, Schema } from "effect";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { migrate } from "../../scripts/migrate-reading-list.ts";
+import * as Baseline from "./baseline.ts";
+import * as ReadingList from "./reading-list.ts";
 import * as Chrome from "./chrome.ts";
 import * as Fingerprint from "./fingerprint.ts";
 import { stripManagedConfigHeader } from "./managed-config-header.ts";
@@ -19,6 +22,9 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
+  TargetState,
+  SharedBookmarks,
+  ReadingListItem,
 } from "./schema/__.ts";
 import * as Sync from "./sync.ts";
 import * as Targets from "./targets.ts";
@@ -29,7 +35,8 @@ const leaf = (name: string, url = `https://${name.toLowerCase()}.example/`) =>
   BookmarkLeaf.make({ name, url });
 const folder = (name: string, children: readonly BookmarkNode[]) =>
   BookmarkFolder.make({ name, children });
-const names = (nodes: readonly BookmarkNode[] | undefined) => nodes?.map((node) => node.name);
+const names = (nodes: readonly { readonly name: string }[] | undefined) =>
+  nodes?.map((node) => node.name);
 
 type PlistNode = { [key: string]: string | PlistNode | PlistNode[] };
 
@@ -58,7 +65,7 @@ const writeSafari = async (path: string, tree: BookmarkTree): Promise<void> => {
       Children: [
         section("BookmarksBar", tree.bar),
         section("BookmarksMenu", tree.menu),
-        section("com.apple.ReadingList", tree.reading_list),
+        section("com.apple.ReadingList", []),
       ],
     }),
   );
@@ -176,23 +183,45 @@ const syncNow = () => run(syncNowEffect());
 const pairedChrome = (
   start: BookmarkTree,
   onRequest: (operation: "snapshot" | "reconcile") => Error | undefined = () => undefined,
+  initialReadingList: readonly ReadingListItem[] = [],
 ) => {
+  let liveList = initialReadingList;
   let live = BookmarkTree.make({ bar: start.bar ?? [], menu: start.menu ?? [], mobile: [] });
   const layer = Layer.succeed(ChromeBridgeRuntime, {
-    loadBindings: Effect.succeed([{ profilePath: world.chromePath, instanceId: "instance" }]),
+    loadBindings: Effect.succeed([
+      { profilePath: world.chromePath, instanceId: "12345678-1234-1234-1234-123456789abc" },
+    ]),
     saveBindings: () => Effect.die("Unexpected binding write"),
-    instances: Effect.succeed(["instance"]),
+    instances: Effect.succeed(["12345678-1234-1234-1234-123456789abc"]),
     request: (_id, request) =>
       Effect.suspend(() => {
         const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
         const failure = onRequest(decoded.operation);
         if (failure) return Effect.fail(failure);
-        if (decoded.operation === "reconcile") live = decoded.tree;
-        return Effect.succeed({ id: decoded.id, ok: true as const, value: live });
+        if (decoded.operation === "reconcile") {
+          expect(ReadingList.equal(decoded.expectedReadingList, liveList)).toBe(true);
+          live = decoded.tree;
+          liveList = decoded.readingList;
+        }
+        return Effect.succeed({
+          id: decoded.id,
+          ok: true as const,
+          value: TargetState.make({ tree: live, readingList: liveList }),
+          version: 2,
+          hostVersion: 2,
+          capabilities: ["readingList"],
+        });
       }),
     launch: () => Effect.die("Unexpected browser launch"),
   });
-  return { layer, live: () => live };
+  return {
+    layer,
+    live: () => live,
+    readingList: () => liveList,
+    setReadingList: (items: readonly ReadingListItem[]) => {
+      liveList = items;
+    },
+  };
 };
 
 const syncThrough = (layer: Layer.Layer<never>) =>
@@ -322,10 +351,7 @@ describe("sync across browsers", () => {
     const stored =
       "javascript:location='https://pinboard.in/add?url=%27+encodeURIComponent(location.href)";
     await run(YamlModule.save(world.yamlPath, sharedConfig(BookmarkTree.make({}))));
-    await writeSafari(
-      world.safariPath,
-      BookmarkTree.make({ bar: [leaf("Pin", typed)], reading_list: [leaf("Dan\n818 likes")] }),
-    );
+    await writeSafari(world.safariPath, BookmarkTree.make({ bar: [leaf("Pin", typed)] }));
     await run(
       Chrome.writeTree(world.chromePath, BookmarkTree.make({ bar: [leaf("Pin", stored)] })),
     );
@@ -336,7 +362,6 @@ describe("sync across browsers", () => {
     expect(yaml.all.bar).toEqual([leaf("Pin", stored)]);
     expect(yaml.safari).toBeUndefined();
     expect(yaml.chrome?.bar).toBeUndefined();
-    expect(names(yaml.all.reading_list)).toEqual(["Dan 818 likes"]);
     const status = await run(Sync.status({ yamlPath: world.yamlPath }));
     for (const target of status.targets) {
       expect(target.yamlPatches).toEqual([]);
@@ -344,69 +369,13 @@ describe("sync across browsers", () => {
     }
   });
 
-  test("Chrome keeps the shared reading list in Other Bookmarks, both ways", async () => {
-    await run(
-      YamlModule.save(
-        world.yamlPath,
-        sharedConfig(
-          BookmarkTree.make({ menu: [leaf("Menu Item")], reading_list: [leaf("First")] }),
-        ),
-      ),
-    );
+  test("Read Later is now an ordinary bookmark folder", async () => {
+    const all = BookmarkTree.make({ menu: [folder("Read Later", [leaf("A")])] });
+    await run(YamlModule.save(world.yamlPath, sharedConfig(all)));
     await writeSafari(world.safariPath, BookmarkTree.make({}));
     await syncNow();
-
-    const native = await run(Chrome.readBookmarks(world.chromePath));
-    expect(native.menu).toEqual([
-      leaf("Menu Item"),
-      folder(Targets.CHROME_READING_LIST_FOLDER, [leaf("First")]),
-    ]);
-    expect(names((await readSafari()).reading_list)).toEqual(["First"]);
-
-    await run(
-      Chrome.writeTree(
-        world.chromePath,
-        BookmarkTree.make({
-          menu: [
-            folder(Targets.CHROME_READING_LIST_FOLDER, [leaf("First"), leaf("Second")]),
-            leaf("Menu Item"),
-          ],
-        }),
-      ),
-    );
-    await syncNow();
-
-    expect(names((await readYaml()).all.reading_list)).toEqual(["First", "Second"]);
-    expect(names((await readYaml()).all.menu)).toEqual(["Menu Item"]);
-    expect(names((await readSafari()).reading_list)).toEqual(["First", "Second"]);
-    // The folder keeps the place Jason gave it in Chrome.
-    expect(names((await run(Chrome.readBookmarks(world.chromePath))).menu)).toEqual([
-      Targets.CHROME_READING_LIST_FOLDER,
-      "Menu Item",
-    ]);
-  });
-
-  test("a regular folder named Read Later in the menu is refused before any browser is written", async () => {
-    await run(
-      YamlModule.save(
-        world.yamlPath,
-        sharedConfig(
-          BookmarkTree.make({
-            menu: [folder(Targets.CHROME_READING_LIST_FOLDER, [leaf("A")])],
-            reading_list: [leaf("B")],
-          }),
-        ),
-      ),
-    );
-    await writeSafari(world.safariPath, BookmarkTree.make({}));
-    const chromeBefore = await readFile(world.chromePath, "utf-8");
-    const safariBefore = await readSafari();
-
-    const failure = await Effect.runPromise(Effect.flip(syncNowEffect()));
-
-    expect(failure.message).toContain(`folder named "${Targets.CHROME_READING_LIST_FOLDER}"`);
-    expect(await readFile(world.chromePath, "utf-8")).toBe(chromeBefore);
-    expect(await readSafari()).toEqual(safariBefore);
+    expect((await readChrome()).menu).toEqual(all.menu);
+    expect((await readSafari()).menu).toEqual(all.menu);
   });
 
   test("a YAML addition survives a structural change made in the browser", async () => {
@@ -531,13 +500,12 @@ describe("sync across browsers", () => {
       [world.yamlPath]: Fingerprint.ofText(
         stripManagedConfigHeader(await readFile(world.yamlPath, "utf-8")),
       ),
-      [world.safariPath]: Fingerprint.ofTree(await run(Targets.readFileTree(safari))),
+      [world.safariPath]: Fingerprint.ofState(await run(Safari.readState(safari.path))),
       [world.chromePath]: Fingerprint.ofTree(await run(Targets.readFileTree(chrome))),
     });
     const start = BookmarkTree.make({
       bar: [leaf("A")],
       menu: [leaf("Menu Item")],
-      reading_list: [leaf("Article")],
     });
     await run(YamlModule.save(world.yamlPath, sharedConfig(start)));
     await writeSafari(world.safariPath, start);
@@ -547,13 +515,7 @@ describe("sync across browsers", () => {
     await run(
       Chrome.writeTree(
         world.chromePath,
-        Targets.toChromeLayout(
-          BookmarkTree.make({
-            bar: [leaf("A"), leaf("B")],
-            menu: start.menu,
-            reading_list: start.reading_list,
-          }),
-        ),
+        BookmarkTree.make({ bar: [leaf("A"), leaf("B")], menu: start.menu }),
       ),
     );
     const result = await syncNow();
@@ -591,16 +553,25 @@ describe("sync across browsers", () => {
     );
     let liveTree = BookmarkTree.make({ bar: [leaf("Browser")], menu: [], mobile: [] });
     const layer = Layer.succeed(ChromeBridgeRuntime, {
-      loadBindings: Effect.succeed([{ profilePath: world.chromePath, instanceId: "instance" }]),
+      loadBindings: Effect.succeed([
+        { profilePath: world.chromePath, instanceId: "12345678-1234-1234-1234-123456789abc" },
+      ]),
       saveBindings: () => Effect.die("Unexpected binding write"),
-      instances: Effect.succeed(["instance"]),
+      instances: Effect.succeed(["12345678-1234-1234-1234-123456789abc"]),
       request: (_id, request) =>
         Effect.promise(async () => {
           const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
           // Someone edits the YAML while the sync reads Chrome.
           await appendFile(world.yamlPath, "# an edit made during the sync\n");
           if (decoded.operation === "reconcile") liveTree = decoded.tree;
-          return { id: decoded.id, ok: true as const, value: liveTree };
+          return {
+            id: decoded.id,
+            ok: true as const,
+            value: TargetState.make({ tree: liveTree, readingList: [] }),
+            version: 2,
+            hostVersion: 2,
+            capabilities: ["readingList"],
+          };
         }),
       launch: () => Effect.die("Unexpected browser launch"),
     });
@@ -614,4 +585,142 @@ describe("sync across browsers", () => {
     expect(await readFile(world.yamlPath, "utf-8")).toContain("# an edit made during the sync");
     expect(await Bun.file(process.env["BOOKMARKS_SYNC_BASELINE_PATH"] ?? "").exists()).toBe(false);
   });
+});
+
+const article = (name: string, read = false, url = "https://article.example/") =>
+  ReadingListItem.make({ name, url, read });
+
+test("first sync after migration reconciles native overlap and deletion history; second sync is a no-op", async () => {
+  const oldLeaf = leaf("Article", "https://article.example/");
+  const oldTree = BookmarkTree.make({ menu: [folder("Read Later", [oldLeaf])] });
+  const migrated = migrate(
+    JSON.stringify({ version: 2, all: { reading_list: [oldLeaf] } }),
+    JSON.stringify({
+      version: 1,
+      targets: {
+        safari: { reading_list: [oldLeaf] },
+        "chrome/default": { reading_list: [oldLeaf] },
+      },
+    }),
+    { "chrome/default": oldTree },
+  );
+  await writeFile(world.yamlPath, migrated.yaml);
+  await run(Baseline.save(migrated.baselines));
+  await run(Chrome.writeTree(world.chromePath, oldTree));
+  await writeSafari(world.safariPath, BookmarkTree.make({}));
+  await run(
+    Safari.writeState(
+      world.safariPath,
+      TargetState.make({ tree: BookmarkTree.make({}), readingList: [article("Article")] }),
+    ),
+  );
+  const chromeOnly = article("Chrome Only", false, "https://chrome-only.example/");
+  const chrome = pairedChrome(oldTree, () => undefined, [
+    chromeOnly,
+    article("Chrome title", true),
+  ]);
+  const result = await Effect.runPromise(syncThrough(chrome.layer));
+  expect(chrome.live().menu ?? []).toEqual([]);
+  expect(ReadingList.equal(chrome.readingList(), [chromeOnly, article("Chrome title", true)])).toBe(
+    true,
+  );
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual([
+    chromeOnly,
+    article("Chrome title", true),
+  ]);
+  expect(
+    result.targets
+      .find((entry) => entry.target.browser === "safari")
+      ?.readingListChanges?.map((change) => change._tag),
+  ).toEqual(["Added", "Renamed", "MarkedRead"]);
+  const again = await Effect.runPromise(syncThrough(chrome.layer));
+  expect(again.yamlChanged).toBe(false);
+  expect(again.applied).toEqual([]);
+  expect(again.readingListChanges).toEqual([]);
+  expect(again.backup).toBeUndefined();
+});
+
+test("read-only native change reaches YAML/Safari, backs up the full live list and acknowledges consumed stamps", async () => {
+  const tree = BookmarkTree.make({});
+  await run(
+    YamlModule.save(
+      world.yamlPath,
+      BookmarksConfig.make({ all: SharedBookmarks.make({ reading_list: [article("Article")] }) }),
+    ),
+  );
+  await writeSafari(world.safariPath, tree);
+  const chrome = pairedChrome(tree, () => undefined, [article("Article")]);
+  await Effect.runPromise(syncThrough(chrome.layer));
+  chrome.setReadingList([article("Article", true)]);
+  const result = await Effect.runPromise(syncThrough(chrome.layer));
+  expect((await readYaml()).all.reading_list).toEqual([article("Article", true)]);
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual([
+    article("Article", true),
+  ]);
+  const backup = result.backup?.files.find((path) => path.endsWith("--live-tree.json"));
+  if (!backup) throw new Error("Missing full live backup");
+  const backedUp = Schema.decodeUnknownSync(TargetState)(
+    JSON.parse(await readFile(backup, "utf8")),
+  );
+  expect(backedUp.readingList).toEqual([article("Article", true)]);
+  const stamp = result.snapshot?.files.find((file) => file.path.endsWith(".reading-list"));
+  expect(stamp?.fingerprints).toContain(ReadingList.fingerprint([article("Article", true)]));
+  expect(stamp?.fingerprints).not.toContain(
+    ReadingList.fingerprint([article("Later external edit")]),
+  );
+});
+
+test("Safari writes YAML-only reordering while list fingerprints stay unchanged", async () => {
+  const tree = BookmarkTree.make({});
+  const a = article("A");
+  const b = article("B", false, "https://b.example/");
+  const config = (items: readonly ReadingListItem[]) =>
+    BookmarksConfig.make({ all: SharedBookmarks.make({ reading_list: items }) });
+  await run(YamlModule.save(world.yamlPath, config([a, b])));
+  await writeSafari(world.safariPath, tree);
+  await syncNow();
+  const before = Fingerprint.ofState(await run(Safari.readState(world.safariPath)));
+  await run(YamlModule.save(world.yamlPath, config([b, a])));
+  const result = await syncNow();
+  expect(result.targets.find((entry) => entry.target.browser === "safari")?.writeMode).toBe(
+    "rewrite",
+  );
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual([b, a]);
+  expect(Fingerprint.ofState(await run(Safari.readState(world.safariPath)))).toBe(before);
+});
+
+test("status, from-YAML sync and gc carry the Reading List with the tree", async () => {
+  const tree = BookmarkTree.make({});
+  await writeSafari(world.safariPath, tree);
+  await run(
+    YamlModule.save(
+      world.yamlPath,
+      BookmarksConfig.make({
+        all: SharedBookmarks.make({ reading_list: [article("Article", true)] }),
+      }),
+    ),
+  );
+  const chrome = pairedChrome(tree, () => undefined, [article("Article")]);
+  const status = await Effect.runPromise(
+    Sync.status({ yamlPath: world.yamlPath }).pipe(Effect.provide(chrome.layer)),
+  );
+  expect(
+    status.targets
+      .find((entry) => entry.target.browser === "chrome")
+      ?.yamlReadingListChanges.map((change) => change._tag),
+  ).toEqual(["MarkedRead"]);
+  const pushed = await Effect.runPromise(
+    Sync.push({ yamlPath: world.yamlPath }).pipe(Effect.provide(chrome.layer)),
+  );
+  expect(
+    pushed.targets
+      .find((entry) => entry.target.browser === "chrome")
+      ?.readingListChanges?.map((change) => change._tag),
+  ).toEqual(["MarkedRead"]);
+  expect(chrome.readingList()).toEqual([article("Article", true)]);
+  await Effect.runPromise(Sync.gc({ yamlPath: world.yamlPath }).pipe(Effect.provide(chrome.layer)));
+  expect((await readYaml()).all.reading_list).toEqual([article("Article", true)]);
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual([
+    article("Article", true),
+  ]);
 });

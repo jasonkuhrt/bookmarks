@@ -1,9 +1,10 @@
 import { Effect, Schedule, Schema } from "effect";
 import * as Path from "node:path";
 import * as Chrome from "./chrome.ts";
-import type { BookmarkTree } from "./schema/__.ts";
+import { TargetState, type BookmarkTree } from "./schema/__.ts";
 import { ChromeBridgeRuntime } from "./chrome-native-runtime.ts";
 import { NativeResponseSchema, protocolVersion } from "./chrome-native-protocol.ts";
+import * as ReadingList from "./reading-list.ts";
 import * as Canonical from "./canonical.ts";
 
 const normalizeTree = (tree: BookmarkTree) =>
@@ -26,7 +27,7 @@ const isParseable = (url: string): boolean => URL.canParse(url);
 export const normalizeDesiredTree = (profilePath: string, tree: BookmarkTree) =>
   Effect.gen(function* () {
     if (!(yield* isPaired(profilePath))) return tree;
-    const invalid = [tree.bar, tree.menu, tree.reading_list, tree.mobile]
+    const invalid = [tree.bar, tree.menu, tree.mobile]
       .flatMap(webUrlsIn)
       .find((url) => !isParseable(url));
     if (invalid !== undefined)
@@ -48,11 +49,11 @@ export const bindingFor = (profilePath: string) =>
 export const isPaired = (profilePath: string) =>
   bindingFor(profilePath).pipe(Effect.map((binding) => binding !== undefined));
 
-const requestTree = (
+const requestState = (
   instanceId: string,
   operation: "snapshot" | "reconcile",
-  expectedTree?: BookmarkTree,
-  tree?: BookmarkTree,
+  expected?: TargetState,
+  desired?: TargetState,
 ) =>
   Effect.gen(function* () {
     const runtime = yield* ChromeBridgeRuntime;
@@ -60,14 +61,34 @@ const requestTree = (
     const response = yield* runtime.request(instanceId, {
       id: "cli",
       operation,
-      ...(expectedTree ? { expectedTree } : {}),
-      ...(tree ? { tree } : {}),
+      ...(expected
+        ? { expectedTree: expected.tree, expectedReadingList: expected.readingList }
+        : {}),
+      ...(desired ? { tree: desired.tree, readingList: desired.readingList } : {}),
     });
     const decoded = yield* Schema.decodeUnknown(NativeResponseSchema)(response).pipe(
-      Effect.mapError((error) => new Error(`Invalid Chrome bridge response: ${error.message}`)),
+      Effect.mapError(
+        (error) =>
+          new Error(
+            `Chrome bridge lacks protocol 2 Reading List support; rebuild/install and reload the extension and native host. Invalid response: ${error.message}`,
+          ),
+      ),
     );
+    if (!decoded.capabilities.includes("readingList"))
+      return yield* Effect.fail(
+        new Error(
+          "Chrome extension lacks readingList capability. Rebuild/install and reload it before syncing.",
+        ),
+      );
     if (!decoded.ok) return yield* Effect.fail(new Error(decoded.error));
-    return decoded.value;
+    return yield* Effect.try({
+      try: () =>
+        TargetState.make({
+          tree: Canonical.canonicalTree(decoded.value.tree),
+          readingList: ReadingList.canonical(decoded.value.readingList),
+        }),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    });
   });
 
 const requireBinding = (profilePath: string) =>
@@ -85,17 +106,17 @@ const requireBinding = (profilePath: string) =>
 const isDisconnected = (error: Error): boolean =>
   "code" in error && (error.code === "ECONNREFUSED" || error.code === "ENOENT");
 
-export const readTree = (profilePath: string) =>
+export const readState = (profilePath: string) =>
   Effect.gen(function* () {
     const binding = yield* requireBinding(profilePath);
-    return yield* requestTree(binding.instanceId, "snapshot").pipe(
+    return yield* requestState(binding.instanceId, "snapshot").pipe(
       Effect.catchAll((failure) =>
         !isDisconnected(failure)
           ? Effect.fail(failure)
           : Effect.gen(function* () {
               const runtime = yield* ChromeBridgeRuntime;
               yield* runtime.launch(profilePath);
-              return yield* requestTree(binding.instanceId, "snapshot").pipe(
+              return yield* requestState(binding.instanceId, "snapshot").pipe(
                 Effect.retry({
                   schedule: Schedule.intersect(Schedule.spaced("300 millis"), Schedule.recurs(30)),
                   while: isDisconnected,
@@ -112,18 +133,46 @@ export const readTree = (profilePath: string) =>
     );
   });
 
-export const writeTree = (profilePath: string, expectedTree: BookmarkTree, tree: BookmarkTree) =>
+export const readTree = (profilePath: string) =>
+  readState(profilePath).pipe(Effect.map((state) => state.tree));
+
+export const writeState = (profilePath: string, expected: TargetState, desired: TargetState) =>
   Effect.gen(function* () {
     const binding = yield* requireBinding(profilePath);
-    const desiredTree = yield* normalizeDesiredTree(profilePath, tree);
-    if (treesEqual(expectedTree, desiredTree)) return;
-    const result = yield* requestTree(binding.instanceId, "reconcile", expectedTree, desiredTree);
-    if (!treesEqual(result, desiredTree))
+    const tree = yield* normalizeDesiredTree(profilePath, desired.tree);
+    const readingList = yield* Effect.try({
+      try: () => ReadingList.canonical(desired.readingList),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    });
+    if (treesEqual(expected.tree, tree) && ReadingList.equal(expected.readingList, readingList))
+      return;
+    const result = yield* requestState(
+      binding.instanceId,
+      "reconcile",
+      expected,
+      TargetState.make({ tree, readingList }),
+    );
+    if (!treesEqual(result.tree, tree) || !ReadingList.equal(result.readingList, readingList))
       return yield* Effect.fail(
         new Error(
-          "Chrome did not retain the requested bookmark layout. The baseline was not advanced; inspect status before retrying.",
+          "Chrome did not retain the requested bookmark layout or Reading List. The baseline was not advanced; inspect status before retrying.",
         ),
       );
+  });
+
+export const writeTree = (profilePath: string, expectedTree: BookmarkTree, tree: BookmarkTree) =>
+  Effect.gen(function* () {
+    if (treesEqual(expectedTree, tree)) return;
+    const observed = yield* readState(profilePath);
+    if (!treesEqual(observed.tree, expectedTree))
+      return yield* Effect.fail(
+        new Error("Chrome bookmarks changed after the sync planned its write."),
+      );
+    yield* writeState(
+      profilePath,
+      observed,
+      TargetState.make({ tree, readingList: observed.readingList }),
+    );
   });
 
 /** Pair only after comparing the extension's live content with the selected profile's disk snapshot. */
@@ -134,8 +183,8 @@ export const pair = (profilePath: string) =>
     const instances = yield* runtime.instances;
     const matches: string[] = [];
     for (const instanceId of instances) {
-      const snapshot = yield* requestTree(instanceId, "snapshot").pipe(Effect.option);
-      if (snapshot._tag === "Some" && treesEqual(snapshot.value, diskTree))
+      const snapshot = yield* requestState(instanceId, "snapshot").pipe(Effect.option);
+      if (snapshot._tag === "Some" && treesEqual(snapshot.value.tree, diskTree))
         matches.push(instanceId);
     }
     if (matches.length !== 1)
@@ -168,7 +217,7 @@ export const status = Effect.gen(function* () {
   const runtime = yield* ChromeBridgeRuntime;
   const bindings = yield* runtime.loadBindings;
   return yield* Effect.forEach(bindings, (binding) =>
-    requestTree(binding.instanceId, "snapshot").pipe(
+    requestState(binding.instanceId, "snapshot").pipe(
       Effect.map(() => ({ ...binding, connected: true, error: null })),
       Effect.catchAll((error) =>
         Effect.succeed({ ...binding, connected: false, error: error.message }),

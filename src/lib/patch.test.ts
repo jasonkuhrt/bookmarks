@@ -124,7 +124,7 @@ describe("toTrie / fromTrie", () => {
 
     expect(result.bar).toBeDefined();
     expect(result.menu).toBeDefined();
-    expect(result.reading_list).toBeUndefined();
+    expect("reading_list" in result).toBe(false);
     expect(result.mobile).toBeUndefined();
 
     // Check nested structure

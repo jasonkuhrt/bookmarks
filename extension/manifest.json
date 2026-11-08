@@ -14,7 +14,7 @@
     "512": "icons/icon512.png"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwkQwHEO2q1cdTO/2X84H17n82ZKD0z9F9J+3uxdDAJV8hinFfixk+fmDploqa7KFguu6R1X60/2qFakET7zANzLjicpNLer4sT662adm3qciaWi60hExLt0OAewnqBi0H5goccEhbBCbABGDFUwZC0H5KFBjfL5iI9C5I4lCWVPvrdmBh6kKV0c1YMoCSDl/SEnL1Nzy481QdFTVOBlmi3IwN1yCzHhxinSFs7Qqq/8+agfcbbX/2MO8bA7qzfctQ964ZxocQxYfxrZ52+AiyhAvxTXaM+PO3QNS2E54kuPWbBhdLLYjQniJsbTBfMJEM26uP4ch1SKHs2Or4z7ypQIDAQAB",
-  "permissions": ["bookmarks", "nativeMessaging", "storage", "alarms"],
+  "permissions": ["bookmarks", "readingList", "nativeMessaging", "storage", "alarms"],
   "background": {
     "service_worker": "worker.js",
     "type": "module"

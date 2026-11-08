@@ -9,7 +9,7 @@ import * as ChromeNative from "./chrome-native.ts";
 import type * as Patch from "./patch.ts";
 import * as Paths from "./paths.ts";
 import * as Safari from "./safari.ts";
-import { BookmarkFolder, type BookmarkNode, BookmarkTree } from "./schema/__.ts";
+import { TargetState, type BookmarkTree } from "./schema/__.ts";
 import type { BookmarksConfig } from "./schema/__.ts";
 
 export interface TargetDescriptor {
@@ -273,67 +273,44 @@ export const graveyardSourceOf = (target: Pick<TargetDescriptor, "browser" | "pr
 export const listConfiguredChromeProfileKeys = (config: BookmarksConfig): readonly string[] =>
   Object.keys(config.chrome?.profiles ?? {}).map((profile) => `chrome/${profile}`);
 
-/**
- * Chrome has no reading list an extension can write, so the shared reading list lives in this
- * folder of Other Bookmarks. The engine sees it as Chrome's `reading_list` section.
- */
-export const CHROME_READING_LIST_FOLDER = "Read Later";
+/** Only Safari and paired Chrome participate in the shared Reading List. */
+export const hasReadingList = (target: TargetDescriptor): Effect.Effect<boolean, Error> =>
+  target.browser === "safari"
+    ? Effect.succeed(true)
+    : target.browser === "chrome"
+      ? ChromeNative.isPaired(target.path)
+      : Effect.succeed(false);
 
-const isReadingListFolder = (node: BookmarkNode): node is BookmarkFolder =>
-  BookmarkFolder.is(node) && node.name === CHROME_READING_LIST_FOLDER;
-
-/**
- * Refuse a tree a target can't hold, before any browser is written. In Chrome, a regular
- * folder named Read Later at the top of Other Bookmarks would read back as the reading list.
- */
-export const ensureWritable = (
-  target: Pick<TargetDescriptor, "browser" | "profile">,
-  tree: BookmarkTree,
-): Effect.Effect<void, Error> =>
-  target.browser === "chrome" && (tree.menu ?? []).some(isReadingListFolder)
-    ? Effect.fail(
-        new Error(
-          `${displayNameOf(target)} keeps the reading list in Other Bookmarks' "${CHROME_READING_LIST_FOLDER}" folder, so its Other Bookmarks can't hold another top-level folder named "${CHROME_READING_LIST_FOLDER}". Rename that folder in bookmarks.yaml or in the browser it came from.`,
-        ),
-      )
-    : Effect.void;
-
-/** Chrome's own layout to the engine's: the first Read Later folder of Other Bookmarks is the reading list. */
-export const fromChromeLayout = (native: BookmarkTree): BookmarkTree => {
-  const menu = native.menu ?? [];
-  const index = menu.findIndex(isReadingListFolder);
-  const folder = menu[index];
-  if (folder === undefined || !BookmarkFolder.is(folder)) return native;
-  const rest = [...menu.slice(0, index), ...menu.slice(index + 1)];
-  return BookmarkTree.make({
-    ...(native.bar ? { bar: native.bar } : {}),
-    ...(rest.length > 0 ? { menu: rest } : {}),
-    ...(folder.children.length > 0 ? { reading_list: folder.children } : {}),
-    ...(native.mobile ? { mobile: native.mobile } : {}),
-  });
+export const readState = (target: TargetDescriptor): Effect.Effect<TargetState, Error> => {
+  if (target.browser === "safari") return Safari.readState(target.path);
+  if (target.browser === "chrome")
+    return ChromeNative.isPaired(target.path).pipe(
+      Effect.flatMap((paired) =>
+        paired
+          ? ChromeNative.readState(target.path)
+          : readFileTree(target).pipe(
+              Effect.map((tree) => TargetState.make({ tree, readingList: [] })),
+            ),
+      ),
+    );
+  return Effect.fail(new Error(`Unsupported bookmarks target ${displayNameOf(target)}`));
 };
 
-/**
- * The engine's layout to Chrome's. The Read Later folder keeps its place in `current`, Chrome's
- * tree before the write, and is appended to Other Bookmarks when Chrome has none.
- */
-export const toChromeLayout = (tree: BookmarkTree, current?: BookmarkTree): BookmarkTree => {
-  const menu = [...(tree.menu ?? [])];
-  const readingList = tree.reading_list ?? [];
-  const currentIndex = (current?.menu ?? []).findIndex(isReadingListFolder);
-  if (readingList.length > 0 || currentIndex !== -1) {
-    const index = currentIndex === -1 ? menu.length : Math.min(currentIndex, menu.length);
-    menu.splice(
-      index,
-      0,
-      BookmarkFolder.make({ name: CHROME_READING_LIST_FOLDER, children: readingList }),
+export const writeState = (
+  target: TargetDescriptor,
+  desired: TargetState,
+  expected: TargetState,
+): Effect.Effect<void, Error> => {
+  if (target.browser === "safari") return Safari.writeState(target.path, desired);
+  if (target.browser === "chrome")
+    return ChromeNative.isPaired(target.path).pipe(
+      Effect.flatMap((paired) =>
+        paired
+          ? ChromeNative.writeState(target.path, expected, desired)
+          : Chrome.writeTree(target.path, desired.tree),
+      ),
     );
-  }
-  return BookmarkTree.make({
-    ...(tree.bar ? { bar: tree.bar } : {}),
-    ...(tree.menu || menu.length > 0 ? { menu } : {}),
-    ...(tree.mobile ? { mobile: tree.mobile } : {}),
-  });
+  return Effect.fail(new Error(`Unsupported bookmarks target ${displayNameOf(target)}`));
 };
 
 const readChromeNative = (target: TargetDescriptor): Effect.Effect<BookmarkTree, Error> =>
@@ -349,9 +326,7 @@ export const readTree = (target: TargetDescriptor): Effect.Effect<BookmarkTree, 
     case "safari":
       return readFileTree(target);
     case "chrome":
-      return readChromeNative(target).pipe(
-        Effect.map((native) => Canonical.canonicalTree(fromChromeLayout(native))),
-      );
+      return readChromeNative(target).pipe(Effect.map((native) => Canonical.canonicalTree(native)));
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
@@ -371,7 +346,7 @@ export const readFileTree = (
       return Safari.readBookmarks(target.path).pipe(Effect.map(Canonical.canonicalTree));
     case "chrome":
       return Chrome.readBookmarks(target.path).pipe(
-        Effect.map((native) => Canonical.canonicalTree(fromChromeLayout(native))),
+        Effect.map((native) => Canonical.canonicalTree(native)),
       );
     default:
       return Effect.fail(
@@ -379,11 +354,6 @@ export const readFileTree = (
       );
   }
 };
-
-const touchesReadingList = (patch: Patch.BookmarkPatch): boolean =>
-  "path" in patch
-    ? patch.path.startsWith("reading_list")
-    : patch.fromPath.startsWith("reading_list") || patch.toPath.startsWith("reading_list");
 
 export const applyPatches = (
   target: TargetDescriptor,
@@ -403,9 +373,7 @@ export const applyPatches = (
                   "Paired Chrome writes require a complete planned tree and its original snapshot. Use bookmarks sync.",
                 ),
               )
-            : patches.some(touchesReadingList)
-              ? Effect.fail(new Error("Chrome reading list changes are written as a whole tree."))
-              : Chrome.applyPatches(target.path, patches),
+            : Chrome.applyPatches(target.path, patches),
         ),
       );
     default:
@@ -423,11 +391,7 @@ export const requiresFullRewrite = (
     case "safari":
       return Safari.requiresFullRewrite(target.path, patches);
     case "chrome":
-      return patches.length === 0
-        ? Effect.succeed(false)
-        : patches.some(touchesReadingList)
-          ? Effect.succeed(true)
-          : ChromeNative.isPaired(target.path);
+      return patches.length === 0 ? Effect.succeed(false) : ChromeNative.isPaired(target.path);
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
@@ -445,24 +409,20 @@ export const writeTree = (
       return Safari.writeTree(target.path, tree);
     case "chrome":
       return Effect.gen(function* () {
-        const native = yield* readChromeNative(target);
-        if (
-          expectedTree !== undefined &&
-          !ChromeNative.treesEqual(
-            toChromeLayout(Canonical.canonicalTree(fromChromeLayout(native)), native),
-            toChromeLayout(expectedTree, native),
-          )
-        ) {
+        const paired = yield* ChromeNative.isPaired(target.path);
+        const observed = yield* readState(target);
+        if (expectedTree !== undefined && !ChromeNative.treesEqual(observed.tree, expectedTree))
           return yield* Effect.fail(
             new Error(
               `${displayNameOf(target)} bookmarks changed after the sync planned its write. The next sync retries.`,
             ),
           );
-        }
-        const desired = toChromeLayout(tree, native);
-        if (!(yield* ChromeNative.isPaired(target.path)))
-          return yield* Chrome.writeTree(target.path, desired);
-        yield* ChromeNative.writeTree(target.path, native, desired);
+        if (!paired) return yield* Chrome.writeTree(target.path, tree);
+        yield* ChromeNative.writeState(
+          target.path,
+          observed,
+          TargetState.make({ tree, readingList: observed.readingList }),
+        );
       });
     default:
       return Effect.fail(

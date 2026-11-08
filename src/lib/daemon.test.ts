@@ -15,10 +15,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as ReadingList from "./reading-list.ts";
 import * as StaticDaemon from "./daemon.ts";
+import * as Safari from "./safari.ts";
 import * as Fingerprint from "./fingerprint.ts";
 import { readDaemonHeaderState } from "./managed-config-header.ts";
-import { BookmarkLeaf, BookmarkTree, BookmarksConfig } from "./schema/__.ts";
+import { BookmarkLeaf, BookmarkTree, BookmarksConfig, ReadingListItem } from "./schema/__.ts";
 import * as Targets from "./targets.ts";
 import * as YamlModule from "./yaml.ts";
 
@@ -130,7 +132,7 @@ const chromeFile = (
   });
 
 /** A Safari plist whose bar holds one bookmark to a.example, titled `title`. */
-const safariFile = (title: string) =>
+const safariFile = (title: string, read?: boolean) =>
   new Uint8Array(
     serialize({
       Children: [
@@ -145,6 +147,22 @@ const safariFile = (title: string) =>
             },
           ],
         },
+        ...(read === undefined
+          ? []
+          : [
+              {
+                WebBookmarkType: "WebBookmarkTypeList",
+                Title: "com.apple.ReadingList",
+                Children: [
+                  {
+                    WebBookmarkType: "WebBookmarkTypeLeaf",
+                    URLString: "https://article.example/",
+                    URIDictionary: { title: "Article" },
+                    ReadingList: read ? { DateLastViewed: new Date("2026-01-01T00:00:00Z") } : {},
+                  },
+                ],
+              },
+            ]),
       ],
     }),
   );
@@ -664,6 +682,12 @@ console.log(reply);
         await Bun.sleep(300);
         await replace(safariPath, safariFile("Renamed in Safari"));
         await waitFor(async () => (await cli.syncs()) === 3);
+        await replace(safariPath, safariFile("Renamed in Safari", false));
+        await waitFor(async () => (await cli.syncs()) === 4);
+        await replace(safariPath, safariFile("Renamed in Safari", true));
+        await waitFor(async () => (await cli.syncs()) === 5);
+        await replace(safariPath, safariFile("Renamed in Safari", false));
+        await waitFor(async () => (await cli.syncs()) === 6);
       } finally {
         await stopWatcher(proc);
       }
@@ -729,7 +753,7 @@ console.log(reply);
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
     const safari = { browser: "safari", path: safariPath } as const;
     const safariFingerprint = async () =>
-      Fingerprint.ofTree(await run(Targets.readFileTree(safari)));
+      Fingerprint.ofState(await run(Safari.readState(safari.path)));
 
     try {
       await mkdir(join(dir, "Safari"), { recursive: true });
@@ -787,6 +811,64 @@ await Bun.sleep(500);`,
 
         await appendFile(yamlPath, "# a later edit\n", "utf-8");
         await waitFor(async () => (await cli.syncs()) === 2);
+      } finally {
+        await stopWatcher(proc);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Reading List stamps schedule read-only changes and suppress the sync's own stamps", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-reading-list-"));
+    const configDir = join(dir, "config");
+    const runtimeDir = join(dir, "runtime");
+    const instanceId = "12345678-1234-1234-1234-123456789abc";
+    const stamp = join(runtimeDir, `${instanceId}.reading-list`);
+    const unread = ReadingList.fingerprint([
+      ReadingListItem.make({ name: "A", url: "https://a.example/", read: false }),
+    ]);
+    const read = ReadingList.fingerprint([
+      ReadingListItem.make({ name: "A", url: "https://a.example/", read: true }),
+    ]);
+    try {
+      await mkdir(configDir, { recursive: true });
+      await mkdir(runtimeDir, { recursive: true });
+      await writeFile(
+        join(configDir, "chrome-bridge.json"),
+        JSON.stringify([{ profilePath: join(dir, "Bookmarks"), instanceId }]),
+      );
+      await writeFile(stamp, unread + "\n");
+      const cli = await writeFakeCli(
+        dir,
+        [
+          JSON.stringify({
+            ...syncDoneReply,
+            snapshot: {
+              files: [{ path: stamp, fingerprints: [unread, read], finalFingerprint: read }],
+            },
+          }),
+          syncDone,
+        ],
+        [
+          `await writeFile(${JSON.stringify(stamp)}, ${JSON.stringify(read + "\n")}); await Bun.sleep(250);`,
+        ],
+      );
+      const proc = await startWatcher(dir, cli.path, {
+        BOOKMARKS_CONFIG_DIR: configDir,
+        BOOKMARKS_DAEMON_SYNC_DELAY_MS: "100",
+      });
+      try {
+        await waitFor(
+          async () =>
+            (await readRuntimeState(join(runtimeDir, "daemon.state.json"))).phase === "idle",
+        );
+        await Bun.sleep(350);
+        expect(await cli.syncs()).toBe(1);
+        await writeFile(stamp, unread + "\n");
+        await waitFor(async () => (await cli.syncs()) === 2);
+        await Bun.sleep(350);
+        expect(await cli.syncs()).toBe(2);
       } finally {
         await stopWatcher(proc);
       }

@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
-import { DateTime, Effect, Layer } from "effect";
+import { DateTime, Effect, Layer, Schema } from "effect";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NativeRequestSchema } from "./chrome-native-protocol.ts";
 import * as Native from "./chrome-native.ts";
 import { ChromeBridgeRuntime, type Runtime } from "./chrome-native-runtime.ts";
 import * as Patch from "./patch.ts";
-import { BookmarkTree, BookmarkLeaf } from "./schema/__.ts";
+import { BookmarkTree, BookmarkLeaf, TargetState, ReadingListItem } from "./schema/__.ts";
 import * as Targets from "./targets.ts";
 
 const rejectionOf = async (promise: Promise<unknown>): Promise<string> => {
@@ -50,12 +51,32 @@ test("native writes include the planning snapshot and verify Chrome's response",
     Effect.sync(() => {
       expect(id).toBe(instanceId);
       requests.push(request);
-      return { id: "cli", ok: true, value: after };
+      return {
+        id: "cli",
+        ok: true,
+        value: TargetState.make({ tree: after, readingList: [] }),
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
     }),
   );
-  await Effect.runPromise(Native.writeTree(profilePath, before, after).pipe(Effect.provide(layer)));
+  await Effect.runPromise(
+    Native.writeState(
+      profilePath,
+      TargetState.make({ tree: before, readingList: [] }),
+      TargetState.make({ tree: after, readingList: [] }),
+    ).pipe(Effect.provide(layer)),
+  );
   expect(requests).toEqual([
-    { id: "cli", operation: "reconcile", expectedTree: before, tree: after },
+    {
+      id: "cli",
+      operation: "reconcile",
+      expectedTree: before,
+      tree: after,
+      expectedReadingList: [],
+      readingList: [],
+    },
   ]);
 });
 
@@ -64,12 +85,25 @@ test("a stale snapshot rejection never silently retries a write", async () => {
   const layer = makeLayer(() =>
     Effect.sync(() => {
       calls++;
-      return { id: "cli", ok: false, error: "Bookmarks changed; retry with a fresh snapshot." };
+      return {
+        id: "cli",
+        ok: false,
+        error: "Bookmarks changed; retry with a fresh snapshot.",
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
     }),
   );
   expect(
     await rejectionOf(
-      Effect.runPromise(Native.writeTree(profilePath, before, after).pipe(Effect.provide(layer))),
+      Effect.runPromise(
+        Native.writeState(
+          profilePath,
+          TargetState.make({ tree: before, readingList: [] }),
+          TargetState.make({ tree: after, readingList: [] }),
+        ).pipe(Effect.provide(layer)),
+      ),
     ),
   ).toContain("Bookmarks changed");
   expect(calls).toBe(1);
@@ -80,16 +114,33 @@ test("unconfirmed or mismatched writes fail and identical trees cause no request
   const layer = makeLayer(() =>
     Effect.sync(() => {
       calls++;
-      return { id: "cli", ok: true, value: before };
+      return {
+        id: "cli",
+        ok: true,
+        value: TargetState.make({ tree: before, readingList: [] }),
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
     }),
   );
   await Effect.runPromise(
-    Native.writeTree(profilePath, before, before).pipe(Effect.provide(layer)),
+    Native.writeState(
+      profilePath,
+      TargetState.make({ tree: before, readingList: [] }),
+      TargetState.make({ tree: before, readingList: [] }),
+    ).pipe(Effect.provide(layer)),
   );
   expect(calls).toBe(0);
   expect(
     await rejectionOf(
-      Effect.runPromise(Native.writeTree(profilePath, before, after).pipe(Effect.provide(layer))),
+      Effect.runPromise(
+        Native.writeState(
+          profilePath,
+          TargetState.make({ tree: before, readingList: [] }),
+          TargetState.make({ tree: after, readingList: [] }),
+        ).pipe(Effect.provide(layer)),
+      ),
     ),
   ).toContain("did not retain");
   expect(calls).toBe(1);
@@ -126,7 +177,14 @@ test("paired Targets routes reads and full rewrites through the live bridge with
       const operation = request.operation;
       operations.push(operation);
       if (operation === "reconcile") liveTree = after;
-      return { id: "cli", ok: true, value: liveTree };
+      return {
+        id: "cli",
+        ok: true,
+        value: TargetState.make({ tree: liveTree, readingList: [] }),
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
     }),
   );
 
@@ -177,7 +235,14 @@ test("paired Targets refuses patch writes instead of falling through to the sync
   const layer = makeLayerFor(bookmarksPath, () =>
     Effect.sync(() => {
       bridgeRequests += 1;
-      return { id: "cli", ok: true, value: before };
+      return {
+        id: "cli",
+        ok: true,
+        value: TargetState.make({ tree: before, readingList: [] }),
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
     }),
   );
 
@@ -192,4 +257,65 @@ test("paired Targets refuses patch writes instead of falling through to the sync
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("the CLI rejects responses from an old host or an extension missing Reading List capability", async () => {
+  const responses = [
+    { id: "cli", ok: true, value: before },
+    {
+      id: "cli",
+      ok: true,
+      value: TargetState.make({ tree: before, readingList: [] }),
+      version: 2,
+      hostVersion: 1,
+      capabilities: ["readingList"],
+    },
+    {
+      id: "cli",
+      ok: true,
+      value: TargetState.make({ tree: before, readingList: [] }),
+      version: 2,
+      hostVersion: 2,
+      capabilities: [],
+    },
+  ];
+  const errors = await Promise.all(
+    responses.map((response) =>
+      rejectionOf(
+        Effect.runPromise(
+          Native.readState(profilePath).pipe(
+            Effect.provide(makeLayer(() => Effect.succeed(response))),
+          ),
+        ),
+      ),
+    ),
+  );
+  for (const error of errors) expect(error).toMatch(/Reading List|readingList/);
+});
+
+test("tree-only writes preserve a populated native Reading List", async () => {
+  const readingList = [
+    ReadingListItem.make({ name: "Article", url: "https://article.example/", read: true }),
+  ];
+  let live = before;
+  const layer = makeLayer((_id, request) =>
+    Effect.sync(() => {
+      const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
+      if (decoded.operation === "reconcile") {
+        expect(decoded.expectedReadingList).toEqual(readingList);
+        expect(decoded.readingList).toEqual(readingList);
+        live = decoded.tree;
+      }
+      return {
+        id: "cli",
+        ok: true,
+        value: TargetState.make({ tree: live, readingList }),
+        version: 2,
+        hostVersion: 2,
+        capabilities: ["readingList"],
+      };
+    }),
+  );
+  await Effect.runPromise(Native.writeTree(profilePath, before, after).pipe(Effect.provide(layer)));
+  expect(live).toEqual(after);
 });

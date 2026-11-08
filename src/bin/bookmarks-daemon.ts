@@ -11,6 +11,8 @@ import {
   writeManagedConfigHeader,
 } from "../lib/managed-config-header.ts";
 import { Effect, Option, Schema } from "effect";
+import * as ChromeNativeRuntime from "../lib/chrome-native-runtime.ts";
+import * as Safari from "../lib/safari.ts";
 import * as Fingerprint from "../lib/fingerprint.ts";
 import * as Paths from "../lib/paths.ts";
 import * as Permissions from "../lib/permissions.ts";
@@ -68,7 +70,12 @@ const waitingBrowsers = (syncResult: Record<string, unknown>): ReadonlySet<strin
 
 const changedAnything = (syncResult: Record<string, unknown>): boolean => {
   const applied = syncResult["applied"];
-  return syncResult["yamlChanged"] === true || (Array.isArray(applied) && applied.length > 0);
+  const readingList = syncResult["readingListChanges"];
+  return (
+    syncResult["yamlChanged"] === true ||
+    (Array.isArray(applied) && applied.length > 0) ||
+    (Array.isArray(readingList) && readingList.length > 0)
+  );
 };
 
 const isDeferredSync = (syncResult: Record<string, unknown>): boolean => {
@@ -143,7 +150,9 @@ const bookmarksFingerprint = async (
   target: Targets.TargetDescriptor,
 ): Promise<string | undefined> => {
   try {
-    return Fingerprint.ofTree(await Effect.runPromise(Targets.readFileTree(target)));
+    return target.browser === "safari"
+      ? Fingerprint.ofState(await Effect.runPromise(Safari.readState(target.path)))
+      : Fingerprint.ofTree(await Effect.runPromise(Targets.readFileTree(target)));
   } catch {
     return undefined;
   }
@@ -257,6 +266,7 @@ const runWatcherProcess = async (): Promise<never> => {
   ]);
   /** Per watched file, the fingerprints of what a sync has taken in or is queued to. */
   const settled = new Map<string, ReadonlySet<string>>();
+  const expectedFinal = new Map<string, string>();
   const settle = (path: string, fingerprint: string | undefined): void => {
     settled.set(path, new Set(fingerprint === undefined ? [] : [fingerprint]));
   };
@@ -265,7 +275,15 @@ const runWatcherProcess = async (): Promise<never> => {
    * so one edit queues one sync. A file that can't be read always counts as changed.
    */
   const isNewContent = (path: string, fingerprint: string | undefined): boolean => {
-    if (fingerprint !== undefined && settled.get(path)?.has(fingerprint)) return false;
+    if (fingerprint !== undefined && settled.get(path)?.has(fingerprint)) {
+      // Once the final write is visible, an older state is a new edit again.
+      if (expectedFinal.get(path) === fingerprint) {
+        settle(path, fingerprint);
+        expectedFinal.delete(path);
+      }
+      return false;
+    }
+    expectedFinal.delete(path);
     settle(path, fingerprint);
     return true;
   };
@@ -285,6 +303,12 @@ const runWatcherProcess = async (): Promise<never> => {
           files.map((file) => [file.path, new Set(file.fingerprints)] as const),
       }),
     );
+    if (Option.isSome(snapshot))
+      for (const file of snapshot.value.files) {
+        if (file.finalFingerprint !== undefined)
+          expectedFinal.set(file.path, file.finalFingerprint);
+        else expectedFinal.delete(file.path);
+      }
     const current = await fingerprintWatchedFiles();
     let unsynced = false;
     for (const [path, fingerprint] of current) {
@@ -518,6 +542,36 @@ const runWatcherProcess = async (): Promise<never> => {
         watchedFiles.set(target.path, () => bookmarksFingerprint(target));
       } catch (error) {
         console.error(`Failed to watch ${target.path}: ${messageFromUnknown(error)}`);
+      }
+    }
+    const bindings = await Effect.runPromise(
+      Effect.gen(function* () {
+        const runtime = yield* ChromeNativeRuntime.ChromeBridgeRuntime;
+        return yield* runtime.loadBindings;
+      }),
+    );
+    for (const binding of bindings) {
+      const path = ChromeNativeRuntime.readingListStampPath(binding.instanceId);
+      if (watchedFiles.has(path)) continue;
+      const fingerprintOf = async () => {
+        try {
+          return (await Fs.readFile(path, "utf8")).trimEnd();
+        } catch {
+          return undefined;
+        }
+      };
+      try {
+        watchers.push(
+          watchFile(path, async () => {
+            if (isNewContent(path, await fingerprintOf())) {
+              errorRetryCount = 0;
+              await scheduleSync(delayMs, new Date().toISOString());
+            }
+          }),
+        );
+        watchedFiles.set(path, fingerprintOf);
+      } catch (error) {
+        console.error(`Failed to watch ${path}: ${messageFromUnknown(error)}`);
       }
     }
   };

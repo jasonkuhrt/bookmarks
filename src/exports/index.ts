@@ -4,6 +4,7 @@ export * as Doctor from "#lib/doctor";
 export * as Graveyard from "#lib/graveyard";
 export * as ManagedPaths from "#lib/managed-paths";
 export * as Orchestration from "#lib/orchestration";
+export * as ReadingList from "#lib/reading-list";
 export * as Patch from "#lib/patch";
 export * as Paths from "#lib/paths";
 export * as Permissions from "#lib/permissions";

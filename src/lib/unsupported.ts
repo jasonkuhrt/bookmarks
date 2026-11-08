@@ -36,7 +36,7 @@ export const collectAmbiguousPathIssues = (tree: BookmarkTree): readonly Bookmar
     }
   };
 
-  for (const sectionKey of ["bar", "menu", "reading_list", "mobile"] as const) {
+  for (const sectionKey of ["bar", "menu", "mobile"] as const) {
     visit(tree[sectionKey], sectionKey);
   }
   return issues;

@@ -254,7 +254,7 @@ const bookmarkSectionsEqual = (
 };
 
 const bookmarkTreesEqual = (left: BookmarkTree, right: BookmarkTree): boolean =>
-  (["bar", "menu", "reading_list", "mobile"] as const).every((section) =>
+  (["bar", "menu", "mobile"] as const).every((section) =>
     bookmarkSectionsEqual(left[section], right[section]),
   );
 

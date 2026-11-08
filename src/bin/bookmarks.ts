@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import * as ReadingList from "../lib/reading-list.ts";
 /**
  * bookmarks - Cross-browser bookmark sync from YAML
  *
@@ -261,29 +262,25 @@ const printPatchPreview = (label: string, patches: readonly BookmarkPatch[]) =>
     }
   });
 
-const printDryRunPreview = (status: SyncModule.StatusResult) =>
-  Effect.gen(function* () {
-    if (status.targets.length === 0) return;
-
-    yield* Console.log("  dry-run preview:");
-
-    for (const targetStatus of status.targets) {
-      const showBrowser = targetStatus.yamlPatches.length > 0;
-      const showYaml = targetStatus.browserPatches.length > 0;
-
-      if (!showBrowser && !showYaml) continue;
-
-      yield* Console.log(`  ${Targets.displayNameOf(targetStatus.target)}`);
-      if (showBrowser) {
-        yield* Console.log(`    to browser: ${targetStatus.yamlPatches.length}`);
-        yield* printPatchPreview("to browser", targetStatus.yamlPatches);
-      }
-      if (showYaml) {
-        yield* Console.log(`    to yaml:    ${targetStatus.browserPatches.length}`);
-        yield* printPatchPreview("to yaml", targetStatus.browserPatches);
-      }
-    }
+const formatReadingListChange = (change: ReadingList.Change): string =>
+  ReadingList.$match(change, {
+    Added: ({ item }) => `+ Reading List: added "${item.name}" (${item.url})`,
+    Removed: ({ item }) => `- Reading List: removed "${item.name}" (${item.url})`,
+    Renamed: ({ item, oldName }) =>
+      `~ Reading List: renamed "${oldName}" -> "${item.name}" (${item.url})`,
+    MarkedRead: ({ item }) => `~ Reading List: marked read "${item.name}" (${item.url})`,
+    MarkedUnread: ({ item }) => `~ Reading List: marked unread "${item.name}" (${item.url})`,
   });
+const printReadingListPreview = (label: string, changes: readonly ReadingList.Change[]) =>
+  Effect.gen(function* () {
+    if (changes.length === 0) return;
+    yield* Console.log(`    ${label}:`);
+    for (const change of changes) yield* Console.log(`      ${formatReadingListChange(change)}`);
+  });
+const serializeReadingListChange = (change: ReadingList.Change) => ({
+  ...change,
+  tag: change._tag,
+});
 
 const serializeSyncResult = (
   command: string,
@@ -303,11 +300,15 @@ const serializeSyncResult = (
     pending: waiting.pending,
   })),
   applied: result.applied.map(serializePatch),
+  readingListChanges: (result.readingListChanges ?? []).map(serializeReadingListChange),
   graveyarded: result.graveyarded.map(serializePatch),
   targets: result.targets.map((targetResult) => ({
     target: targetResult.target,
     writeMode: targetResult.writeMode ?? "patches",
     applied: targetResult.applied.map(serializePatch),
+    readingListChanges: (targetResult.readingListChanges ?? []).map(serializeReadingListChange),
+    readingListToYaml: (targetResult.readingListToYaml ?? []).map(serializeReadingListChange),
+    readingListGraveyarded: targetResult.readingListGraveyarded ?? [],
     graveyarded: targetResult.graveyarded.map(serializePatch),
   })),
   snapshot: result.snapshot ?? null,
@@ -321,6 +322,8 @@ const serializeStatus = (status: SyncModule.StatusResult) => ({
       yaml: targetStatus.yamlDuplicates,
       browser: targetStatus.browserDuplicates,
     },
+    readingListToBrowser: targetStatus.yamlReadingListChanges.map(serializeReadingListChange),
+    readingListToYaml: targetStatus.browserReadingListChanges.map(serializeReadingListChange),
     pendingToBrowser: targetStatus.yamlPatches.map(serializePatch),
     pendingToYaml: targetStatus.browserPatches.map(serializePatch),
   })),
@@ -353,7 +356,7 @@ const printSyncSummary = (
     }
 
     yield* Console.log(
-      `\n${label} complete: ${result.applied.length} applied, ${result.graveyarded.length} graveyarded`,
+      `\n${label} complete: ${result.applied.length} bookmark changes, ${result.readingListChanges?.length ?? 0} Reading List changes, ${result.graveyarded.length} graveyarded`,
     );
     if (result.backup) {
       yield* Console.log(`  backup: ${result.backup.backupDir}`);
@@ -372,9 +375,14 @@ const printSyncSummary = (
     for (const targetResult of result.targets) {
       yield* Console.log(
         `  ${Targets.displayNameOf(targetResult.target)}: ` +
-          `${targetResult.applied.length} applied, ${targetResult.graveyarded.length} graveyarded` +
-          (targetResult.writeMode === "rewrite" ? ", exact structural rewrite" : ""),
+          `${targetResult.applied.length} bookmark changes, ${targetResult.readingListChanges?.length ?? 0} Reading List changes, ${targetResult.graveyarded.length} graveyarded` +
+          (targetResult.writeMode === "rewrite" ? ", full state rewrite" : ""),
       );
+      yield* printReadingListPreview(
+        "Reading List to browser",
+        targetResult.readingListChanges ?? [],
+      );
+      yield* printReadingListPreview("Reading List to YAML", targetResult.readingListToYaml ?? []);
       if (options?.showDetails) {
         yield* printPatchPreview("apply", targetResult.applied);
         yield* printPatchPreview("graveyard", targetResult.graveyarded);
@@ -405,6 +413,14 @@ const printStatus = (status: SyncModule.StatusResult) =>
       yield* printPatchPreview("to browser", targetStatus.yamlPatches);
       yield* Console.log(`  pending -> yaml:    ${targetStatus.browserPatches.length}`);
       yield* printPatchPreview("to yaml", targetStatus.browserPatches);
+      yield* printReadingListPreview(
+        "Reading List to browser",
+        targetStatus.yamlReadingListChanges,
+      );
+      yield* printReadingListPreview(
+        "Reading List to YAML",
+        targetStatus.browserReadingListChanges,
+      );
     }
   });
 
@@ -474,10 +490,6 @@ const program = Effect.gen(function* () {
     }
     case "sync": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
-      const preview =
-        flags.dryRun && !flags.fromYaml
-          ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
-          : undefined;
       const syncConfig = {
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
@@ -490,13 +502,11 @@ const program = Effect.gen(function* () {
         yield* printJson({
           ...serializeSyncResult("sync", managed.yamlPath, flags.dryRun, syncResult),
           mode: flags.fromYaml ? "from-yaml" : "merge",
-          preview: preview ? serializeStatus(preview) : null,
         });
       } else {
         yield* printSyncSummary(flags.fromYaml ? "Sync from YAML" : "Sync", syncResult, {
-          showDetails: flags.fromYaml && flags.dryRun,
+          showDetails: flags.dryRun,
         });
-        if (preview) yield* printDryRunPreview(preview);
       }
       break;
     }

@@ -1,10 +1,13 @@
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Runtime, Schema } from "effect";
+import * as ChromeReadingList from "../src/lib/chrome-reading-list.ts";
+import * as ReadingList from "../src/lib/reading-list.ts";
+import { TargetState } from "../src/lib/schema/__.ts";
 import * as ChromeNativeModel from "../src/lib/chrome-native-model.ts";
 import {
   HelloSchema,
   InstanceIdSchema,
   NativeRequestSchema,
-  NativeResponseSchema,
+  ExtensionResponseSchema,
   protocolVersion,
   type NativeRequest,
   type NativeResponse,
@@ -20,7 +23,7 @@ interface ChromeEvent<Arguments extends readonly unknown[]> {
   addListener(listener: (...arguments_: Arguments) => void): void;
 }
 
-interface NativePort {
+export interface NativePort {
   readonly onMessage: ChromeEvent<[message: unknown]>;
   readonly onDisconnect: ChromeEvent<[]>;
   postMessage(message: unknown): void;
@@ -46,6 +49,15 @@ interface ChromeApi {
     ): Promise<ChromeNativeModel.ChromeBookmarkNode>;
     remove(id: string): Promise<void>;
   };
+  readonly readingList: {
+    query(info: object): Promise<readonly ChromeReadingList.Entry[]>;
+    addEntry(info: Parameters<ChromeReadingList.Api["addEntry"]>[0]): Promise<void>;
+    updateEntry(info: Parameters<ChromeReadingList.Api["updateEntry"]>[0]): Promise<void>;
+    removeEntry(info: { readonly url: string }): Promise<void>;
+    readonly onEntryAdded: ChromeEvent<[]>;
+    readonly onEntryUpdated: ChromeEvent<[]>;
+    readonly onEntryRemoved: ChromeEvent<[]>;
+  };
   readonly runtime: {
     connectNative(application: string): NativePort;
     readonly lastError?: unknown;
@@ -65,7 +77,8 @@ declare const chrome: ChromeApi;
 const toError = (cause: unknown): Error =>
   cause instanceof Error ? cause : new Error("Chrome bookmark operation failed.");
 
-interface ChromeExtensionApi {
+export interface ChromeExtensionApi {
+  readonly addReadingListListener: (listener: () => void) => Effect.Effect<void>;
   readonly addAlarmListener: (listener: (name: string) => void) => Effect.Effect<void>;
   readonly addInstalledListener: (listener: () => void) => Effect.Effect<void>;
   readonly addStartupListener: (listener: () => void) => Effect.Effect<void>;
@@ -83,12 +96,18 @@ interface ChromeExtensionApi {
   readonly postMessage: (port: NativePort, message: unknown) => Effect.Effect<void, Error>;
 }
 
-class ChromeExtension extends Context.Tag("bookmarks/ChromeExtension")<
+export class ChromeExtension extends Context.Tag("bookmarks/ChromeExtension")<
   ChromeExtension,
   ChromeExtensionApi
 >() {}
 
 const chromeExtensionLiveService: ChromeExtensionApi = {
+  addReadingListListener: (listener) =>
+    Effect.sync(() => {
+      chrome.readingList.onEntryAdded.addListener(listener);
+      chrome.readingList.onEntryUpdated.addListener(listener);
+      chrome.readingList.onEntryRemoved.addListener(listener);
+    }),
   addAlarmListener: (listener) =>
     Effect.sync(() => {
       chrome.alarms.onAlarm.addListener((alarm) => {
@@ -184,10 +203,23 @@ const ChromeBookmarksLive = Layer.succeed(ChromeNativeModel.ChromeBookmarks, {
     }),
 });
 
-const ChromeLive = Layer.merge(ChromeExtensionLive, ChromeBookmarksLive);
+const ChromeReadingListLive = Layer.succeed(ChromeReadingList.ChromeReadingList, {
+  query: () => Effect.tryPromise({ try: () => chrome.readingList.query({}), catch: toError }),
+  addEntry: (entry) =>
+    Effect.tryPromise({ try: () => chrome.readingList.addEntry(entry), catch: toError }),
+  updateEntry: (entry) =>
+    Effect.tryPromise({ try: () => chrome.readingList.updateEntry(entry), catch: toError }),
+  removeEntry: (entry) =>
+    Effect.tryPromise({ try: () => chrome.readingList.removeEntry(entry), catch: toError }),
+});
+const ChromeLive = Layer.mergeAll(ChromeExtensionLive, ChromeBookmarksLive, ChromeReadingListLive);
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, ChromeExtension | ChromeNativeModel.ChromeBookmarksApi>,
+  effect: Effect.Effect<
+    A,
+    unknown,
+    ChromeExtension | ChromeNativeModel.ChromeBookmarksApi | ChromeReadingList.Api
+  >,
 ) => Effect.runPromise(effect.pipe(Effect.provide(ChromeLive)));
 
 const getInstanceId = (): Effect.Effect<string, Error, ChromeExtension> =>
@@ -210,13 +242,35 @@ const errorMessage = (error: unknown): string =>
 
 const operation = (
   request: NativeRequest,
-): Effect.Effect<NativeResponse, never, ChromeNativeModel.ChromeBookmarksApi> => {
-  const effect =
-    request.operation === "snapshot"
-      ? ChromeNativeModel.snapshot({ rootSelection: "prefer-syncing" })
-      : ChromeNativeModel.reconcile(request.expectedTree, request.tree, {
-          rootSelection: "prefer-syncing",
-        });
+): Effect.Effect<
+  NativeResponse,
+  never,
+  ChromeNativeModel.ChromeBookmarksApi | ChromeReadingList.Api
+> => {
+  const effect = Effect.gen(function* () {
+    if (request.operation === "snapshot")
+      return TargetState.make({
+        tree: yield* ChromeNativeModel.snapshot({ rootSelection: "prefer-syncing" }),
+        readingList: yield* ChromeReadingList.snapshot,
+      });
+    // Validate both snapshots before either domain is mutated.
+    const tree = yield* ChromeNativeModel.snapshot({ rootSelection: "prefer-syncing" });
+    const readingList = yield* ChromeReadingList.snapshot;
+    if (
+      ChromeNativeModel.fingerprint(tree) !== ChromeNativeModel.fingerprint(request.expectedTree) ||
+      !ReadingList.equal(readingList, request.expectedReadingList)
+    )
+      return yield* Effect.fail(new Error("Chrome changed; retry with a fresh snapshot."));
+    yield* Effect.try({ try: () => ReadingList.canonical(request.readingList), catch: toError });
+    const nextTree = yield* ChromeNativeModel.reconcile(request.expectedTree, request.tree, {
+      rootSelection: "prefer-syncing",
+    });
+    const nextReadingList = yield* ChromeReadingList.reconcile(
+      request.expectedReadingList,
+      request.readingList,
+    );
+    return TargetState.make({ tree: nextTree, readingList: nextReadingList });
+  });
 
   return effect.pipe(
     Effect.map((value) => ({ id: request.id, ok: true, value }) as const),
@@ -229,7 +283,11 @@ const operation = (
 const handleMessage = (
   port: NativePort,
   message: unknown,
-): Effect.Effect<void, Error, ChromeExtension | ChromeNativeModel.ChromeBookmarksApi> =>
+): Effect.Effect<
+  void,
+  Error,
+  ChromeExtension | ChromeNativeModel.ChromeBookmarksApi | ChromeReadingList.Api
+> =>
   Effect.gen(function* () {
     const api = yield* ChromeExtension;
     const request = yield* Effect.try({
@@ -242,14 +300,15 @@ const handleMessage = (
         return api
           .postMessage(
             port,
-            Schema.encodeSync(NativeResponseSchema)({ id, ok: false, error: error.message }),
+            Schema.encodeSync(ExtensionResponseSchema)({ id, ok: false, error: error.message }),
           )
           .pipe(Effect.as(undefined));
       }),
     );
     if (request === undefined) return;
     const response = yield* operation(request);
-    yield* api.postMessage(port, Schema.encodeSync(NativeResponseSchema)(response));
+    if (response.ok) yield* announceReadingList(port);
+    yield* api.postMessage(port, Schema.encodeSync(ExtensionResponseSchema)(response));
   });
 
 let connectedPort: NativePort | undefined;
@@ -272,25 +331,75 @@ const handleAfter = async (
   }
 };
 
-const connect = (): Effect.Effect<void, Error, ChromeExtension> =>
+const announcementLock = Effect.runSync(Effect.makeSemaphore(1));
+export const announceReadingList = (port: NativePort) =>
+  announcementLock.withPermits(1)(
+    Effect.gen(function* () {
+      const api = yield* ChromeExtension;
+      const items = yield* ChromeReadingList.snapshot;
+      yield* api.postMessage(port, {
+        type: "readingListChanged",
+        fingerprint: ReadingList.fingerprint(items),
+      });
+    }),
+  );
+
+/** Called for every new native port, including reconnects. */
+export const openConnection = (
+  onMessage: (port: NativePort, message: unknown) => void,
+  onDisconnect: (port: NativePort) => void,
+  onConnected: (port: NativePort) => void = () => undefined,
+) =>
   Effect.gen(function* () {
-    if (connectedPort !== undefined) return;
     const api = yield* ChromeExtension;
     const instanceId = yield* getInstanceId();
     const port = yield* api.connectNative(nativeHostName);
-    connectedPort = port;
-
+    onConnected(port);
     yield* api.addMessageListener(port, (message) => {
-      requestQueue = handleAfter(requestQueue, port, message);
+      onMessage(port, message);
     });
     yield* api.addDisconnectListener(port, () => {
-      if (connectedPort !== port) return;
-      connectedPort = undefined;
-      startConnectionCycle();
+      onDisconnect(port);
     });
     yield* api.postMessage(
       port,
-      Schema.encodeSync(HelloSchema)({ type: "hello", version: protocolVersion, instanceId }),
+      Schema.encodeSync(HelloSchema)({
+        type: "hello",
+        version: protocolVersion,
+        instanceId,
+        capabilities: ["readingList"],
+      }),
+    );
+    yield* announceReadingList(port);
+    return port;
+  });
+
+export const watchReadingListChanges = (port: () => NativePort | undefined) =>
+  Effect.gen(function* () {
+    const api = yield* ChromeExtension;
+    const runtime = yield* Effect.runtime<ChromeExtension | ChromeReadingList.Api>();
+    yield* api.addReadingListListener(() => {
+      const current = port();
+      if (current)
+        void Runtime.runPromise(runtime)(announceReadingList(current).pipe(Effect.ignore));
+    });
+  });
+
+const connect = () =>
+  Effect.gen(function* () {
+    if (connectedPort !== undefined) return;
+    yield* openConnection(
+      (port, message) => {
+        requestQueue = handleAfter(requestQueue, port, message);
+      },
+      (port) => {
+        if (connectedPort !== port) return;
+        connectedPort = undefined;
+        startConnectionCycle();
+      },
+      (port) => {
+        connectedPort = port;
+      },
     );
   });
 
@@ -363,6 +472,7 @@ const startConnectionCycle = (): void => {
 
 const initialize = Effect.gen(function* () {
   const api = yield* ChromeExtension;
+  yield* watchReadingListChanges(() => connectedPort);
   yield* api.addInstalledListener(startConnectionCycle);
   yield* api.addStartupListener(startConnectionCycle);
   yield* api.addAlarmListener((name) => {
@@ -380,4 +490,4 @@ const start = async (): Promise<void> => {
   }
 };
 
-void start();
+if (typeof chrome !== "undefined") void start();

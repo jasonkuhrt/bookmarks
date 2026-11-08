@@ -1,5 +1,5 @@
 /**
- * The tree each target held after its last successful sync.
+ * The bookmark tree and Reading List each target held after its last successful sync.
  *
  * A three-way merge reads a target's edits as its difference from this tree, so it must be
  * exactly what that target last agreed with. It lives in the state folder, never in
@@ -14,15 +14,16 @@ import * as Path from "node:path";
 import * as Canonical from "./canonical.ts";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
-import { BookmarkTree } from "./schema/__.ts";
+import * as ReadingList from "./reading-list.ts";
+import { TargetState } from "./schema/__.ts";
 
 const BaselineFile = Schema.Struct({
-  version: Schema.Literal(1),
-  targets: Schema.Record({ key: Schema.String, value: BookmarkTree }),
+  version: Schema.Literal(2),
+  targets: Schema.Record({ key: Schema.String, value: TargetState }),
 });
 
 /** Target key (`safari`, `chrome/default`) to that target's tree after its last sync. */
-export type Baselines = Readonly<Record<string, BookmarkTree>>;
+export type Baselines = Readonly<Record<string, TargetState>>;
 
 const messageFromUnknown = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -52,13 +53,23 @@ export const load = (path = Paths.defaultSyncBaselinePath()): Effect.Effect<Base
     const decoded = yield* Schema.decodeUnknown(BaselineFile)(parsed).pipe(
       Effect.mapError((error) => new Error(`Invalid sync baseline at ${path}: ${error.message}`)),
     );
-    return Object.fromEntries(
-      Object.entries(decoded.targets).map(([key, tree]) => [key, Canonical.canonicalTree(tree)]),
-    );
+    return yield* Effect.try({
+      try: () =>
+        Object.fromEntries(
+          Object.entries(decoded.targets).map(([key, state]) => [
+            key,
+            TargetState.make({
+              tree: Canonical.canonicalTree(state.tree),
+              readingList: ReadingList.canonical(state.readingList),
+            }),
+          ]),
+        ),
+      catch: (cause) => new Error(`Invalid sync baseline at ${path}: ${messageFromUnknown(cause)}`),
+    });
   });
 
 export const render = (baselines: Baselines): Effect.Effect<string, Error> =>
-  Schema.encode(BaselineFile)({ version: 1, targets: baselines }).pipe(
+  Schema.encode(BaselineFile)({ version: 2, targets: baselines }).pipe(
     Effect.map((encoded) => `${JSON.stringify(encoded, null, 2)}\n`),
     Effect.mapError((error) => new Error(`Failed to encode sync baseline: ${error.message}`)),
   );

@@ -12,7 +12,7 @@
 
 import { DateTime, Duration, Effect, Option } from "effect";
 import * as Patch from "./patch.ts";
-import type { BookmarkNode } from "./schema/__.ts";
+import type { BookmarkNode, ReadingListItem } from "./schema/__.ts";
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,6 @@ const withMenu = (tree: BookmarkTree, menu: readonly BookmarkNode[]): BookmarkTr
   BookmarkTree.make({
     bar: tree.bar,
     menu,
-    reading_list: tree.reading_list,
     mobile: tree.mobile,
   });
 
@@ -266,4 +265,36 @@ export const gc = (
     });
     const updatedMenu = replaceGraveyardInMenu(menuSection, updatedGraveyard);
     return withMenu(tree, updatedMenu);
+  });
+
+/** Archive the whole losing version; folder names keep read state recoverable. */
+export const addReadingListEntries = (
+  tree: BookmarkTree,
+  items: readonly ReadingListItem[],
+  source: string,
+): Effect.Effect<BookmarkTree, Error> =>
+  Effect.gen(function* () {
+    let current = tree;
+    const date = yield* DateTime.now;
+    for (const item of items) {
+      const eventName = makeEventFolderName(date, source, "conflict");
+      const { menu, graveyardFolder } = ensureGraveyardFolder(current.menu ?? []);
+      const { graveyardFolder: withEvent, eventFolder } = ensureEventFolder(
+        graveyardFolder,
+        eventName,
+      );
+      const event = BookmarkFolder.make({
+        name: eventName,
+        children: appendAtPath(
+          eventFolder.children,
+          ["reading_list", item.read ? "read" : "unread"],
+          BookmarkLeaf.make({ name: item.name, url: item.url }),
+        ),
+      });
+      current = withMenu(
+        current,
+        replaceGraveyardInMenu(menu, replaceEventInGraveyard(withEvent, event)),
+      );
+    }
+    return current;
   });

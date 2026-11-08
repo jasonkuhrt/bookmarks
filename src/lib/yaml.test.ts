@@ -12,6 +12,8 @@ import {
   ChromeBookmarks,
   ChromeProfileBookmarks,
   SafariBookmarks,
+  SharedBookmarks,
+  ReadingListItem,
 } from "./schema/__.ts";
 import * as YamlModule from "./yaml.ts";
 
@@ -178,10 +180,12 @@ describe("yaml", () => {
 
   test("resolveTarget merges shared, browser, and Chrome profile overlays with browser projection", async () => {
     const config = BookmarksConfig.make({
-      all: new BookmarkTree({
+      all: SharedBookmarks.make({
         bar: [leaf("Shared Bar", "https://shared-bar.example/")],
         menu: [leaf("Shared Menu", "https://shared-menu.example/")],
-        reading_list: [leaf("Shared Reading", "https://shared-reading.example/")],
+        reading_list: [
+          ReadingListItem.make({ name: "Shared Reading", url: "https://shared-reading.example/" }),
+        ],
         mobile: [leaf("Shared Mobile", "https://shared-mobile.example/")],
       }),
       safari: SafariBookmarks.make({
@@ -201,7 +205,7 @@ describe("yaml", () => {
     const safariTree = await run(YamlModule.resolveTarget(config, { browser: "safari" }));
     expect(safariTree.bar?.map((node) => node.name)).toEqual(["Shared Bar", "Safari Bar"]);
     expect(safariTree.menu?.map((node) => node.name)).toEqual(["Shared Menu"]);
-    expect(safariTree.reading_list?.map((node) => node.name)).toEqual(["Shared Reading"]);
+    expect("reading_list" in safariTree).toBe(false);
     expect(safariTree.mobile).toBeUndefined();
 
     const chromeTree = await run(
@@ -210,8 +214,7 @@ describe("yaml", () => {
     expect(chromeTree.bar?.map((node) => node.name)).toEqual(["Shared Bar", "Chrome Profile"]);
     expect(chromeTree.menu?.map((node) => node.name)).toEqual(["Shared Menu", "Chrome Menu"]);
     expect(chromeTree.mobile?.map((node) => node.name)).toEqual(["Shared Mobile"]);
-    // Chrome keeps the shared reading list in its Read Later folder.
-    expect(chromeTree.reading_list?.map((node) => node.name)).toEqual(["Shared Reading"]);
+    expect("reading_list" in chromeTree).toBe(false);
   });
 
   test("configuredChromeProfiles and isTargetEnabled follow browser and profile flags", () => {

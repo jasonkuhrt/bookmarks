@@ -10,6 +10,8 @@
 import { Schema } from "effect";
 import { createHash } from "node:crypto";
 import * as Canonical from "./canonical.ts";
+import * as ReadingList from "./reading-list.ts";
+import type { TargetState } from "./schema/__.ts";
 import * as Layers from "./layers.ts";
 import { BookmarkLeaf, type BookmarkNode, type BookmarkTree } from "./schema/__.ts";
 
@@ -35,7 +37,12 @@ export const SyncSnapshot = Schema.Struct({
     Schema.Struct({
       path: Schema.String,
       fingerprints: Schema.Array(Schema.String),
+      finalFingerprint: Schema.optional(Schema.String),
     }),
   ),
 });
 export type SyncSnapshot = typeof SyncSnapshot.Type;
+
+export const ofReadingList = ReadingList.fingerprint;
+export const ofState = (state: TargetState): string =>
+  digest(JSON.stringify([ofTree(state.tree), ReadingList.fingerprint(state.readingList)]));

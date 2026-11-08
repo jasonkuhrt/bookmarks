@@ -96,10 +96,9 @@ describe("readBookmarks", () => {
 
   test("reading_list contains leaves from com.apple.ReadingList", async () => {
     await withFixture(async (path) => {
-      const tree = await run(Safari.readBookmarks(path));
-      const readingList = expectDefined(tree.reading_list, "expected reading list section");
+      const readingList = (await run(Safari.readState(path))).readingList;
       expect(readingList.length).toBeGreaterThan(0);
-      const firstItem = expectLeaf(readingList[0], "expected reading list bookmark");
+      const firstItem = expectDefined(readingList[0], "expected reading list item");
       expect(firstItem.url).toMatch(/^https?:\/\//);
     });
   });
@@ -118,7 +117,7 @@ describe("readBookmarks", () => {
       const allNames = [
         ...(tree.bar ?? []),
         ...(tree.menu ?? []),
-        ...(tree.reading_list ?? []),
+        ...(await run(Safari.readState(path))).readingList,
       ].map((n) => ("name" in n ? n.name : ""));
       expect(allNames).not.toContain("History");
     });
@@ -126,8 +125,10 @@ describe("readBookmarks", () => {
 
   test("leaf nodes have name and url", async () => {
     await withFixture(async (path) => {
-      const tree = await run(Safari.readBookmarks(path));
-      const leaf = expectLeaf(tree.reading_list?.[0], "expected reading list bookmark");
+      const leaf = expectDefined(
+        (await run(Safari.readState(path))).readingList[0],
+        "expected reading list item",
+      );
       expect(leaf.name).toBeTruthy();
       expect(leaf.url).toBeTruthy();
       expect(leaf.url).toMatch(/^https?:\/\//);
@@ -229,7 +230,7 @@ describe("readBookmarks", () => {
 
       expect(tree.bar ?? []).toEqual([]);
       expect(tree.menu ?? []).toEqual([]);
-      expect(tree.reading_list ?? []).toEqual([]);
+      expect((await run(Safari.readState(path))).readingList).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -312,19 +313,16 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = expectLeaf(
-        treeBefore.reading_list?.[0],
-        "expected reading list bookmark to remove",
-      );
+      const target = expectLeaf(treeBefore.menu?.[0], "expected reading list bookmark to remove");
 
       await run(
         Safari.applyPatches(path, [
-          Patch.Remove({ url: target.url, name: target.name, path: "reading_list", date: now }),
+          Patch.Remove({ url: target.url, name: target.name, path: "menu", date: now }),
         ]),
       );
 
       const treeAfter = await run(Safari.readBookmarks(path));
-      const remainingUrls = (treeAfter.reading_list ?? [])
+      const remainingUrls = (treeAfter.menu ?? [])
         .filter((n): n is BookmarkLeaf => BookmarkLeaf.is(n))
         .map((n) => n.url);
       expect(remainingUrls).not.toContain(target.url);
@@ -337,10 +335,7 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = expectLeaf(
-        treeBefore.reading_list?.[0],
-        "expected reading list bookmark to rename",
-      );
+      const target = expectLeaf(treeBefore.menu?.[0], "expected reading list bookmark to rename");
       const newName = "RENAMED_TEST_BOOKMARK";
 
       await run(
@@ -349,15 +344,15 @@ describe("applyPatches", () => {
             url: target.url,
             oldName: target.name,
             newName,
-            fromPath: "reading_list",
-            toPath: "reading_list",
+            fromPath: "menu",
+            toPath: "menu",
             date: now,
           }),
         ]),
       );
 
       const treeAfter = await run(Safari.readBookmarks(path));
-      const found = (treeAfter.reading_list ?? []).find(
+      const found = (treeAfter.menu ?? []).find(
         (n): n is BookmarkLeaf => BookmarkLeaf.is(n) && n.url === target.url,
       );
       expect(expectLeaf(found, "expected renamed bookmark").name).toBe(newName);
@@ -370,10 +365,7 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
-      const target = expectLeaf(
-        treeBefore.reading_list?.[0],
-        "expected reading list bookmark to move",
-      );
+      const target = expectLeaf(treeBefore.menu?.[0], "expected reading list bookmark to move");
 
       await run(
         Safari.applyPatches(path, [
@@ -381,7 +373,7 @@ describe("applyPatches", () => {
             url: target.url,
             oldName: target.name,
             newName: target.name,
-            fromPath: "reading_list",
+            fromPath: "menu",
             toPath: "bar",
             date: now,
           }),
@@ -390,8 +382,8 @@ describe("applyPatches", () => {
 
       const treeAfter = await run(Safari.readBookmarks(path));
 
-      // Gone from reading_list
-      const remainingUrls = (treeAfter.reading_list ?? [])
+      // Gone from menu
+      const remainingUrls = (treeAfter.menu ?? [])
         .filter((n): n is BookmarkLeaf => BookmarkLeaf.is(n))
         .map((n) => n.url);
       expect(remainingUrls).not.toContain(target.url);
@@ -527,9 +519,6 @@ describe("writeTree", () => {
           }),
           BookmarkLeaf.make({ name: "Loose Leaf", url: "https://loose.example/" }),
         ],
-        reading_list: [
-          BookmarkLeaf.make({ name: "Reading Item", url: "https://reading.example/" }),
-        ],
       });
 
       await run(Safari.writeTree(path, desired));
@@ -596,7 +585,7 @@ describe("writeTree", () => {
       const reread = await run(Safari.readBookmarks(path));
       expect(reread.bar).toEqual([top, added]);
       expect(reread.menu).toEqual([custom]);
-      expect(reread.reading_list ?? []).toEqual([]);
+      expect((await run(Safari.readState(path))).readingList).toEqual([]);
       const root = parse(await Bun.file(path).arrayBuffer());
       const readingList =
         isRecord(root) && Array.isArray(root["Children"])

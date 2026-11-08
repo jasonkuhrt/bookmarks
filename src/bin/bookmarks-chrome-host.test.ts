@@ -20,7 +20,9 @@ test("native host routes a local request through the framed Chrome pipe and clea
   );
   let socket: Net.Socket | undefined;
   try {
-    await child.stdin.write(encodeFrame({ type: "hello", version: 1, instanceId }));
+    await child.stdin.write(
+      encodeFrame({ type: "hello", version: 2, instanceId, capabilities: ["readingList"] }),
+    );
     await child.stdin.flush();
     const deadline = Date.now() + 3_000;
     // oxlint-disable-next-line eslint/no-await-in-loop -- Polls until the host has created its socket.
@@ -55,9 +57,25 @@ test("native host routes a local request through the framed Chrome pipe and clea
     }
     expect(request).toEqual({ id: "1", operation: "snapshot" });
     const tree = { bar: [{ _tag: "BookmarkLeaf", name: "Montréal", url: "https://example.com/" }] };
-    await child.stdin.write(encodeFrame({ id: "1", ok: true, value: tree }));
+    await child.stdin.write(
+      encodeFrame({ type: "readingListChanged", fingerprint: "intermediate" }),
+    );
+    await child.stdin.write(
+      encodeFrame({ type: "readingListChanged", fingerprint: "verified-final" }),
+    );
+    await child.stdin.write(encodeFrame({ id: "1", ok: true, value: { tree, readingList: [] } }));
     await child.stdin.flush();
-    expect(JSON.parse(await received)).toEqual({ id: "caller-id", ok: true, value: tree });
+    expect(JSON.parse(await received)).toEqual({
+      id: "caller-id",
+      ok: true,
+      value: { tree, readingList: [] },
+      version: 2,
+      hostVersion: 2,
+      capabilities: ["readingList"],
+    });
+    expect(await Fs.readFile(Path.join(directory, `${instanceId}.reading-list`), "utf8")).toBe(
+      "verified-final\n",
+    );
     await child.stdin.end();
     expect(await child.exited).toBe(0);
     expect(await Fs.lstat(path).catch(() => undefined)).toBeUndefined();
