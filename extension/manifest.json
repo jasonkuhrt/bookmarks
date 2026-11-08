@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Bookmarks CLI",
+  "version": "0.1.0",
+  "description": "Connects the bookmarks CLI to this Chrome profile.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "64": "icons/icon64.png",
+    "96": "icons/icon96.png",
+    "128": "icons/icon128.png",
+    "256": "icons/icon256.png",
+    "512": "icons/icon512.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwkQwHEO2q1cdTO/2X84H17n82ZKD0z9F9J+3uxdDAJV8hinFfixk+fmDploqa7KFguu6R1X60/2qFakET7zANzLjicpNLer4sT662adm3qciaWi60hExLt0OAewnqBi0H5goccEhbBCbABGDFUwZC0H5KFBjfL5iI9C5I4lCWVPvrdmBh6kKV0c1YMoCSDl/SEnL1Nzy481QdFTVOBlmi3IwN1yCzHhxinSFs7Qqq/8+agfcbbX/2MO8bA7qzfctQ964ZxocQxYfxrZ52+AiyhAvxTXaM+PO3QNS2E54kuPWbBhdLLYjQniJsbTBfMJEM26uP4ch1SKHs2Or4z7ypQIDAQAB",
+  "permissions": ["bookmarks", "nativeMessaging", "storage", "alarms"],
+  "background": {
+    "service_worker": "worker.js",
+    "type": "module"
+  }
+}

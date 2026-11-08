@@ -15,6 +15,7 @@
   },
   "files": [
     "build",
+    "extension",
     "README.md",
     "src"
   ],
@@ -27,6 +28,8 @@
     ".": "./build/exports/index.js"
   },
   "scripts": {
+    "generate:icons": "bash scripts/generate-icons.sh",
+    "build:chrome-extension": "bun scripts/build-chrome-extension.ts",
     "build:clean": "tsgo --build --clean && rm -rf build",
     "prebuild": "bun run build:clean",
     "build": "tsgo --build tsconfig.build.json",

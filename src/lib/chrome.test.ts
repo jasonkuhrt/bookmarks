@@ -72,6 +72,13 @@ const readChecksumFixture = async (path: string): Promise<ChromeChecksumFixture>
   };
 };
 
+const addSyncMetadata = async (path: string): Promise<void> => {
+  const value: unknown = JSON.parse(await Bun.file(path).text());
+  if (!isRecord(value)) throw new Error(`Expected Chrome bookmark file at ${path}`);
+  value["sync_metadata"] = "opaque-sync-state";
+  await Bun.write(path, JSON.stringify(value, null, 2));
+};
+
 const findLeaf = (nodes: readonly BookmarkNode[]): BookmarkLeaf | undefined => {
   for (const node of nodes) {
     if (BookmarkLeaf.is(node)) return node;
@@ -364,6 +371,46 @@ describe("applyPatches", () => {
 
   const cleanup = async (dir: string) => rm(dir, { recursive: true, force: true });
 
+  test("refuses direct mutations when Chrome Sync metadata is present", async () => {
+    const { dir, path } = await setupCopy();
+    try {
+      await addSyncMetadata(path);
+      const original = await Bun.file(path).text();
+
+      await expectRejects(
+        run(
+          Chrome.applyPatches(path, [
+            Patch.Add({
+              url: "https://blocked.example",
+              name: "Blocked",
+              path: "bar",
+              date: now,
+            }),
+          ]),
+        ),
+        "Chrome Sync can undo direct disk edits",
+      );
+
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      await cleanup(dir);
+    }
+  });
+
+  test("keeps empty patch sets as no-ops when Chrome Sync metadata is present", async () => {
+    const { dir, path } = await setupCopy();
+    try {
+      await addSyncMetadata(path);
+      const original = await Bun.file(path).text();
+
+      await run(Chrome.applyPatches(path, []));
+
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      await cleanup(dir);
+    }
+  });
+
   test("Add patch inserts a new leaf", async () => {
     const { dir, path } = await setupCopy();
     try {
@@ -412,11 +459,14 @@ describe("applyPatches", () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Chrome.readBookmarks(path));
-      const target = expectDefined(findLeaf(treeBefore.bar ?? []), "expected bookmark to remove");
+      const target = expectDefined(
+        findLeafByUrl(treeBefore.bar ?? [], "https://docs.example"),
+        "expected Docs bookmark in Work folder",
+      );
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Remove({ url: target.url, name: target.name, path: "bar", date: now }),
+          Patch.Remove({ url: target.url, name: target.name, path: "bar/Work", date: now }),
         ]),
       );
 
@@ -427,20 +477,24 @@ describe("applyPatches", () => {
     }
   });
 
-  test("Rename patch updates a leaf's name", async () => {
+  test("Update patch renames a leaf", async () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Chrome.readBookmarks(path));
-      const target = expectDefined(findLeaf(treeBefore.bar ?? []), "expected bookmark to rename");
+      const target = expectDefined(
+        findLeafByUrl(treeBefore.bar ?? [], "https://docs.example"),
+        "expected Docs bookmark in Work folder",
+      );
       const newName = "RENAMED_CHROME_TEST_BOOKMARK";
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Rename({
+          Patch.Update({
             url: target.url,
-            path: "bar",
             oldName: target.name,
             newName,
+            fromPath: "bar/Work",
+            toPath: "bar/Work",
             date: now,
           }),
         ]),
@@ -457,18 +511,22 @@ describe("applyPatches", () => {
     }
   });
 
-  test("Move patch relocates a leaf to a different section", async () => {
+  test("Update patch moves a leaf to a different section", async () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Chrome.readBookmarks(path));
-      const target = expectDefined(findLeaf(treeBefore.bar ?? []), "expected bookmark to move");
+      const target = expectDefined(
+        findLeafByUrl(treeBefore.bar ?? [], "https://docs.example"),
+        "expected Docs bookmark in Work folder",
+      );
 
       await run(
         Chrome.applyPatches(path, [
-          Patch.Move({
+          Patch.Update({
             url: target.url,
-            name: target.name,
-            fromPath: "bar",
+            oldName: target.name,
+            newName: target.name,
+            fromPath: "bar/Work",
             toPath: "menu",
             date: now,
           }),
@@ -525,9 +583,150 @@ describe("applyPatches", () => {
       await cleanup(dir);
     }
   });
+
+  test("Update patches claim duplicate sources before swapping names", async () => {
+    const { dir, path } = await setupCopy();
+    const url = "https://duplicate-swap.example";
+    try {
+      await run(
+        Chrome.writeTree(
+          path,
+          BookmarkTree.make({
+            bar: [BookmarkLeaf.make({ name: "A", url }), BookmarkLeaf.make({ name: "B", url })],
+          }),
+        ),
+      );
+
+      await run(
+        Chrome.applyPatches(path, [
+          Patch.Update({
+            url,
+            oldName: "A",
+            newName: "B",
+            fromPath: "bar",
+            toPath: "bar",
+            date: now,
+          }),
+          Patch.Update({
+            url,
+            oldName: "B",
+            newName: "A",
+            fromPath: "bar",
+            toPath: "bar",
+            date: now,
+          }),
+        ]),
+      );
+
+      const tree = await run(Chrome.readBookmarks(path));
+      expect(tree.bar?.map((node) => node.name)).toEqual(["B", "A"]);
+    } finally {
+      await cleanup(dir);
+    }
+  });
+
+  test("Update then Remove preserve the first identical occurrence's native identity", async () => {
+    const { dir, path } = await setupCopy();
+    const url = "https://duplicate-identity.example";
+    const rawLeaves = async (): Promise<Record<string, unknown>[]> => {
+      const raw: unknown = JSON.parse(await Bun.file(path).text());
+      if (!isRecord(raw) || !isRecord(raw["roots"])) throw new Error("Expected Chrome roots");
+      const bar = raw["roots"]["bookmark_bar"];
+      if (!isRecord(bar) || !Array.isArray(bar["children"])) {
+        throw new Error("Expected Chrome bookmark bar children");
+      }
+      return bar["children"].filter(
+        (node): node is Record<string, unknown> => isRecord(node) && node["url"] === url,
+      );
+    };
+
+    try {
+      await run(
+        Chrome.writeTree(
+          path,
+          BookmarkTree.make({
+            bar: [
+              BookmarkLeaf.make({ name: "Same", url }),
+              BookmarkLeaf.make({ name: "Same", url }),
+            ],
+          }),
+        ),
+      );
+      const firstId = (await rawLeaves())[0]?.["id"];
+      expect(firstId).toBeDefined();
+
+      await run(
+        Chrome.applyPatches(path, [
+          Patch.Update({
+            url,
+            oldName: "Same",
+            newName: "Changed",
+            fromPath: "bar",
+            toPath: "bar",
+            date: now,
+          }),
+          Patch.Remove({ url, name: "Same", path: "bar", date: now }),
+        ]),
+      );
+
+      const remaining = await rawLeaves();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.["id"]).toBe(firstId);
+      expect(remaining[0]?.["name"]).toBe("Changed");
+    } finally {
+      await cleanup(dir);
+    }
+  });
 });
 
 describe("writeTree", () => {
+  test("refuses changed trees when Chrome Sync metadata is present", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-synced-"));
+    const path = join(dir, "Bookmarks.json");
+
+    try {
+      await copyChromeBookmarksFixture(path);
+      await addSyncMetadata(path);
+      const original = await Bun.file(path).text();
+      const current = await run(Chrome.readBookmarks(path));
+      const desired = BookmarkTree.make({
+        menu: current.menu,
+        mobile: current.mobile,
+        bar: [
+          ...(current.bar ?? []),
+          BookmarkLeaf.make({ name: "Blocked", url: "https://blocked.example" }),
+        ],
+      });
+
+      await expectRejects(
+        run(Chrome.writeTree(path, desired)),
+        "Use Chrome's browser-native Bookmark Manager or bookmark import instead",
+      );
+
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps an exact tree as a no-op when Chrome Sync metadata is present", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-synced-noop-"));
+    const path = join(dir, "Bookmarks.json");
+
+    try {
+      await copyChromeBookmarksFixture(path);
+      await addSyncMetadata(path);
+      const original = await Bun.file(path).text();
+      const current = await run(Chrome.readBookmarks(path));
+
+      await run(Chrome.writeTree(path, current));
+
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("writes structural changes exactly, including ordering and empty folders", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-tree-"));
     const path = join(dir, "Bookmarks.json");
@@ -552,6 +751,45 @@ describe("writeTree", () => {
 
       const reread = await run(Chrome.readBookmarks(path));
       expect(reread).toEqual(desired);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("never reuses a native id when the desired tree reuses one duplicate leaf object", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-chrome-write-duplicate-identity-"));
+    const path = join(dir, "Bookmarks.json");
+    const url = "https://shared-object.example";
+
+    try {
+      await copyChromeBookmarksFixture(path);
+      await run(
+        Chrome.writeTree(
+          path,
+          BookmarkTree.make({
+            bar: [
+              BookmarkLeaf.make({ name: "Shared", url }),
+              BookmarkLeaf.make({ name: "Shared", url }),
+            ],
+          }),
+        ),
+      );
+
+      const shared = BookmarkLeaf.make({ name: "Shared", url });
+      await run(Chrome.writeTree(path, BookmarkTree.make({ bar: [shared, shared] })));
+
+      const raw: unknown = JSON.parse(await Bun.file(path).text());
+      if (!isRecord(raw) || !isRecord(raw["roots"])) throw new Error("Expected Chrome roots");
+      const bar = raw["roots"]["bookmark_bar"];
+      if (!isRecord(bar) || !Array.isArray(bar["children"])) {
+        throw new Error("Expected Chrome bookmark bar children");
+      }
+      const leaves = bar["children"].filter(
+        (node): node is Record<string, unknown> => isRecord(node) && node["url"] === url,
+      );
+      expect(leaves).toHaveLength(2);
+      expect(leaves[0]?.["id"]).not.toBe(leaves[1]?.["id"]);
+      expect(leaves[0]?.["guid"]).not.toBe(leaves[1]?.["guid"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

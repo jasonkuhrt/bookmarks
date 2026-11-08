@@ -14,6 +14,8 @@ import * as Paths from "../lib/paths.ts";
 
 const DEFAULT_SYNC_DELAY_MS = 60_000;
 const BUSY_RETRY_DELAY_MS = 5_000;
+const ERROR_RETRY_INITIAL_DELAY_MS = 5_000;
+const ERROR_RETRY_MAX_DELAY_MS = 5 * 60_000;
 
 type DaemonOutcome = "deferred" | "failed" | "noop" | "success";
 
@@ -82,6 +84,20 @@ const daemonSyncDelayMs = (): number => {
   if (!raw) return DEFAULT_SYNC_DELAY_MS;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SYNC_DELAY_MS;
+};
+
+const daemonBusyRetryDelayMs = (): number => {
+  const raw = process.env["BOOKMARKS_DAEMON_BUSY_RETRY_DELAY_MS"];
+  if (!raw) return BUSY_RETRY_DELAY_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : BUSY_RETRY_DELAY_MS;
+};
+
+const daemonErrorRetryInitialDelayMs = (): number => {
+  const raw = process.env["BOOKMARKS_DAEMON_ERROR_RETRY_DELAY_MS"];
+  if (!raw) return ERROR_RETRY_INITIAL_DELAY_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ERROR_RETRY_INITIAL_DELAY_MS;
 };
 
 const execFileResult = async (
@@ -159,6 +175,8 @@ const forever = (): Promise<never> => new Promise(() => undefined);
 const runWatcherProcess = async (): Promise<never> => {
   const yamlPath = Paths.defaultYamlPath();
   const delayMs = daemonSyncDelayMs();
+  const busyRetryDelayMs = daemonBusyRetryDelayMs();
+  const errorRetryInitialDelayMs = daemonErrorRetryInitialDelayMs();
   let state: DaemonRuntimeState = {
     phase: "starting",
     pid: process.pid,
@@ -168,6 +186,18 @@ const runWatcherProcess = async (): Promise<never> => {
   let lastComparableText = await readComparableConfigText(yamlPath).catch(() => "");
   let lastSettledComparableText = lastComparableText;
   let queueTimer: ReturnType<typeof setTimeout> | undefined;
+  let flushInProgress = false;
+  let errorRetryCount = 0;
+  let stateWriteQueue: Promise<unknown> | undefined;
+
+  interface ScheduleRequest {
+    readonly delayMs: number;
+    readonly eventAt: string;
+    readonly preserveError: boolean;
+    readonly supersedesPending: boolean;
+  }
+
+  let pendingSchedule: ScheduleRequest | undefined;
 
   const persistState = async (nextState: DaemonRuntimeState): Promise<void> => {
     state = pruneUndefined(nextState);
@@ -179,48 +209,92 @@ const runWatcherProcess = async (): Promise<never> => {
     }
   };
 
-  const updateState = async (patch: DaemonRuntimePatch): Promise<DaemonRuntimeState> => {
-    const nextState =
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Runtime patches are merged onto a fully-populated state object before undefined fields are pruned.
-      pruneUndefined({
-        ...state,
-        ...patch,
-      }) as DaemonRuntimeState;
-    await persistState(nextState);
-    return nextState;
+  const updateState = (patch: DaemonRuntimePatch): Promise<DaemonRuntimeState> => {
+    const previousWrite = stateWriteQueue;
+    const write = (async () => {
+      try {
+        await previousWrite;
+      } catch {
+        // The earlier writer already surfaced its own failure.
+      }
+      const nextState =
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Runtime patches are merged onto a fully-populated state object before undefined fields are pruned.
+        pruneUndefined({
+          ...state,
+          ...patch,
+        }) as DaemonRuntimeState;
+      await persistState(nextState);
+      return nextState;
+    })();
+    stateWriteQueue = write;
+    return write;
   };
 
-  const scheduleSync = async (
-    requestedDelayMs: number,
-    eventAt = state.lastEventAt ?? new Date().toISOString(),
-  ) => {
+  const deferSchedule = (request: ScheduleRequest): void => {
+    if (request.supersedesPending || pendingSchedule === undefined) {
+      pendingSchedule = request;
+    }
+  };
+
+  const armSchedule = async (request: ScheduleRequest): Promise<void> => {
     if (queueTimer) clearTimeout(queueTimer);
-    const nextSyncAt = new Date(Date.now() + requestedDelayMs).toISOString();
+    const nextSyncAt = new Date(Date.now() + request.delayMs).toISOString();
     await updateState({
-      lastError: undefined,
-      lastEventAt: eventAt,
+      lastError: request.preserveError ? state.lastError : undefined,
+      lastEventAt: request.eventAt,
       nextSyncAt,
       phase: "queued",
     });
     queueTimer = setTimeout(() => {
       queueTimer = undefined;
       void flushQueue();
-    }, requestedDelayMs);
+    }, request.delayMs);
+  };
+
+  const scheduleSync = async (
+    requestedDelayMs: number,
+    eventAt = state.lastEventAt ?? new Date().toISOString(),
+    preserveError = false,
+    supersedesPending = true,
+  ) => {
+    const request: ScheduleRequest = {
+      delayMs: requestedDelayMs,
+      eventAt,
+      preserveError,
+      supersedesPending,
+    };
+    if (flushInProgress) {
+      deferSchedule(request);
+      return;
+    }
+    await armSchedule(request);
   };
 
   const flushQueue = async (): Promise<void> => {
-    await updateState({
-      lastError: undefined,
-      nextSyncAt: undefined,
-      phase: "syncing",
-    });
+    if (flushInProgress) {
+      deferSchedule({
+        delayMs: 0,
+        eventAt: state.lastEventAt ?? new Date().toISOString(),
+        preserveError: state.lastOutcome === "failed",
+        supersedesPending: false,
+      });
+      return;
+    }
+    flushInProgress = true;
 
     try {
+      await updateState({
+        nextSyncAt: undefined,
+        phase: "syncing",
+      });
+
       const currentComparableText = await readComparableConfigText(yamlPath);
       lastComparableText = currentComparableText;
 
       if (currentComparableText === lastSettledComparableText) {
+        errorRetryCount = 0;
         await updateState({
+          lastError: undefined,
           lastOutcome: "noop",
           phase: "idle",
         });
@@ -230,7 +304,9 @@ const runWatcherProcess = async (): Promise<never> => {
       const statusResult = await runCliJson(["status", "--json"]);
       if (!hasPendingChanges(statusResult)) {
         lastSettledComparableText = currentComparableText;
+        errorRetryCount = 0;
         await updateState({
+          lastError: undefined,
           lastOutcome: "noop",
           phase: "idle",
         });
@@ -239,26 +315,50 @@ const runWatcherProcess = async (): Promise<never> => {
 
       const syncResult = await runCliJson(["sync", "--json"]);
       if (isDeferredSync(syncResult)) {
-        await scheduleSync(BUSY_RETRY_DELAY_MS);
+        errorRetryCount = 0;
         await updateState({ lastOutcome: "deferred" });
+        await scheduleSync(busyRetryDelayMs, undefined, false, false);
         return;
       }
 
       const syncedComparableText = await readComparableConfigText(yamlPath);
       lastComparableText = syncedComparableText;
-      lastSettledComparableText = syncedComparableText;
+      errorRetryCount = 0;
       await updateState({
         lastError: undefined,
         lastOutcome: "success",
         lastSyncAt: new Date().toISOString(),
         phase: "idle",
       });
+
+      if (syncedComparableText !== currentComparableText || pendingSchedule !== undefined) {
+        await scheduleSync(0, undefined, false, false);
+      } else {
+        lastSettledComparableText = syncedComparableText;
+      }
     } catch (error) {
+      const message = messageFromUnknown(error);
       await updateState({
-        lastError: messageFromUnknown(error),
+        lastError: message,
         lastOutcome: "failed",
         phase: "error",
       });
+
+      const comparableText = await readComparableConfigText(yamlPath).catch(() => undefined);
+      if (comparableText !== undefined) lastComparableText = comparableText;
+      if (comparableText !== undefined && comparableText !== lastSettledComparableText) {
+        const retryDelayMs = Math.min(
+          errorRetryInitialDelayMs * 2 ** Math.min(errorRetryCount, 16),
+          ERROR_RETRY_MAX_DELAY_MS,
+        );
+        errorRetryCount += 1;
+        await scheduleSync(retryDelayMs, undefined, true, false);
+      }
+    } finally {
+      flushInProgress = false;
+      const schedule = pendingSchedule;
+      pendingSchedule = undefined;
+      if (schedule !== undefined) await armSchedule(schedule);
     }
   };
 
@@ -268,6 +368,7 @@ const runWatcherProcess = async (): Promise<never> => {
     const comparableText = await readComparableConfigText(yamlPath).catch(() => undefined);
     if (comparableText !== undefined && comparableText === lastComparableText) return;
     if (comparableText !== undefined) lastComparableText = comparableText;
+    errorRetryCount = 0;
     await scheduleSync(delayMs);
   };
 

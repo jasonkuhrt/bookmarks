@@ -12,6 +12,7 @@ import {
 } from "../lib/managed-config-header.ts";
 import { copyChromeBookmarksFixture } from "../lib/test-fixtures.ts";
 import {
+  BookmarkFolder,
   BookmarkLeaf,
   BookmarksConfig,
   BookmarkTree,
@@ -333,6 +334,88 @@ describe("bookmarks CLI", () => {
     }
   });
 
+  test("sync --from-yaml previews and restores one exact target from YAML", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-from-yaml-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const chromeDataDir = join(dir, "Chrome");
+    const profilePath = join(chromeDataDir, "Profile 1", "Bookmarks");
+    const defaultPath = join(chromeDataDir, "Default", "Bookmarks");
+    const backupDir = join(dir, "backups");
+
+    try {
+      await writeChromeDataDir(chromeDataDir, [
+        { directory: "Default", title: "Default", url: "https://default.example" },
+        { directory: "Profile 1", title: "Loose", url: "https://loose.example" },
+      ]);
+      await run(
+        YamlModule.save(
+          yamlPath,
+          BookmarksConfig.make({
+            all: new BookmarkTree({
+              bar: [
+                new BookmarkFolder({
+                  name: "Organized",
+                  children: [
+                    new BookmarkLeaf({ name: "Canonical", url: "https://canonical.example" }),
+                  ],
+                }),
+              ],
+            }),
+            chrome: ChromeBookmarks.make({
+              profiles: {
+                "profile-1": ChromeProfileBookmarks.make({}),
+              },
+            }),
+          }),
+        ),
+      );
+
+      const cliEnv = withCliEnv(dir, {
+        BOOKMARKS_BACKUP_DIR: backupDir,
+        BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
+        BOOKMARKS_RUNTIME_DIR: join(dir, "runtime"),
+        BOOKMARKS_SAFARI_PLIST_PATH: join(dir, "Safari", "Bookmarks.plist"),
+        BOOKMARKS_SAFARI_TABS_DB_PATH: join(dir, "Safari", "SafariTabs.db"),
+        BOOKMARKS_YAML_PATH: yamlPath,
+      });
+      const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
+      const profileBefore = await readFile(profilePath, "utf-8");
+      const defaultBefore = await readFile(defaultPath, "utf-8");
+
+      const preview = await runCommand(
+        dir,
+        [bunBinary, cliPath, "sync", "--from-yaml", "chrome/profile-1", "--dry-run", "--json"],
+        cliEnv,
+      );
+      expect(preview.exitCode).toBe(0);
+      const parsedPreview = parseJsonObject(preview.stdout);
+      expect(readString(parsedPreview, "mode")).toBe("from-yaml");
+      expect(readNullableObject(parsedPreview, "preview")).toBeNull();
+      const previewTarget = readFirstObject(readArray(parsedPreview, "targets"), "targets");
+      expect(readString(readObject(previewTarget, "target"), "profile")).toBe("profile-1");
+      expect(readArray(previewTarget, "applied").length).toBeGreaterThan(0);
+      expect(await readFile(profilePath, "utf-8")).toBe(profileBefore);
+
+      const restored = await runCommand(
+        dir,
+        [bunBinary, cliPath, "sync", "--from-yaml", "chrome/profile-1", "--json"],
+        cliEnv,
+      );
+      expect(restored.exitCode).toBe(0);
+      const parsedRestore = parseJsonObject(restored.stdout);
+      expect(readString(parsedRestore, "mode")).toBe("from-yaml");
+      expect(readNullableObject(parsedRestore, "backup")).not.toBeNull();
+      const profileAfter = await readFile(profilePath, "utf-8");
+      expect(profileAfter).toContain("Organized");
+      expect(profileAfter).toContain("Canonical");
+      expect(profileAfter).not.toContain("Loose");
+      expect(await readFile(defaultPath, "utf-8")).toBe(defaultBefore);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("sync works outside git repos because git history is optional", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-non-git-sync-"));
     const yamlPath = join(dir, "bookmarks.yaml");
@@ -384,7 +467,7 @@ describe("bookmarks CLI", () => {
     }
   });
 
-  test("sync --json performs live sync with backups even when browsers are open", async () => {
+  test("sync --json defers while browsers are open and backs up before syncing once closed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-"));
     const yamlPath = join(dir, "bookmarks.yaml");
     const chromeDataDir = join(dir, "Chrome");
@@ -436,7 +519,25 @@ describe("bookmarks CLI", () => {
       });
       const cliPath = join(process.cwd(), "src", "bin", "bookmarks.ts");
 
-      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
+      const yamlBefore = await readFile(yamlPath, "utf-8");
+      const chromeBefore = await readFile(chromePath, "utf-8");
+      const deferredJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
+      expect(deferredJson.exitCode).toBe(0);
+      const deferred = parseJsonObject(deferredJson.stdout);
+      const notice = expectPresent(
+        readOptionalNullableObject(deferred, "orchestration"),
+        "Expected deferred sync notice",
+      );
+      expect(readString(notice, "state")).toBe("busy");
+      expect(readString(notice, "message")).toContain("Google Chrome");
+      expect(readNullableObject(deferred, "backup")).toBeNull();
+      expect(await readFile(yamlPath, "utf-8")).toBe(yamlBefore);
+      expect(await readFile(chromePath, "utf-8")).toBe(chromeBefore);
+
+      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], {
+        ...cliEnv,
+        BOOKMARKS_FORCE_BROWSER_RUNNING: "",
+      });
       expect(syncJson.exitCode).toBe(0);
 
       const parsedSync = parseJsonObject(syncJson.stdout);

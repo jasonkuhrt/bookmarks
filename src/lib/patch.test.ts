@@ -39,26 +39,13 @@ const expectFolder = (value: BookmarkNode | undefined, message: string): Bookmar
   return node;
 };
 
-const expectRejects = async (promise: Promise<unknown>, message: string): Promise<void> => {
-  try {
-    await promise;
-    throw new Error(`Expected rejection containing "${message}"`);
-  } catch (error) {
-    expect(error).toBeInstanceOf(Error);
-    if (!(error instanceof Error)) {
-      throw new Error(`Expected Error, received ${String(error)}`, { cause: error });
-    }
-    expect(error.message).toContain(message);
-  }
-};
-
 // -- flatten --
 
 describe("flatten", () => {
   test("empty tree produces empty index", () => {
     const result = Patch.flatten(emptyTree());
     expect(HashMap.size(result.index)).toBe(0);
-    expect(result.warnings).toEqual([]);
+    expect(result.duplicates).toEqual({ urlGroups: 0, extraPlacements: 0 });
   });
 
   test("flattens leaves across sections", () => {
@@ -72,8 +59,8 @@ describe("flatten", () => {
     const a = HashMap.get(result.index, "https://a.com");
     expect(Option.isSome(a)).toBe(true);
     if (Option.isSome(a)) {
-      expect(a.value.name).toBe("A");
-      expect(a.value.path).toBe("bar");
+      expect(a.value[0]?.name).toBe("A");
+      expect(a.value[0]?.path).toBe("bar");
     }
   });
 
@@ -85,23 +72,25 @@ describe("flatten", () => {
     const entry = HashMap.get(result.index, "https://chat.openai.com");
     expect(Option.isSome(entry)).toBe(true);
     if (Option.isSome(entry)) {
-      expect(entry.value.path).toBe("bar/AI/Tools");
+      expect(entry.value[0]?.path).toBe("bar/AI/Tools");
     }
   });
 
-  test("duplicate URLs: first wins, produces warning", () => {
+  test("duplicate URLs retain every placement and report informational counts", () => {
     const tree = new BookmarkTree({
       bar: [leaf("First", "https://dup.com")],
       menu: [leaf("Second", "https://dup.com")],
     });
     const result = Patch.flatten(tree);
     expect(HashMap.size(result.index)).toBe(1);
-    expect(result.warnings.length).toBe(1);
-    expect(result.warnings[0]).toContain("Duplicate URL");
+    expect(result.duplicates).toEqual({ urlGroups: 1, extraPlacements: 1 });
 
     const entry = HashMap.get(result.index, "https://dup.com");
     if (Option.isSome(entry)) {
-      expect(entry.value.name).toBe("First");
+      expect(entry.value).toEqual([
+        { url: "https://dup.com", name: "First", path: "bar" },
+        { url: "https://dup.com", name: "Second", path: "menu" },
+      ]);
     }
   });
 });
@@ -197,7 +186,7 @@ describe("generatePatches", () => {
     expect(expectDefined(removes[0], "expected remove patch").url).toBe("https://b.com");
   });
 
-  test("renamed bookmark produces Rename patch", async () => {
+  test("renamed bookmark produces Update patch", async () => {
     const lastSync = new BookmarkTree({
       bar: [leaf("Old Name", "https://a.com")],
     });
@@ -205,14 +194,14 @@ describe("generatePatches", () => {
       bar: [leaf("New Name", "https://a.com")],
     });
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
-    const renames = patches.filter(Patch.$is("Rename"));
-    expect(renames.length).toBe(1);
-    const rename = expectDefined(renames[0], "expected rename patch");
-    expect(rename.oldName).toBe("Old Name");
-    expect(rename.newName).toBe("New Name");
+    const updates = patches.filter(Patch.$is("Update"));
+    expect(updates.length).toBe(1);
+    const update = expectDefined(updates[0], "expected update patch");
+    expect(update.oldName).toBe("Old Name");
+    expect(update.newName).toBe("New Name");
   });
 
-  test("moved bookmark produces Move patch", async () => {
+  test("moved bookmark produces Update patch", async () => {
     const lastSync = new BookmarkTree({
       bar: [leaf("A", "https://a.com")],
     });
@@ -220,14 +209,14 @@ describe("generatePatches", () => {
       menu: [leaf("A", "https://a.com")],
     });
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
-    const moves = patches.filter(Patch.$is("Move"));
-    expect(moves.length).toBe(1);
-    const move = expectDefined(moves[0], "expected move patch");
-    expect(move.fromPath).toBe("bar");
-    expect(move.toPath).toBe("menu");
+    const updates = patches.filter(Patch.$is("Update"));
+    expect(updates.length).toBe(1);
+    const update = expectDefined(updates[0], "expected update patch");
+    expect(update.fromPath).toBe("bar");
+    expect(update.toPath).toBe("menu");
   });
 
-  test("moved + renamed in one produces both patches", async () => {
+  test("moved + renamed occurrence produces one atomic Update patch", async () => {
     const lastSync = new BookmarkTree({
       bar: [leaf("Old", "https://a.com")],
     });
@@ -235,8 +224,8 @@ describe("generatePatches", () => {
       menu: [leaf("New", "https://a.com")],
     });
     const patches = await run(Patch.generatePatches(lastSync, current, "yaml"));
-    expect(patches.filter(Patch.$is("Move")).length).toBe(1);
-    expect(patches.filter(Patch.$is("Rename")).length).toBe(1);
+    expect(patches).toHaveLength(1);
+    expect(Patch.$is("Update")(patches[0])).toBe(true);
   });
 
   test("no changes produces empty patches", async () => {
@@ -258,14 +247,17 @@ describe("generatePatches", () => {
     }
   });
 
-  test("duplicate URLs fail patch generation instead of silently collapsing", async () => {
+  test("duplicate placements produce independent deterministic additions", async () => {
     const current = new BookmarkTree({
       bar: [leaf("First", "https://dup.example"), leaf("Second", "https://dup.example")],
     });
 
-    await expectRejects(
-      run(Patch.generatePatches(emptyTree(), current, "yaml")),
-      'Duplicate URL "https://dup.example"',
-    );
+    const patches = await run(Patch.generatePatches(emptyTree(), current, "yaml"));
+    expect(patches).toHaveLength(2);
+    expect(patches.every(Patch.$is("Add"))).toBe(true);
+    expect(patches.map((patch) => (Patch.$is("Add")(patch) ? patch.name : ""))).toEqual([
+      "First",
+      "Second",
+    ]);
   });
 });

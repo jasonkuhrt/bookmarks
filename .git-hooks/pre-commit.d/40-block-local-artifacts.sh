@@ -12,7 +12,7 @@ declare -a blocked_paths=()
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
 
-  if [[ "$path" == .serena/* || "$path" == "CLAUDE.local.md" || "$path" == "README.new.md" ]]; then
+  if [[ "$path" == "CLAUDE.local.md" || "$path" == "README.new.md" ]]; then
     blocked_paths+=("$path")
   fi
 done <<<"$staged_paths"

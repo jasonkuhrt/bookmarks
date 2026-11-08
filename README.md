@@ -109,10 +109,36 @@ What sync does:
 - merges YAML and browser changes
 - sends destructive losers to the graveyard instead of dropping them
 - creates backups before mutation
-- writes live browser data
+- updates paired Chrome profiles through Chrome's bookmark API; writes Safari's file while Safari is closed
 - rereads and verifies the result
 
+The same URL can appear in multiple folders or more than once in a folder. Sync preserves every placement, and `status` reports duplicate counts as information. You do not need to remove duplicates before syncing.
+
+Paired Chrome stays open during sync. The CLI opens its profile if needed. Safari and unpaired file-backed targets must be closed; the daemon retains queued work while those browsers are open.
+
 If sync hits ambiguous or unsupported semantics, it stops before mutation and returns a clear error instead of silently mangling data.
+
+Chrome profiles containing Sync metadata cannot be modified by writing their data file. Pair the companion extension once to use `bookmarks sync` safely with Chrome Sync. The extension preserves existing bookmark IDs where possible, applies moves and updates through Chrome, rejects stale planning snapshots, and verifies the resulting tree before the CLI advances its baseline.
+
+### Connect Chrome once
+
+```bash
+bookmarks chrome install
+```
+
+Open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose the directory printed by the installer. Then pair the intended profile:
+
+```bash
+bookmarks chrome pair chrome/profile-1
+bookmarks chrome status
+bookmarks sync chrome/profile-1 --dry-run
+```
+
+On this machine, dotfiles exposes installation through `just bookmarks-chrome-setup`.
+
+The companion extension requests only bookmarks, native messaging, local extension storage, and reconnect alarms. It has no website permissions. A private local socket connects the CLI to the native host; the host accepts only this extension's stable ID. Pairing compares the live tree against the selected profile and pins that extension instance. Multiple matching instances require the user to disambiguate.
+
+Backups include Chrome's live tree as well as its disk snapshot. An interrupted write does not advance the baseline; inspect `bookmarks status` before retrying. Bookmark changes are individual Chrome operations, not an atomic transaction.
 
 ## CLI
 
@@ -121,6 +147,8 @@ Core commands:
 ```bash
 bookmarks sync [target...]
 bookmarks sync [target...] --dry-run
+bookmarks sync --from-yaml [target...]
+bookmarks sync --from-yaml [target...] --dry-run
 bookmarks status [target...]
 bookmarks status --json
 bookmarks doctor --json
@@ -128,12 +156,17 @@ bookmarks validate [--json]
 bookmarks backup [--json]
 bookmarks gc [--max-age=90d] [--json]
 bookmarks daemon start|stop|status
+bookmarks chrome install
+bookmarks chrome pair chrome/profile-1
+bookmarks chrome status [--json]
 ```
 
 Notes:
 
 - `sync` is the default automated workflow.
 - `sync --dry-run` shows the live diff without mutating browsers.
+- `sync --from-yaml` restores selected browsers to the resolved YAML layout. Paired Chrome uses its live API, including when Chrome Sync is enabled.
+- `sync --from-yaml --dry-run` previews that one-way restore without accepting browser-side changes.
 - `status` shows pending changes in both directions and includes patch previews.
 - `validate` validates `bookmarks.yaml`.
 - non-dry-run `sync` and `gc` create timestamped backups in `~/.local/state/bookmarks/backups/` before they attempt writes.
@@ -151,6 +184,7 @@ What it does:
 - queues a sync 60 seconds after the last file edit instead of syncing on every keystroke
 - updates the machine-managed header at the top of `bookmarks.yaml` with watcher state
 - uses the normal `bookmarks status` check before syncing, so no-op edits do not create sync backups
+- retains queued changes while a file-backed browser is open and retries when it closes; paired Chrome can stay open
 
 Manual immediate sync stays explicit:
 

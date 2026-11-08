@@ -65,23 +65,23 @@ export const parseEventFolderName = (
   });
 };
 
-/**
- * Build a nested folder structure representing the original path of a bookmark.
- *
- * Given path "bar/AI/Tools" and a leaf bookmark, produces:
- *   BookmarkFolder("bar", [BookmarkFolder("AI", [BookmarkFolder("Tools", [leaf])])])
- */
-const buildPathFolders = (pathSegments: readonly string[], leaf: BookmarkNode): BookmarkNode => {
-  if (pathSegments.length === 0) return leaf;
+/** Reuse path folders while retaining every archived bookmark occurrence. */
+const appendAtPath = (
+  nodes: readonly BookmarkNode[],
+  pathSegments: readonly string[],
+  leaf: BookmarkLeaf,
+): readonly BookmarkNode[] => {
+  const [name, ...rest] = pathSegments;
+  if (name === undefined) return [...nodes, leaf];
 
-  let current: BookmarkNode = leaf;
-  for (let i = pathSegments.length - 1; i >= 0; i--) {
-    current = BookmarkFolder.make({
-      name: expectDefined(pathSegments[i], "Missing graveyard path segment"),
-      children: [current],
-    });
-  }
-  return current;
+  const existing = nodes.find(
+    (node): node is BookmarkFolder => BookmarkFolder.is(node) && node.name === name,
+  );
+  const folder = BookmarkFolder.make({
+    name,
+    children: appendAtPath(existing?.children ?? [], rest, leaf),
+  });
+  return existing ? nodes.map((node) => (node === existing ? folder : node)) : [...nodes, folder];
 };
 
 /**
@@ -94,8 +94,11 @@ const patchToBookmarkInfo = (
   Patch.$match(patch, {
     Add: (p) => ({ url: p.url, name: p.name, pathSegments: p.path.split("/") }),
     Remove: (p) => ({ url: p.url, name: p.name, pathSegments: p.path.split("/") }),
-    Rename: (p) => ({ url: p.url, name: p.oldName, pathSegments: p.path.split("/") }),
-    Move: (p) => ({ url: p.url, name: p.name, pathSegments: p.fromPath.split("/") }),
+    Update: (p) => ({
+      url: p.url,
+      name: p.oldName,
+      pathSegments: p.fromPath.split("/"),
+    }),
   });
 
 /**
@@ -179,9 +182,6 @@ export const addToGraveyard = (
     // Create the leaf bookmark to store in graveyard
     const graveyardLeaf = BookmarkLeaf.make({ name: info.name, url: info.url });
 
-    // Build the nested path structure
-    const entry = buildPathFolders(info.pathSegments, graveyardLeaf);
-
     // Ensure `menu` section exists
     const menuSection = tree.menu ?? [];
 
@@ -197,7 +197,7 @@ export const addToGraveyard = (
     // Add the entry to the event folder
     const updatedEventFolder = BookmarkFolder.make({
       name: eventFolder.name,
-      children: [...eventFolder.children, entry],
+      children: appendAtPath(eventFolder.children, info.pathSegments, graveyardLeaf),
     });
 
     // Reassemble: event -> graveyard -> menu -> tree

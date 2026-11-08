@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { parse } from "@plist/binary.parse";
 import { serialize } from "@plist/binary.serialize";
 import { DateTime, Effect } from "effect";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -13,6 +14,9 @@ import { writeSafariBookmarksFixture } from "./test-fixtures.ts";
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
 const now = DateTime.unsafeNow();
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const expectDefined = <T>(value: T | undefined, message: string): T => {
   expect(value).toBeDefined();
@@ -303,7 +307,7 @@ describe("applyPatches", () => {
     }
   });
 
-  test("Rename patch updates a leaf's title", async () => {
+  test("Update patch renames a leaf", async () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
@@ -315,11 +319,12 @@ describe("applyPatches", () => {
 
       await run(
         Safari.applyPatches(path, [
-          Patch.Rename({
+          Patch.Update({
             url: target.url,
-            path: "reading_list",
             oldName: target.name,
             newName,
+            fromPath: "reading_list",
+            toPath: "reading_list",
             date: now,
           }),
         ]),
@@ -335,7 +340,7 @@ describe("applyPatches", () => {
     }
   });
 
-  test("Move patch relocates a leaf to a different section", async () => {
+  test("Update patch moves a leaf to a different section", async () => {
     const { dir, path } = await setupCopy();
     try {
       const treeBefore = await run(Safari.readBookmarks(path));
@@ -346,9 +351,10 @@ describe("applyPatches", () => {
 
       await run(
         Safari.applyPatches(path, [
-          Patch.Move({
+          Patch.Update({
             url: target.url,
-            name: target.name,
+            oldName: target.name,
+            newName: target.name,
             fromPath: "reading_list",
             toPath: "bar",
             date: now,
@@ -406,6 +412,66 @@ describe("applyPatches", () => {
       await cleanup(dir);
     }
   });
+
+  test("Update patches claim duplicate sources before swapping names", async () => {
+    const { dir, path } = await setupCopy();
+    const url = "https://duplicate-swap.example";
+    try {
+      await run(
+        Safari.writeTree(
+          path,
+          BookmarkTree.make({
+            bar: [BookmarkLeaf.make({ name: "A", url }), BookmarkLeaf.make({ name: "B", url })],
+          }),
+        ),
+      );
+
+      await run(
+        Safari.applyPatches(path, [
+          Patch.Update({
+            url,
+            oldName: "A",
+            newName: "B",
+            fromPath: "bar",
+            toPath: "bar",
+            date: now,
+          }),
+          Patch.Update({
+            url,
+            oldName: "B",
+            newName: "A",
+            fromPath: "bar",
+            toPath: "bar",
+            date: now,
+          }),
+        ]),
+      );
+
+      const tree = await run(Safari.readBookmarks(path));
+      expect(tree.bar?.map((node) => node.name)).toEqual(["B", "A"]);
+    } finally {
+      await cleanup(dir);
+    }
+  });
+});
+
+describe("requiresFullRewrite", () => {
+  test("requires a rewrite when root-level menu nodes make patch ordering ambiguous", async () => {
+    await withFixture(async (path) => {
+      expect(
+        await run(
+          Safari.requiresFullRewrite(path, [
+            Patch.Add({
+              url: "https://new-menu.example",
+              name: "New menu item",
+              path: "menu",
+              date: now,
+            }),
+          ]),
+        ),
+      ).toBe(true);
+    });
+  });
 });
 
 describe("writeTree", () => {
@@ -439,6 +505,49 @@ describe("writeTree", () => {
 
       const reread = await run(Safari.readBookmarks(path));
       expect(reread).toEqual(desired);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("never reuses a native UUID when the desired tree reuses one duplicate leaf object", async () => {
+    const { dir, path } = await setupFixture();
+    const url = "https://shared-object.example";
+
+    try {
+      await run(
+        Safari.writeTree(
+          path,
+          BookmarkTree.make({
+            bar: [
+              BookmarkLeaf.make({ name: "Shared", url }),
+              BookmarkLeaf.make({ name: "Shared", url }),
+            ],
+          }),
+        ),
+      );
+
+      const shared = BookmarkLeaf.make({ name: "Shared", url });
+      await run(Safari.writeTree(path, BookmarkTree.make({ bar: [shared, shared] })));
+
+      const root = parse(await Bun.file(path).arrayBuffer());
+      if (!isRecord(root)) throw new Error("Expected Safari plist root");
+      const children = root["Children"];
+      if (!Array.isArray(children)) throw new Error("Expected Safari root children");
+      const bar = children.find((node) => isRecord(node) && node["Title"] === "BookmarksBar");
+      if (!isRecord(bar)) {
+        throw new Error("Expected Safari bookmarks bar");
+      }
+      const leaves = Array.isArray(bar["Children"])
+        ? bar["Children"].filter((node) => isRecord(node) && node["URLString"] === url)
+        : [];
+      expect(leaves).toHaveLength(2);
+      const first = leaves[0];
+      const second = leaves[1];
+      if (!isRecord(first) || !isRecord(second)) {
+        throw new Error("Expected Safari bookmark leaves");
+      }
+      expect(first["WebBookmarkUUID"]).not.toBe(second["WebBookmarkUUID"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

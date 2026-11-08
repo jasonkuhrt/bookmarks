@@ -60,21 +60,14 @@ const mkRemovePatch = (
   date: DateTime.Utc,
 ): Patch.BookmarkPatch => Patch.Remove({ url, name, path, date });
 
-const mkRenamePatch = (
+const mkUpdatePatch = (
   url: string,
-  path: string,
+  fromPath: string,
+  toPath: string,
   oldName: string,
   newName: string,
   date: DateTime.Utc,
-): Patch.BookmarkPatch => Patch.Rename({ url, path, oldName, newName, date });
-
-const mkMovePatch = (
-  url: string,
-  name: string,
-  fromPath: string,
-  toPath: string,
-  date: DateTime.Utc,
-): Patch.BookmarkPatch => Patch.Move({ url, name, fromPath, toPath, date });
+): Patch.BookmarkPatch => Patch.Update({ url, fromPath, toPath, oldName, newName, date });
 
 // -- parseEventFolderName --
 
@@ -210,10 +203,11 @@ describe("addToGraveyard", () => {
     expect(leafNode.url).toBe("https://removed.com");
   });
 
-  test("preserves original path and old title for Rename patch", async () => {
+  test("preserves original path and old title for renamed Update patch", async () => {
     const tree = emptyTree();
-    const patch = mkRenamePatch(
+    const patch = mkUpdatePatch(
       "https://renamed.com",
+      "bar/Research",
       "bar/Research",
       "Old Title",
       "New Title",
@@ -236,13 +230,14 @@ describe("addToGraveyard", () => {
     expect(leafNode.url).toBe("https://renamed.com");
   });
 
-  test("preserves original path and title for Move patch", async () => {
+  test("preserves original path and title for moved Update patch", async () => {
     const tree = emptyTree();
-    const patch = mkMovePatch(
+    const patch = mkUpdatePatch(
       "https://moved.com",
-      "Moved Bookmark",
       "bar/Projects",
       "menu/Archive",
+      "Moved Bookmark",
+      "Moved Bookmark",
       mkDate("2025-01-01"),
     );
 
@@ -288,6 +283,25 @@ describe("addGraveyardEntries", () => {
     const tree = emptyTree();
     const result = await run(Graveyard.addGraveyardEntries(tree, [], "safari", "conflict"));
     expect(result.menu).toBeUndefined();
+  });
+
+  test("shares archive path folders while preserving duplicate bookmark occurrences", async () => {
+    const patches = [
+      mkRemovePatch("https://a.com", "A", "bar/Tools", mkDate("2025-01-01")),
+      mkRemovePatch("https://a.com", "A", "bar/Tools", mkDate("2025-01-01")),
+      mkRemovePatch("https://b.com", "B", "bar/Other", mkDate("2025-01-01")),
+    ];
+    const result = await run(
+      Graveyard.addGraveyardEntries(emptyTree(), patches, "chrome-personal", "conflict"),
+    );
+    const graveyardFolder = expectFolder(result.menu?.[0], "expected graveyard folder");
+    const eventFolder = expectFolder(graveyardFolder.children[0], "expected event folder");
+    expect(eventFolder.children).toEqual([
+      folder("bar", [
+        folder("Tools", [leaf("A", "https://a.com"), leaf("A", "https://a.com")]),
+        folder("Other", [leaf("B", "https://b.com")]),
+      ]),
+    ]);
   });
 });
 

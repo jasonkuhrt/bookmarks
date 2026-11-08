@@ -8,6 +8,29 @@ import { readDaemonHeaderState, SCHEMA_MODELINE } from "./managed-config-header.
 import { BookmarkTree, BookmarksConfig } from "./schema/__.ts";
 import * as YamlModule from "./yaml.ts";
 
+interface RuntimeStateView {
+  readonly lastError?: string;
+  readonly lastOutcome?: string;
+  readonly phase?: string;
+}
+
+const readRuntimeState = async (path: string): Promise<RuntimeStateView> => {
+  const parsed: unknown = JSON.parse(await readFile(path, "utf-8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const text = (key: string): string | undefined => {
+    const value: unknown = Reflect.get(parsed, key);
+    return typeof value === "string" ? value : undefined;
+  };
+  const lastError = text("lastError");
+  const lastOutcome = text("lastOutcome");
+  const phase = text("phase");
+  return {
+    ...(lastError === undefined ? {} : { lastError }),
+    ...(lastOutcome === undefined ? {} : { lastOutcome }),
+    ...(phase === undefined ? {} : { phase }),
+  };
+};
+
 type DaemonModule = typeof StaticDaemon;
 
 const run = <A>(effect: Effect.Effect<A, Error>) => Effect.runPromise(effect);
@@ -361,7 +384,7 @@ describe("daemon", () => {
     });
   });
 
-  test("watcher queues a delayed sync and updates the managed header", async () => {
+  test("watcher retries a deferred sync without losing the queued change", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-watch-"));
     const yamlPath = join(dir, "bookmarks.yaml");
     const runtimeDir = join(dir, "runtime");
@@ -397,6 +420,19 @@ if (command === "status") {
 if (command === "sync") {
   const previous = existsSync(syncLogPath) ? await readFile(syncLogPath, "utf-8") : "";
   await writeFile(syncLogPath, previous + "sync\\n", "utf-8");
+  if (previous === "") {
+    console.log(JSON.stringify({
+      orchestration: {
+        state: "busy",
+        operation: "sync",
+        message: "Google Chrome is currently running.",
+      },
+      applied: [],
+      graveyarded: [],
+      targets: [],
+    }));
+    process.exit(0);
+  }
   await rm(pendingPath, { force: true });
   console.log(JSON.stringify({
     orchestration: null,
@@ -416,6 +452,7 @@ process.exit(1);
         cwd: process.cwd(),
         env: {
           ...process.env,
+          BOOKMARKS_DAEMON_BUSY_RETRY_DELAY_MS: "500",
           BOOKMARKS_DAEMON_CLI_PATH: fakeCliPath,
           BOOKMARKS_DAEMON_SYNC_DELAY_MS: "150",
           BOOKMARKS_RUNTIME_DIR: runtimeDir,
@@ -454,12 +491,133 @@ process.exit(1);
           if (!(await exists(syncLogPath))) return false;
           return (await readFile(syncLogPath, "utf-8")) === "sync\n";
         });
+        expect(await exists(pendingPath)).toBe(true);
+        await waitFor(async () => {
+          const contents = await readFile(yamlPath, "utf-8");
+          return contents.startsWith(
+            "# machine-managed: bookmarks daemon status=running; phase=queued;",
+          );
+        });
+        await waitFor(async () => {
+          if (!(await exists(syncLogPath))) return false;
+          return (await readFile(syncLogPath, "utf-8")) === "sync\nsync\n";
+        });
+        expect(await exists(pendingPath)).toBe(false);
         await waitFor(async () => {
           const contents = await readFile(yamlPath, "utf-8");
           return contents.startsWith(
             "# machine-managed: bookmarks daemon status=running; phase=idle\n",
           );
         });
+      } finally {
+        proc.kill("SIGTERM");
+        await proc.exited;
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("watcher recovers from a transient CLI failure without another YAML edit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-transient-error-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const runtimeDir = join(dir, "runtime");
+    const daemonStatePath = join(runtimeDir, "daemon.state.json");
+    const pendingPath = join(dir, "pending.flag");
+    const attemptLogPath = join(dir, "attempts.log");
+    const fakeCliPath = join(dir, "fake-cli.ts");
+
+    try {
+      await run(
+        YamlModule.save(
+          yamlPath,
+          BookmarksConfig.make({
+            all: BookmarkTree.make({}),
+          }),
+        ),
+      );
+
+      await writeFile(
+        fakeCliPath,
+        `import { existsSync } from "node:fs";
+import { readFile, rm, writeFile } from "node:fs/promises";
+const pendingPath = ${JSON.stringify(pendingPath)};
+const attemptLogPath = ${JSON.stringify(attemptLogPath)};
+const [command] = process.argv.slice(2);
+const previous = existsSync(attemptLogPath) ? await readFile(attemptLogPath, "utf-8") : "";
+if (command === "status") {
+  await writeFile(attemptLogPath, previous + "status\\n", "utf-8");
+  if (previous === "") {
+    console.error(JSON.stringify({ error: "temporary Chrome bridge failure" }));
+    process.exit(1);
+  }
+  console.log(JSON.stringify({
+    yamlPath: process.env["BOOKMARKS_YAML_PATH"],
+    targets: existsSync(pendingPath) ? [{ pendingToBrowser: [{}], pendingToYaml: [] }] : [],
+  }));
+  process.exit(0);
+}
+if (command === "sync") {
+  await writeFile(attemptLogPath, previous + "sync\\n", "utf-8");
+  await rm(pendingPath, { force: true });
+  console.log(JSON.stringify({ orchestration: null, applied: [], graveyarded: [], targets: [] }));
+  process.exit(0);
+}
+console.error(JSON.stringify({ error: "unexpected command" }));
+process.exit(1);
+`,
+        "utf-8",
+      );
+
+      const proc = Bun.spawn([bunBinary, daemonRunnerPath], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOOKMARKS_DAEMON_CLI_PATH: fakeCliPath,
+          BOOKMARKS_DAEMON_ERROR_RETRY_DELAY_MS: "250",
+          BOOKMARKS_DAEMON_SYNC_DELAY_MS: "120",
+          BOOKMARKS_RUNTIME_DIR: runtimeDir,
+          BOOKMARKS_YAML_PATH: yamlPath,
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+
+      try {
+        await waitFor(async () => {
+          const header = await readDaemonHeaderState(yamlPath);
+          return header?.status === "running" && header.phase === "idle";
+        });
+
+        await writeFile(pendingPath, "pending", "utf-8");
+        await appendFile(yamlPath, "# one user edit\n", "utf-8");
+
+        await waitFor(async () => {
+          if (!(await exists(daemonStatePath))) return false;
+          const runtimeState = await readRuntimeState(daemonStatePath);
+          return (
+            runtimeState.phase === "queued" &&
+            runtimeState.lastOutcome === "failed" &&
+            runtimeState.lastError?.includes("temporary Chrome bridge failure") === true
+          );
+        });
+
+        expect(await readFile(attemptLogPath, "utf-8")).toBe("status\n");
+
+        await waitFor(async () => {
+          if (!(await exists(attemptLogPath))) return false;
+          return (await readFile(attemptLogPath, "utf-8")) === "status\nstatus\nsync\n";
+        });
+        expect(await exists(pendingPath)).toBe(false);
+        await waitFor(async () => {
+          const runtimeState = await readRuntimeState(daemonStatePath);
+          return (
+            runtimeState.phase === "idle" &&
+            runtimeState.lastOutcome === "success" &&
+            runtimeState.lastError === undefined
+          );
+        });
+        expect(await readFile(yamlPath, "utf-8")).toContain("# one user edit\n");
       } finally {
         proc.kill("SIGTERM");
         await proc.exited;

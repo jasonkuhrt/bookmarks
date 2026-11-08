@@ -4,6 +4,7 @@ import { Effect } from "effect";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import * as Chrome from "./chrome.ts";
+import * as ChromeNative from "./chrome-native.ts";
 import type * as Patch from "./patch.ts";
 import * as Paths from "./paths.ts";
 import * as Safari from "./safari.ts";
@@ -275,7 +276,11 @@ export const readTree = (target: TargetDescriptor): Effect.Effect<BookmarkTree, 
     case "safari":
       return Safari.readBookmarks(target.path);
     case "chrome":
-      return Chrome.readBookmarks(target.path);
+      return ChromeNative.isPaired(target.path).pipe(
+        Effect.flatMap((paired) =>
+          paired ? ChromeNative.readTree(target.path) : Chrome.readBookmarks(target.path),
+        ),
+      );
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
@@ -293,7 +298,33 @@ export const applyPatches = (
     case "safari":
       return Safari.applyPatches(target.path, patches);
     case "chrome":
-      return Chrome.applyPatches(target.path, patches);
+      return ChromeNative.isPaired(target.path).pipe(
+        Effect.flatMap((paired) =>
+          paired
+            ? Effect.fail(
+                new Error(
+                  "Paired Chrome writes require a complete planned tree and its original snapshot. Use bookmarks sync.",
+                ),
+              )
+            : Chrome.applyPatches(target.path, patches),
+        ),
+      );
+    default:
+      return Effect.fail(
+        new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
+      );
+  }
+};
+
+export const requiresFullRewrite = (
+  target: TargetDescriptor,
+  patches: readonly Patch.BookmarkPatch[],
+): Effect.Effect<boolean, Error> => {
+  switch (target.browser) {
+    case "safari":
+      return Safari.requiresFullRewrite(target.path, patches);
+    case "chrome":
+      return patches.length > 0 ? ChromeNative.isPaired(target.path) : Effect.succeed(false);
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),
@@ -304,12 +335,18 @@ export const applyPatches = (
 export const writeTree = (
   target: TargetDescriptor,
   tree: BookmarkTree,
+  expectedTree?: BookmarkTree,
 ): Effect.Effect<void, Error> => {
   switch (target.browser) {
     case "safari":
       return Safari.writeTree(target.path, tree);
     case "chrome":
-      return Chrome.writeTree(target.path, tree);
+      return Effect.gen(function* () {
+        if (!(yield* ChromeNative.isPaired(target.path)))
+          return yield* Chrome.writeTree(target.path, tree);
+        const expected = expectedTree ?? (yield* ChromeNative.readTree(target.path));
+        yield* ChromeNative.writeTree(target.path, expected, tree);
+      });
     default:
       return Effect.fail(
         new Error(`Unsupported bookmarks target '${displayNameOf(target)}' at ${target.path}`),

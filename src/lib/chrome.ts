@@ -72,6 +72,26 @@ const parseChromeBookmarksFile = (text: string, bookmarksPath: string): ChromeBo
   }
 };
 
+const syncMetadataMutationError = (bookmarksPath: string): Error =>
+  new Error(
+    `Cannot modify Chrome bookmarks at ${bookmarksPath} by writing its data file because Chrome Sync metadata is present. Chrome Sync can undo direct disk edits. Use Chrome's browser-native Bookmark Manager or bookmark import instead.`,
+  );
+
+const ensureNoSyncMetadata = (
+  file: ChromeBookmarksFile,
+  bookmarksPath: string,
+): Effect.Effect<void, Error> =>
+  file.sync_metadata ? Effect.fail(syncMetadataMutationError(bookmarksPath)) : Effect.void;
+
+export const ensureDirectMutationSafe = (bookmarksPath: string): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    const text = yield* Effect.tryPromise({
+      try: () => Bun.file(bookmarksPath).text(),
+      catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
+    });
+    yield* ensureNoSyncMetadata(parseChromeBookmarksFile(text, bookmarksPath), bookmarksPath);
+  });
+
 const decodeUnknownChildren = (children: readonly unknown[] | undefined): BookmarkNode[] => {
   if (!children) return [];
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Schema transforms only pass raw Chrome child node arrays into this helper.
@@ -201,17 +221,49 @@ export const calculateChecksum = (roots: ChromeRoot): string => {
 
 // -- readBookmarks --
 
-/** Read Chrome bookmarks from a Bookmarks JSON file path into a clean BookmarkTree. */
-export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree, Error> =>
+const bookmarkNodesEqual = (left: BookmarkNode, right: BookmarkNode): boolean => {
+  if (BookmarkLeaf.is(left) && BookmarkLeaf.is(right)) {
+    return left.name === right.name && left.url === right.url;
+  }
+  if (BookmarkFolder.is(left) && BookmarkFolder.is(right)) {
+    return (
+      left.name === right.name &&
+      left.children.length === right.children.length &&
+      left.children.every((node, index) => {
+        const other = right.children[index];
+        return other !== undefined && bookmarkNodesEqual(node, other);
+      })
+    );
+  }
+  return false;
+};
+
+const bookmarkSectionsEqual = (
+  left: BookmarkSection | undefined,
+  right: BookmarkSection | undefined,
+): boolean => {
+  const leftNodes = left ?? [];
+  const rightNodes = right ?? [];
+  return (
+    leftNodes.length === rightNodes.length &&
+    leftNodes.every((node, index) => {
+      const other = rightNodes[index];
+      return other !== undefined && bookmarkNodesEqual(node, other);
+    })
+  );
+};
+
+const bookmarkTreesEqual = (left: BookmarkTree, right: BookmarkTree): boolean =>
+  (["bar", "menu", "reading_list", "mobile"] as const).every((section) =>
+    bookmarkSectionsEqual(left[section], right[section]),
+  );
+
+const decodeBookmarkTree = (
+  file: ChromeBookmarksFile,
+  bookmarksPath: string,
+): Effect.Effect<BookmarkTree, Error> =>
   Effect.gen(function* () {
-    const text = yield* Effect.tryPromise({
-      try: () => Bun.file(bookmarksPath).text(),
-      catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
-    });
-
-    const file = parseChromeBookmarksFile(text, bookmarksPath);
     const { roots } = file;
-
     const sections: Partial<Record<"bar" | "menu" | "mobile", BookmarkSection>> = {};
     const issues: BookmarkIssue[] = [];
 
@@ -239,6 +291,18 @@ export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree
     });
   });
 
+/** Read Chrome bookmarks from a Bookmarks JSON file path into a clean BookmarkTree. */
+export const readBookmarks = (bookmarksPath: string): Effect.Effect<BookmarkTree, Error> =>
+  Effect.gen(function* () {
+    const text = yield* Effect.tryPromise({
+      try: () => Bun.file(bookmarksPath).text(),
+      catch: (cause) => new Error(`Failed to read Chrome bookmarks at ${bookmarksPath}`, { cause }),
+    });
+
+    const file = parseChromeBookmarksFile(text, bookmarksPath);
+    return yield* decodeBookmarkTree(file, bookmarksPath);
+  });
+
 // -- applyPatches --
 
 /**
@@ -261,13 +325,49 @@ export const applyPatches = (
     });
 
     const file = parseChromeBookmarksFile(text, bookmarksPath);
+    if (patches.length === 0) return;
+    yield* ensureNoSyncMetadata(file, bookmarksPath);
     const { roots } = file;
 
     // Track next sequential ID for new nodes
     let nextId = findMaxId(roots) + 1;
+    const claimed = yield* Effect.try({
+      try: () => {
+        for (const patch of patches) {
+          Patch.$match(patch, {
+            Add: ({ path }) => void parseDomainPath(path),
+            Remove: ({ path }) => void parseDomainPath(path),
+            Update: ({ fromPath, toPath }) => {
+              parseDomainPath(fromPath);
+              parseDomainPath(toPath);
+            },
+          });
+        }
 
-    for (const patch of patches) {
-      Patch.$match(patch, {
+        const claimedSources: ChromeNode[] = [];
+        return patches.map((patch) => {
+          const source = Patch.$match(patch, {
+            Add: () => undefined,
+            Remove: ({ url, name, path }) => claimNode(roots, url, name, path, claimedSources),
+            Update: ({ url, oldName, fromPath }) =>
+              claimNode(roots, url, oldName, fromPath, claimedSources),
+          });
+          if (!Patch.$is("Add")(patch) && !source) {
+            throw new Error(`Missing Chrome bookmark source for ${patch._tag} "${patch.url}".`);
+          }
+          if (source) claimedSources.push(source);
+          return { patch, source };
+        });
+      },
+      catch: (cause) =>
+        cause instanceof Error
+          ? cause
+          : new Error("Failed to prepare Chrome bookmark patches.", { cause }),
+    });
+    const sorted = Patch.sortForApplyBy(claimed, (item) => item.patch);
+
+    for (const item of sorted) {
+      Patch.$match(item.patch, {
         Add: ({ url, name, path }) => {
           const { chromeKey, folderPath } = parseDomainPath(path);
           const rootNode = roots[chromeKey];
@@ -285,18 +385,19 @@ export const applyPatches = (
           };
           parent.push(newLeaf);
         },
-        Remove: ({ url }) => {
-          removeNodeByUrl(roots, url);
+        Remove: () => {
+          if (item.source) extractNodeReference(roots, item.source);
         },
-        Rename: ({ url, newName }) => {
-          const node = findNodeByUrl(roots, url);
-          if (node) {
-            node.name = newName;
+        Update: ({ url, newName, fromPath, toPath }) => {
+          if (!item.source) return;
+          if (fromPath === toPath) {
+            item.source.name = newName;
+            return;
           }
-        },
-        Move: ({ url, toPath }) => {
-          const removed = extractNodeByUrl(roots, url);
+          const removed = extractNodeReference(roots, item.source);
           if (removed) {
+            removed.name = newName;
+            removed.url = url;
             const { chromeKey, folderPath } = parseDomainPath(toPath);
             const rootNode = roots[chromeKey];
             rootNode.children ??= [];
@@ -332,13 +433,41 @@ export const writeTree = (bookmarksPath: string, tree: BookmarkTree): Effect.Eff
     });
 
     const file = parseChromeBookmarksFile(text, bookmarksPath);
+    if (file.sync_metadata) {
+      const currentTree = yield* decodeBookmarkTree(file, bookmarksPath);
+      if (bookmarkTreesEqual(currentTree, tree)) return;
+      return yield* Effect.fail(syncMetadataMutationError(bookmarksPath));
+    }
     const { roots } = file;
     let nextId = findMaxId(roots) + 1;
     const existing = collectChromeNodes(roots);
+    const leafAssignments = assignChromeLeaves(tree, existing);
+    const leafAssignmentIndex = { value: 0 };
 
-    roots.bookmark_bar.children = buildChromeChildren(tree.bar, "bar", existing, () => nextId++);
-    roots.other.children = buildChromeChildren(tree.menu, "menu", existing, () => nextId++);
-    roots.synced.children = buildChromeChildren(tree.mobile, "mobile", existing, () => nextId++);
+    roots.bookmark_bar.children = buildChromeChildren(
+      tree.bar,
+      "bar",
+      existing,
+      leafAssignments,
+      leafAssignmentIndex,
+      () => nextId++,
+    );
+    roots.other.children = buildChromeChildren(
+      tree.menu,
+      "menu",
+      existing,
+      leafAssignments,
+      leafAssignmentIndex,
+      () => nextId++,
+    );
+    roots.synced.children = buildChromeChildren(
+      tree.mobile,
+      "mobile",
+      existing,
+      leafAssignments,
+      leafAssignmentIndex,
+      () => nextId++,
+    );
 
     file.checksum = calculateChecksum(roots);
 
@@ -359,12 +488,27 @@ export const writeTree = (bookmarksPath: string, tree: BookmarkTree): Effect.Eff
 
 interface ChromeNodeLookup {
   readonly foldersByPath: Map<string, ChromeNode>;
-  readonly leavesByUrl: Map<string, ChromeNode>;
+  readonly leavesByExactKey: Map<string, ChromeNode[]>;
+  readonly leavesByUrl: Map<string, ChromeNode[]>;
 }
+
+const leafExactKey = (url: string, name: string, path: string): string =>
+  JSON.stringify([url, name, path]);
+
+const appendLookupNode = (
+  lookup: Map<string, ChromeNode[]>,
+  key: string,
+  node: ChromeNode,
+): void => {
+  const nodes = lookup.get(key);
+  if (nodes) nodes.push(node);
+  else lookup.set(key, [node]);
+};
 
 const collectChromeNodes = (roots: ChromeRoot): ChromeNodeLookup => {
   const lookup: ChromeNodeLookup = {
     foldersByPath: new Map(),
+    leavesByExactKey: new Map(),
     leavesByUrl: new Map(),
   };
 
@@ -383,7 +527,12 @@ const collectChromeChildren = (
 ): void => {
   for (const child of children) {
     if (child.type === "url" && child.url) {
-      lookup.leavesByUrl.set(child.url, child);
+      appendLookupNode(
+        lookup.leavesByExactKey,
+        leafExactKey(child.url, child.name, parentPath),
+        child,
+      );
+      appendLookupNode(lookup.leavesByUrl, child.url, child);
       continue;
     }
 
@@ -393,6 +542,62 @@ const collectChromeChildren = (
       collectChromeChildren(child.children ?? [], folderPath, lookup);
     }
   }
+};
+
+const takeFirstAvailable = (
+  nodes: ChromeNode[] | undefined,
+  used: readonly ChromeNode[],
+): ChromeNode | undefined => nodes?.find((node) => !used.includes(node));
+
+const collectDomainLeaves = (
+  nodes: BookmarkSection | undefined,
+  path: string,
+  leaves: Array<{ readonly leaf: BookmarkLeaf; readonly path: string }>,
+): void => {
+  for (const node of nodes ?? []) {
+    if (BookmarkLeaf.is(node)) {
+      leaves.push({ leaf: node, path });
+    } else {
+      collectDomainLeaves(node.children, `${path}/${node.name}`, leaves);
+    }
+  }
+};
+
+const assignChromeLeaves = (
+  tree: BookmarkTree,
+  lookup: ChromeNodeLookup,
+): readonly (ChromeNode | undefined)[] => {
+  const desired: Array<{ readonly leaf: BookmarkLeaf; readonly path: string }> = [];
+  collectDomainLeaves(tree.bar, "bar", desired);
+  collectDomainLeaves(tree.menu, "menu", desired);
+  collectDomainLeaves(tree.mobile, "mobile", desired);
+
+  const assignments: Array<ChromeNode | undefined> = desired.map(() => undefined);
+  const used: ChromeNode[] = [];
+
+  for (let index = 0; index < desired.length; index++) {
+    const entry = desired[index];
+    if (!entry) continue;
+    const candidate = takeFirstAvailable(
+      lookup.leavesByExactKey.get(leafExactKey(entry.leaf.url, entry.leaf.name, entry.path)),
+      used,
+    );
+    if (!candidate) continue;
+    assignments[index] = candidate;
+    used.push(candidate);
+  }
+
+  for (let index = 0; index < desired.length; index++) {
+    if (assignments[index]) continue;
+    const entry = desired[index];
+    if (!entry) continue;
+    const candidate = takeFirstAvailable(lookup.leavesByUrl.get(entry.leaf.url), used);
+    if (!candidate) continue;
+    assignments[index] = candidate;
+    used.push(candidate);
+  }
+
+  return assignments;
 };
 
 const makeChromeLeaf = (leaf: BookmarkLeaf, allocateId: () => number): ChromeNode => {
@@ -426,15 +631,17 @@ const buildChromeChildren = (
   nodes: BookmarkSection | undefined,
   parentPath: string,
   lookup: ChromeNodeLookup,
+  leafAssignments: readonly (ChromeNode | undefined)[],
+  leafAssignmentIndex: { value: number },
   allocateId: () => number,
 ): ChromeNode[] =>
   (nodes ?? []).map((node) => {
     if (BookmarkLeaf.is(node)) {
-      const existing = lookup.leavesByUrl.get(node.url);
+      const existing = leafAssignments[leafAssignmentIndex.value];
+      leafAssignmentIndex.value += 1;
       if (existing) {
         existing.name = node.name;
         existing.url = node.url;
-        lookup.leavesByUrl.delete(node.url);
         return existing;
       }
 
@@ -445,7 +652,14 @@ const buildChromeChildren = (
     const existing = lookup.foldersByPath.get(folderPath);
     const folder = existing ?? makeChromeFolder(node.name, allocateId);
     folder.name = node.name;
-    folder.children = buildChromeChildren(node.children, folderPath, lookup, allocateId);
+    folder.children = buildChromeChildren(
+      node.children,
+      folderPath,
+      lookup,
+      leafAssignments,
+      leafAssignmentIndex,
+      allocateId,
+    );
     lookup.foldersByPath.delete(folderPath);
     return folder;
   });
@@ -503,9 +717,10 @@ function decodeNodes(children: ChromeNode[]): BookmarkNode[] {
 /** Parse a domain path like "bar/Dev" into Chrome root key + folder path. */
 const parseDomainPath = (path: string): { chromeKey: keyof ChromeRoot; folderPath: string[] } => {
   const [sectionKey, ...rest] = path.split("/");
-  const normalizedSectionKey: ChromeSectionKey =
-    sectionKey === "menu" || sectionKey === "mobile" ? sectionKey : "bar";
-  const chromeKey = SECTION_TO_CHROME_KEY[normalizedSectionKey];
+  if (sectionKey !== "bar" && sectionKey !== "menu" && sectionKey !== "mobile") {
+    throw new Error(`Invalid Chrome bookmark path "${path}".`);
+  }
+  const chromeKey = SECTION_TO_CHROME_KEY[sectionKey];
   return { chromeKey, folderPath: rest };
 };
 
@@ -540,73 +755,56 @@ const ensureFolderPath = (
   return current;
 };
 
-/** Find a URL node by URL anywhere in the roots. */
-const findNodeByUrl = (roots: ChromeRoot, url: string): ChromeNode | undefined => {
-  for (const key of ["bookmark_bar", "other", "synced"] as const) {
-    const found = findInChildren(roots[key].children ?? [], url);
-    if (found) return found;
+const childrenAtPath = (roots: ChromeRoot, path: string): ChromeNode[] | undefined => {
+  const { chromeKey, folderPath } = parseDomainPath(path);
+  const rootChildren = roots[chromeKey].children;
+  if (!rootChildren) return undefined;
+  let children = rootChildren;
+
+  for (const folderName of folderPath) {
+    const folder = children.find((node) => node.type === "folder" && node.name === folderName);
+    if (!folder?.children) return undefined;
+    children = folder.children;
   }
-  return undefined;
+
+  return children;
 };
 
-/** Find a URL node by URL in a children array (recursive). */
-const findInChildren = (children: ChromeNode[], url: string): ChromeNode | undefined => {
-  for (const node of children) {
-    if (node.type === "url" && node.url === url) return node;
-    if (node.children) {
-      const found = findInChildren(node.children, url);
-      if (found) return found;
+const claimNode = (
+  roots: ChromeRoot,
+  url: string,
+  name: string,
+  path: string,
+  claimed: readonly ChromeNode[],
+): ChromeNode | undefined => {
+  const children = childrenAtPath(roots, path);
+  return children?.find(
+    (node) =>
+      node.type === "url" && node.url === url && node.name === name && !claimed.includes(node),
+  );
+};
+
+const findNodeReferenceLocationInChildren = (
+  children: ChromeNode[],
+  target: ChromeNode,
+): { readonly children: ChromeNode[]; readonly index: number } | undefined => {
+  for (let index = 0; index < children.length; index++) {
+    const node = children[index];
+    if (node === target) return { children, index };
+    if (node?.children) {
+      const nested = findNodeReferenceLocationInChildren(node.children, target);
+      if (nested) return nested;
     }
   }
   return undefined;
 };
 
-/** Remove a URL node by URL from anywhere in the roots. Returns true if removed. */
-const removeNodeByUrl = (roots: ChromeRoot, url: string): boolean => {
+const extractNodeReference = (roots: ChromeRoot, target: ChromeNode): ChromeNode | undefined => {
   for (const key of ["bookmark_bar", "other", "synced"] as const) {
-    if (roots[key].children && removeFromChildren(roots[key].children, url)) return true;
-  }
-  return false;
-};
-
-/** Remove a URL node from a children array (recursive). */
-const removeFromChildren = (children: ChromeNode[], url: string): boolean => {
-  for (let i = 0; i < children.length; i++) {
-    const node = children[i];
-    if (!node) continue;
-    if (node.type === "url" && node.url === url) {
-      children.splice(i, 1);
-      return true;
-    }
-    if (node.children && removeFromChildren(node.children, url)) return true;
-  }
-  return false;
-};
-
-/** Extract (remove and return) a URL node by URL from anywhere in the roots. */
-const extractNodeByUrl = (roots: ChromeRoot, url: string): ChromeNode | undefined => {
-  for (const key of ["bookmark_bar", "other", "synced"] as const) {
-    if (roots[key].children) {
-      const found = extractFromChildren(roots[key].children, url);
-      if (found) return found;
-    }
-  }
-  return undefined;
-};
-
-/** Extract a URL node from a children array (recursive). */
-const extractFromChildren = (children: ChromeNode[], url: string): ChromeNode | undefined => {
-  for (let i = 0; i < children.length; i++) {
-    const node = children[i];
-    if (!node) continue;
-    if (node.type === "url" && node.url === url) {
-      children.splice(i, 1);
-      return node;
-    }
-    if (node.children) {
-      const found = extractFromChildren(node.children, url);
-      if (found) return found;
-    }
+    const children = roots[key].children;
+    if (!children) continue;
+    const location = findNodeReferenceLocationInChildren(children, target);
+    if (location) return location.children.splice(location.index, 1)[0];
   }
   return undefined;
 };

@@ -2,17 +2,27 @@
  * Domain-specific bookmark patch types and generation.
  *
  * Patches are the intermediate representation between "what changed"
- * and "apply the change." URL is the identity key.
+ * and "apply the change." Source/target occurrence tuples are conflict keys,
+ * so one URL can have multiple independently placed occurrences.
  *
  * Key data structures:
- * - BookmarkIndex (HashMap<string, BookmarkEntry>) — URL-keyed, used for diffing
+ * - BookmarkIndex (HashMap<string, BookmarkEntry[]>) — URL-keyed occurrence groups, used for diffing
  * - BookmarkTrie (BookmarkTree) — structural working copy, used for applying patches
  */
 
-import { Data, DateTime, Effect, HashMap, Option, pipe } from "effect";
+import {
+  Array as Arr,
+  Data,
+  DateTime,
+  Effect,
+  HashMap,
+  HashSet,
+  Option,
+  Order,
+  pipe,
+} from "effect";
 import type { BookmarkNode, BookmarkSection } from "./schema/__.ts";
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
-import { ensureMutationSupported } from "./unsupported.ts";
 
 // -- Patch types (Data.TaggedEnum) --
 
@@ -29,23 +39,32 @@ export type BookmarkPatch = Data.TaggedEnum<{
     readonly path: string;
     readonly date: DateTime.Utc;
   };
-  Rename: {
+  Update: {
     readonly url: string;
-    readonly path: string;
     readonly oldName: string;
     readonly newName: string;
-    readonly date: DateTime.Utc;
-  };
-  Move: {
-    readonly url: string;
-    readonly name: string;
     readonly fromPath: string;
     readonly toPath: string;
     readonly date: DateTime.Utc;
   };
 }>;
 
-export const { Add, Remove, Rename, Move, $is, $match } = Data.taggedEnum<BookmarkPatch>();
+export const { Add, Remove, Update, $is, $match } = Data.taggedEnum<BookmarkPatch>();
+
+const applyPriority: Record<BookmarkPatch["_tag"], number> = {
+  Remove: 0,
+  Update: 1,
+  Add: 2,
+};
+
+export const sortForApplyBy = <A>(
+  items: readonly A[],
+  patchOf: (item: A) => BookmarkPatch,
+): readonly A[] =>
+  Arr.sort(
+    items,
+    Order.mapInput(Order.number, (item: A) => applyPriority[patchOf(item)._tag]),
+  );
 
 // -- BookmarkEntry (for URL-keyed diffing) --
 
@@ -55,7 +74,12 @@ export interface BookmarkEntry {
   readonly path: string;
 }
 
-export type BookmarkIndex = HashMap.HashMap<string, BookmarkEntry>;
+export type BookmarkIndex = HashMap.HashMap<string, readonly BookmarkEntry[]>;
+
+export interface DuplicateCounts {
+  readonly urlGroups: number;
+  readonly extraPlacements: number;
+}
 
 // -- BookmarkTrie (for structural patch application) --
 
@@ -69,25 +93,25 @@ const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
 
 export interface FlattenResult {
   readonly index: BookmarkIndex;
-  readonly warnings: readonly string[];
+  readonly duplicates: DuplicateCounts;
 }
 
-/** Flatten a BookmarkTree into a URL-keyed HashMap for diffing. First occurrence wins on duplicates. */
+/** Flatten a BookmarkTree into URL-keyed occurrence groups in canonical traversal order. */
 export const flatten = (tree: BookmarkTree): FlattenResult => {
-  const entries: Array<readonly [string, BookmarkEntry]> = [];
-  const warnings: Array<string> = [];
-  const seen = new Set<string>();
+  let index = HashMap.empty<string, readonly BookmarkEntry[]>();
 
   const visit = (nodes: BookmarkSection | undefined, path: string): void => {
     if (!nodes) return;
     for (const node of nodes) {
       if (BookmarkLeaf.is(node)) {
-        if (seen.has(node.url)) {
-          warnings.push(`Duplicate URL "${node.url}" at path "${path}" — keeping first occurrence`);
-        } else {
-          seen.add(node.url);
-          entries.push([node.url, { url: node.url, name: node.name, path }]);
-        }
+        const occurrences = pipe(
+          HashMap.get(index, node.url),
+          Option.getOrElse<readonly BookmarkEntry[]>(() => []),
+        );
+        index = HashMap.set(index, node.url, [
+          ...occurrences,
+          { url: node.url, name: node.name, path },
+        ]);
       } else if (BookmarkFolder.is(node)) {
         visit(node.children, path === "" ? node.name : `${path}/${node.name}`);
       }
@@ -98,8 +122,18 @@ export const flatten = (tree: BookmarkTree): FlattenResult => {
     visit(tree[key], key);
   }
 
-  return { index: HashMap.fromIterable(entries), warnings };
+  let urlGroups = 0;
+  let extraPlacements = 0;
+  HashMap.forEach(index, (occurrences) => {
+    if (occurrences.length < 2) return;
+    urlGroups += 1;
+    extraPlacements += occurrences.length - 1;
+  });
+
+  return { index, duplicates: { urlGroups, extraPlacements } };
 };
+
+export const countDuplicates = (tree: BookmarkTree): DuplicateCounts => flatten(tree).duplicates;
 
 const cloneNode = (node: BookmarkNode): BookmarkNode =>
   BookmarkLeaf.is(node)
@@ -134,14 +168,11 @@ export const fromTrie = (trie: BookmarkTrie): BookmarkTree => toTrie(trie);
 export const generatePatches = (
   lastSync: BookmarkTree,
   current: BookmarkTree,
-  currentSource: string,
+  _currentSource: string,
   dates?: HashMap.HashMap<string, DateTime.Utc>,
-  lastSyncSource = "existing state",
+  _lastSyncSource = "existing state",
 ): Effect.Effect<readonly BookmarkPatch[], Error> =>
   Effect.gen(function* () {
-    yield* ensureMutationSupported(lastSync, lastSyncSource);
-    yield* ensureMutationSupported(current, currentSource);
-
     const now = yield* DateTime.now;
     const { index: lastIndex } = flatten(lastSync);
     const { index: currentIndex } = flatten(current);
@@ -155,45 +186,64 @@ export const generatePatches = (
           )
         : now;
 
-    // URLs in current but not in lastSync → add
-    // URLs in both → check for rename / move
-    HashMap.forEach(currentIndex, (entry, url) => {
-      const lastEntry = HashMap.get(lastIndex, url);
-      if (Option.isNone(lastEntry)) {
-        patches.push(Add({ url, name: entry.name, path: entry.path, date: dateFor(url) }));
-      } else {
-        const prev = lastEntry.value;
-        if (prev.path !== entry.path) {
+    let urls = HashSet.empty<string>();
+    for (const url of HashMap.keys(lastIndex)) urls = HashSet.add(urls, url);
+    for (const url of HashMap.keys(currentIndex)) urls = HashSet.add(urls, url);
+
+    for (const url of [...urls].sort()) {
+      const previous = pipe(
+        HashMap.get(lastIndex, url),
+        Option.getOrElse<readonly BookmarkEntry[]>(() => []),
+      );
+      const next = pipe(
+        HashMap.get(currentIndex, url),
+        Option.getOrElse<readonly BookmarkEntry[]>(() => []),
+      );
+
+      const unmatchedPrevious = [...previous];
+      const unmatchedNext: BookmarkEntry[] = [];
+
+      // Preserve unchanged occurrences before pairing edits. This keeps one changed
+      // duplicate from stealing the identity of an unchanged sibling.
+      for (const entry of next) {
+        const exactIndex = unmatchedPrevious.findIndex(
+          (candidate) => candidate.path === entry.path && candidate.name === entry.name,
+        );
+        if (exactIndex === -1) {
+          unmatchedNext.push(entry);
+        } else {
+          unmatchedPrevious.splice(exactIndex, 1);
+        }
+      }
+
+      const pairedCount = Math.min(unmatchedPrevious.length, unmatchedNext.length);
+      for (let index = 0; index < pairedCount; index++) {
+        const prev = unmatchedPrevious[index];
+        const entry = unmatchedNext[index];
+        if (!prev || !entry) continue;
+
+        if (prev.path !== entry.path || prev.name !== entry.name) {
           patches.push(
-            Move({
+            Update({
               url,
-              name: prev.name,
+              oldName: prev.name,
+              newName: entry.name,
               fromPath: prev.path,
               toPath: entry.path,
               date: dateFor(url),
             }),
           );
         }
-        if (prev.name !== entry.name) {
-          patches.push(
-            Rename({
-              url,
-              path: prev.path,
-              oldName: prev.name,
-              newName: entry.name,
-              date: dateFor(url),
-            }),
-          );
-        }
       }
-    });
 
-    // URLs in lastSync but not in current → remove
-    HashMap.forEach(lastIndex, (entry, url) => {
-      if (Option.isNone(HashMap.get(currentIndex, url))) {
+      for (const entry of unmatchedPrevious.slice(pairedCount)) {
         patches.push(Remove({ url, name: entry.name, path: entry.path, date: dateFor(url) }));
       }
-    });
+
+      for (const entry of unmatchedNext.slice(pairedCount)) {
+        patches.push(Add({ url, name: entry.name, path: entry.path, date: dateFor(url) }));
+      }
+    }
 
     return patches;
   });

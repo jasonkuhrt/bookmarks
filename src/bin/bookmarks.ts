@@ -36,6 +36,8 @@ class CliExitError extends Data.TaggedError("CliExitError")<{}> {
     u !== null && typeof u === "object" && "_tag" in u && u._tag === "CliExitError";
 }
 import * as Daemon from "../lib/daemon.ts";
+import * as ChromeNative from "../lib/chrome-native.ts";
+import * as ChromeNativeSetup from "../lib/chrome-native-setup.ts";
 import * as Doctor from "../lib/doctor.ts";
 import { writeManagedConfigHeader } from "../lib/managed-config-header.ts";
 import * as ManagedPaths from "../lib/managed-paths.ts";
@@ -62,17 +64,22 @@ Usage:
   bookmarks <command> [options]
 
 Commands:
-  bookmarks sync [target...] [--dry-run] [--json]    browsers <-> YAML fast path
+  bookmarks sync [target...] [--from-yaml] [--dry-run] [--json]
+                                                merge, or restore browser from YAML
   bookmarks status [target...] [--json]  show current state
   bookmarks backup [--json]              timestamped backups
   bookmarks gc [--max-age=90d] [--json]  clean graveyard
   bookmarks daemon start|stop|status     launchd watcher lifecycle
   bookmarks doctor [--json]              pre-flight diagnostics
+  bookmarks chrome install              install the Chrome connector
+  bookmarks chrome pair <target>        pair the loaded extension to a profile
+  bookmarks chrome status [--json]      inspect Chrome connections
   bookmarks validate [--json]            validate bookmarks.yaml
 `.trim();
 
 interface CliFlags {
   dryRun: boolean;
+  fromYaml: boolean;
   json: boolean;
   maxAge: string;
 }
@@ -80,6 +87,7 @@ interface CliFlags {
 const parseArgs = (args: string[]) => {
   const flags: CliFlags = {
     dryRun: false,
+    fromYaml: false,
     json: false,
     maxAge: "90d",
   };
@@ -89,6 +97,7 @@ const parseArgs = (args: string[]) => {
     const arg = args[i];
     if (arg === undefined) continue;
     if (arg === "--dry-run") flags.dryRun = true;
+    else if (arg === "--from-yaml") flags.fromYaml = true;
     else if (arg === "--json") flags.json = true;
     else if (arg.startsWith("--max-age=")) flags.maxAge = arg.slice(10);
     else if (arg === "--max-age" && i + 1 < args.length) {
@@ -209,20 +218,12 @@ const serializePatch = (patch: BookmarkPatch) => {
         path: patch.path,
         date: patch.date.toJSON(),
       };
-    case "Rename":
+    case "Update":
       return {
         tag: patch._tag,
         url: patch.url,
-        path: patch.path,
         oldName: patch.oldName,
         newName: patch.newName,
-        date: patch.date.toJSON(),
-      };
-    case "Move":
-      return {
-        tag: patch._tag,
-        url: patch.url,
-        name: patch.name,
         fromPath: patch.fromPath,
         toPath: patch.toPath,
         date: patch.date.toJSON(),
@@ -238,10 +239,14 @@ const formatPatch = (patch: BookmarkPatch): string => {
       return `+ Add "${patch.name}" -> ${patch.path} (${patch.url})`;
     case "Remove":
       return `- Remove "${patch.name}" from ${patch.path} (${patch.url})`;
-    case "Rename":
-      return `~ Rename "${patch.oldName}" -> "${patch.newName}" at ${patch.path} (${patch.url})`;
-    case "Move":
-      return `> Move "${patch.name}" ${patch.fromPath} -> ${patch.toPath} (${patch.url})`;
+    case "Update":
+      if (patch.fromPath === patch.toPath) {
+        return `~ Rename "${patch.oldName}" -> "${patch.newName}" at ${patch.fromPath} (${patch.url})`;
+      }
+      if (patch.oldName === patch.newName) {
+        return `> Move "${patch.oldName}" ${patch.fromPath} -> ${patch.toPath} (${patch.url})`;
+      }
+      return `~ Update "${patch.oldName}" at ${patch.fromPath} -> "${patch.newName}" at ${patch.toPath} (${patch.url})`;
     default:
       return assertNever(patch);
   }
@@ -305,6 +310,10 @@ const serializeStatus = (status: SyncModule.StatusResult) => ({
   yamlPath: status.yamlPath,
   targets: status.targets.map((targetStatus) => ({
     target: targetStatus.target,
+    duplicates: {
+      yaml: targetStatus.yamlDuplicates,
+      browser: targetStatus.browserDuplicates,
+    },
     pendingToBrowser: targetStatus.yamlPatches.map(serializePatch),
     pendingToYaml: targetStatus.browserPatches.map(serializePatch),
   })),
@@ -372,6 +381,14 @@ const printStatus = (status: SyncModule.StatusResult) =>
     for (const targetStatus of status.targets) {
       yield* Console.log(Targets.displayNameOf(targetStatus.target));
       yield* Console.log(`  path: ${targetStatus.target.path}`);
+      if (
+        targetStatus.yamlDuplicates.extraPlacements > 0 ||
+        targetStatus.browserDuplicates.extraPlacements > 0
+      ) {
+        yield* Console.log(
+          `  duplicate placements (preserved): yaml ${targetStatus.yamlDuplicates.extraPlacements} across ${targetStatus.yamlDuplicates.urlGroups} URLs; browser ${targetStatus.browserDuplicates.extraPlacements} across ${targetStatus.browserDuplicates.urlGroups} URLs`,
+        );
+      }
       yield* Console.log(`  pending -> browser: ${targetStatus.yamlPatches.length}`);
       yield* printPatchPreview("to browser", targetStatus.yamlPatches);
       yield* Console.log(`  pending -> yaml:    ${targetStatus.browserPatches.length}`);
@@ -401,23 +418,72 @@ const program = Effect.gen(function* () {
   const { flags, positional } = parseArgs(args);
 
   switch (command) {
+    case "chrome": {
+      const [action, selector] = positional;
+      if (action === "install") {
+        const result = yield* ChromeNativeSetup.installChromeNativeIntegration().pipe(
+          Effect.provide(ChromeNativeSetup.ChromeNativeSetupRuntimeLive),
+        );
+        if (flags.json) yield* printJson(result);
+        else {
+          yield* Console.log(
+            `Chrome connector installed.\nLoad unpacked in chrome://extensions:\n  ${result.extensionDirectory}\nThen run bookmarks chrome pair chrome/<profile>.`,
+          );
+        }
+      } else if (action === "pair") {
+        if (!selector)
+          return yield* emitCliError("Usage: bookmarks chrome pair chrome/<profile>", flags.json);
+        const available = yield* Targets.discoverChromeTargets();
+        const selected = yield* Targets.resolveTargetSelectors(available, [selector]);
+        if (selected.length !== 1 || !selected[0])
+          return yield* emitCliError("Select exactly one Chrome profile to pair.", flags.json);
+        const result = yield* ChromeNative.pair(selected[0].path);
+        if (flags.json) yield* printJson(result);
+        else
+          yield* Console.log(
+            `Paired ${selector}. bookmarks sync now uses Chrome's live bookmark API.`,
+          );
+      } else if (action === "status") {
+        const result = yield* ChromeNative.status;
+        if (flags.json) yield* printJson(result);
+        else if (result.length === 0)
+          yield* Console.log("No Chrome profile paired. Run bookmarks chrome install.");
+        else
+          for (const binding of result)
+            yield* Console.log(
+              `${binding.profilePath}: ${binding.connected ? "connected" : binding.error}`,
+            );
+      } else
+        return yield* emitCliError(
+          "Usage: bookmarks chrome install|pair <target>|status",
+          flags.json,
+        );
+      break;
+    }
     case "sync": {
       const managed = yield* ensureManagedFiles(Paths.defaultYamlPath());
-      const preview = flags.dryRun
-        ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
-        : undefined;
-      const syncResult = yield* SyncModule.sync({
+      const preview =
+        flags.dryRun && !flags.fromYaml
+          ? yield* SyncModule.status({ yamlPath: managed.yamlPath, requestedTargets: positional })
+          : undefined;
+      const syncConfig = {
         yamlPath: managed.yamlPath,
         dryRun: flags.dryRun,
         requestedTargets: positional,
-      });
+      };
+      const syncResult = yield* flags.fromYaml
+        ? SyncModule.push(syncConfig)
+        : SyncModule.sync(syncConfig);
       if (flags.json) {
         yield* printJson({
           ...serializeSyncResult("sync", managed.yamlPath, flags.dryRun, syncResult),
+          mode: flags.fromYaml ? "from-yaml" : "merge",
           preview: preview ? serializeStatus(preview) : null,
         });
       } else {
-        yield* printSyncSummary("Sync", syncResult, { showDetails: false });
+        yield* printSyncSummary(flags.fromYaml ? "Sync from YAML" : "Sync", syncResult, {
+          showDetails: flags.fromYaml && flags.dryRun,
+        });
         if (preview) yield* printDryRunPreview(preview);
       }
       break;
@@ -630,7 +696,7 @@ if (Exit.isFailure(exit)) {
         ),
       );
     } else {
-      console.error(err);
+      console.error(err instanceof Error ? err.message : String(err));
     }
   }
   process.exit(1);

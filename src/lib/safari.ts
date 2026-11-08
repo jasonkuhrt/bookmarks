@@ -170,7 +170,7 @@ const SECTION_TITLE_TO_KEY: Record<string, keyof Omit<BookmarkTree, "_tag">> = {
   "com.apple.ReadingList": "reading_list",
 };
 
-const SECTION_KEY_TO_TITLE: Record<string, string> = {
+const SECTION_KEY_TO_TITLE = {
   bar: "BookmarksBar",
   menu: "BookmarksMenu",
   reading_list: "com.apple.ReadingList",
@@ -237,6 +237,33 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
     });
   });
 
+/** Root-level managed menu nodes cannot always be patched without changing merged menu ordering. */
+export const requiresFullRewrite = (
+  plistPath: string,
+  patches: readonly Patch.BookmarkPatch[],
+): Effect.Effect<boolean, Error> =>
+  patches.length === 0
+    ? Effect.succeed(false)
+    : Effect.gen(function* () {
+        const data = yield* Effect.tryPromise({
+          try: () => Bun.file(plistPath).arrayBuffer(),
+          catch: (cause) => new Error(`Failed to read plist at ${plistPath}`, { cause }),
+        });
+        const root = parsePlistRoot(data, plistPath);
+        const rootChildren = readRootChildren(root, plistPath);
+        return rootChildren.some((node) => {
+          const type = plistString(node, "WebBookmarkType");
+          const title = plistString(node, "Title");
+          if (type === "WebBookmarkTypeProxy") return false;
+          return !(
+            type === "WebBookmarkTypeList" &&
+            (title === "BookmarksBar" ||
+              title === "BookmarksMenu" ||
+              title === "com.apple.ReadingList")
+          );
+        });
+      });
+
 // -- applyPatches --
 
 /**
@@ -261,28 +288,66 @@ export const applyPatches = (
     const root = parsePlistRoot(data, plistPath);
     const children = readRootChildren(root, plistPath);
 
-    for (const patch of patches) {
-      Patch.$match(patch, {
+    const claimed = yield* Effect.try({
+      try: () => {
+        for (const patch of patches) {
+          Patch.$match(patch, {
+            Add: ({ path }) => void parseDomainPath(path),
+            Remove: ({ path }) => void parseDomainPath(path),
+            Update: ({ fromPath, toPath }) => {
+              parseDomainPath(fromPath);
+              parseDomainPath(toPath);
+            },
+          });
+        }
+
+        const claimedSources: PlistDict[] = [];
+        return patches.map((patch) => {
+          const source = Patch.$match(patch, {
+            Add: () => undefined,
+            Remove: ({ url, name, path }) => claimLeaf(children, url, name, path, claimedSources),
+            Update: ({ url, oldName, fromPath }) =>
+              claimLeaf(children, url, oldName, fromPath, claimedSources),
+          });
+          if (!Patch.$is("Add")(patch) && !source) {
+            throw new Error(`Missing Safari bookmark source for ${patch._tag} "${patch.url}".`);
+          }
+          if (source) claimedSources.push(source);
+          return { patch, source };
+        });
+      },
+      catch: (cause) =>
+        cause instanceof Error
+          ? cause
+          : new Error("Failed to prepare Safari bookmark patches.", { cause }),
+    });
+    const sorted = Patch.sortForApplyBy(claimed, (item) => item.patch);
+
+    for (const item of sorted) {
+      Patch.$match(item.patch, {
         Add: ({ url, name, path }) => {
           const { sectionTitle, folderPath } = parseDomainPath(path);
           const sectionChildren = findOrCreateSectionChildren(children, sectionTitle);
           const parent = ensureFolderPath(sectionChildren, folderPath);
           parent.push(makeSafariLeafNode(url, name));
         },
-        Remove: ({ url }) => {
-          removeLeafByUrl(children, url);
+        Remove: () => {
+          if (item.source) extractLeafReference(children, item.source);
         },
-        Rename: ({ url, newName }) => {
-          const leaf = findLeafByUrl(children, url);
-          if (leaf) {
-            const uriDict = plistDict(leaf, "URIDictionary") ?? {};
+        Update: ({ url, newName, fromPath, toPath }) => {
+          if (!item.source) return;
+          if (fromPath === toPath) {
+            const uriDict = plistDict(item.source, "URIDictionary") ?? {};
             uriDict["title"] = newName;
-            leaf["URIDictionary"] = uriDict;
+            item.source["URIDictionary"] = uriDict;
+            return;
           }
-        },
-        Move: ({ url, toPath }) => {
-          const removed = extractLeafByUrl(children, url);
+          const removed = extractLeafReference(children, item.source);
           if (removed) {
+            removed["URLString"] = url;
+            const uriDict = plistDict(removed, "URIDictionary") ?? {};
+            uriDict["title"] = newName;
+            removed["URIDictionary"] = uriDict;
             const { sectionTitle, folderPath } = parseDomainPath(toPath);
             const sectionChildren = findOrCreateSectionChildren(children, sectionTitle);
             const parent = ensureFolderPath(sectionChildren, folderPath);
@@ -315,16 +380,30 @@ export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<
     const root = parsePlistRoot(data, plistPath);
     const children = readRootChildren(root, plistPath);
     const lookup = collectSafariNodes(children);
+    const leafAssignments = assignSafariLeaves(tree, lookup);
+    const leafAssignmentIndex = { value: 0 };
 
     const favoritesSection = reuseOrCreateSectionNode(lookup, "BookmarksBar");
     const otherSection = reuseOrCreateSectionNode(lookup, "BookmarksMenu");
     const readingListSection = reuseOrCreateSectionNode(lookup, "com.apple.ReadingList");
 
-    setSectionChildren(favoritesSection, buildSafariChildren(tree.bar, "bar", lookup));
-    setSectionChildren(otherSection, buildSafariChildren(tree.menu, "menu", lookup));
+    setSectionChildren(
+      favoritesSection,
+      buildSafariChildren(tree.bar, "bar", lookup, leafAssignments, leafAssignmentIndex),
+    );
+    setSectionChildren(
+      otherSection,
+      buildSafariChildren(tree.menu, "menu", lookup, leafAssignments, leafAssignmentIndex),
+    );
     setSectionChildren(
       readingListSection,
-      buildSafariChildren(tree.reading_list, "reading_list", lookup),
+      buildSafariChildren(
+        tree.reading_list,
+        "reading_list",
+        lookup,
+        leafAssignments,
+        leafAssignmentIndex,
+      ),
     );
 
     root["Children"] = [
@@ -350,14 +429,25 @@ export const writeTree = (plistPath: string, tree: BookmarkTree): Effect.Effect<
 
 interface SafariNodeLookup {
   readonly foldersByPath: Map<string, PlistDict>;
-  readonly leavesByUrl: Map<string, PlistDict>;
+  readonly leavesByExactKey: Map<string, PlistDict[]>;
+  readonly leavesByUrl: Map<string, PlistDict[]>;
   readonly sectionsByTitle: Map<string, PlistDict>;
   readonly unmanagedRootChildren: PlistDict[];
 }
 
+const leafExactKey = (url: string, name: string, path: string): string =>
+  JSON.stringify([url, name, path]);
+
+const appendLookupLeaf = (lookup: Map<string, PlistDict[]>, key: string, node: PlistDict): void => {
+  const nodes = lookup.get(key);
+  if (nodes) nodes.push(node);
+  else lookup.set(key, [node]);
+};
+
 const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
   const lookup: SafariNodeLookup = {
     foldersByPath: new Map(),
+    leavesByExactKey: new Map(),
     leavesByUrl: new Map(),
     sectionsByTitle: new Map(),
     unmanagedRootChildren: [],
@@ -393,7 +483,11 @@ const collectSafariNodes = (rootChildren: PlistDict[]): SafariNodeLookup => {
 
     if (type === "WebBookmarkTypeLeaf") {
       const url = plistString(child, "URLString");
-      if (url) lookup.leavesByUrl.set(url, child);
+      const name = plistString(plistDict(child, "URIDictionary") ?? {}, "title") ?? "";
+      if (url) {
+        appendLookupLeaf(lookup.leavesByExactKey, leafExactKey(url, name, "menu"), child);
+        appendLookupLeaf(lookup.leavesByUrl, url, child);
+      }
       continue;
     }
 
@@ -419,7 +513,11 @@ const collectSafariChildren = (
     const type = plistString(node, "WebBookmarkType");
     if (type === "WebBookmarkTypeLeaf") {
       const url = plistString(node, "URLString");
-      if (url) lookup.leavesByUrl.set(url, node);
+      const name = plistString(plistDict(node, "URIDictionary") ?? {}, "title") ?? "";
+      if (url) {
+        appendLookupLeaf(lookup.leavesByExactKey, leafExactKey(url, name, parentPath), node);
+        appendLookupLeaf(lookup.leavesByUrl, url, node);
+      }
       continue;
     }
 
@@ -431,6 +529,62 @@ const collectSafariChildren = (
       collectSafariChildren(plistDictChildren(node) ?? [], folderPath, lookup);
     }
   }
+};
+
+const takeFirstAvailable = (
+  nodes: PlistDict[] | undefined,
+  used: readonly PlistDict[],
+): PlistDict | undefined => nodes?.find((node) => !used.includes(node));
+
+const collectDomainLeaves = (
+  nodes: BookmarkSection | undefined,
+  path: string,
+  leaves: Array<{ readonly leaf: BookmarkLeaf; readonly path: string }>,
+): void => {
+  for (const node of nodes ?? []) {
+    if (BookmarkLeaf.is(node)) {
+      leaves.push({ leaf: node, path });
+    } else {
+      collectDomainLeaves(node.children, `${path}/${node.name}`, leaves);
+    }
+  }
+};
+
+const assignSafariLeaves = (
+  tree: BookmarkTree,
+  lookup: SafariNodeLookup,
+): readonly (PlistDict | undefined)[] => {
+  const desired: Array<{ readonly leaf: BookmarkLeaf; readonly path: string }> = [];
+  collectDomainLeaves(tree.bar, "bar", desired);
+  collectDomainLeaves(tree.menu, "menu", desired);
+  collectDomainLeaves(tree.reading_list, "reading_list", desired);
+
+  const assignments: Array<PlistDict | undefined> = desired.map(() => undefined);
+  const used: PlistDict[] = [];
+
+  for (let index = 0; index < desired.length; index++) {
+    const entry = desired[index];
+    if (!entry) continue;
+    const candidate = takeFirstAvailable(
+      lookup.leavesByExactKey.get(leafExactKey(entry.leaf.url, entry.leaf.name, entry.path)),
+      used,
+    );
+    if (!candidate) continue;
+    assignments[index] = candidate;
+    used.push(candidate);
+  }
+
+  for (let index = 0; index < desired.length; index++) {
+    if (assignments[index]) continue;
+    const entry = desired[index];
+    if (!entry) continue;
+    const candidate = takeFirstAvailable(lookup.leavesByUrl.get(entry.leaf.url), used);
+    if (!candidate) continue;
+    assignments[index] = candidate;
+    used.push(candidate);
+  }
+
+  return assignments;
 };
 
 const reuseOrCreateSectionNode = (lookup: SafariNodeLookup, title: string): PlistDict =>
@@ -448,16 +602,18 @@ const buildSafariChildren = (
   nodes: BookmarkSection | undefined,
   parentPath: string,
   lookup: SafariNodeLookup,
+  leafAssignments: readonly (PlistDict | undefined)[],
+  leafAssignmentIndex: { value: number },
 ): PlistDict[] =>
   (nodes ?? []).map((node) => {
     if (BookmarkLeaf.is(node)) {
-      const existing = lookup.leavesByUrl.get(node.url);
+      const existing = leafAssignments[leafAssignmentIndex.value];
+      leafAssignmentIndex.value += 1;
       if (existing) {
         existing["URLString"] = node.url;
         const uriDict = plistDict(existing, "URIDictionary") ?? {};
         uriDict["title"] = node.name;
         existing["URIDictionary"] = uriDict;
-        lookup.leavesByUrl.delete(node.url);
         return existing;
       }
 
@@ -469,7 +625,13 @@ const buildSafariChildren = (
     const folder = existing ?? makeSafariFolderNode(node.name);
 
     folder["Title"] = node.name;
-    folder["Children"] = buildSafariChildren(node.children, folderPath, lookup);
+    folder["Children"] = buildSafariChildren(
+      node.children,
+      folderPath,
+      lookup,
+      leafAssignments,
+      leafAssignmentIndex,
+    );
     lookup.foldersByPath.delete(folderPath);
     return folder;
   });
@@ -534,8 +696,11 @@ function decodeNodes(children: PlistDict[]): BookmarkNode[] {
 
 /** Parse a domain path like "bar/Dev" into Safari section title + folder path. */
 const parseDomainPath = (path: string): { sectionTitle: string; folderPath: string[] } => {
-  const [sectionKey = "menu", ...rest] = path.split("/");
-  const sectionTitle = SECTION_KEY_TO_TITLE[sectionKey] ?? sectionKey;
+  const [sectionKey, ...rest] = path.split("/");
+  if (sectionKey !== "bar" && sectionKey !== "menu" && sectionKey !== "reading_list") {
+    throw new Error(`Invalid Safari bookmark path "${path}".`);
+  }
+  const sectionTitle = SECTION_KEY_TO_TITLE[sectionKey];
   return { sectionTitle, folderPath: rest };
 };
 
@@ -580,61 +745,89 @@ const ensureFolderPath = (children: PlistValue[], folderPath: string[]): PlistVa
   return current;
 };
 
-/** Find a leaf node by URL anywhere in the tree. */
-const findLeafByUrl = (nodes: PlistDict[], url: string): PlistDict | undefined => {
-  for (const node of nodes) {
-    if (
-      plistString(node, "WebBookmarkType") === "WebBookmarkTypeLeaf" &&
-      plistString(node, "URLString") === url
-    ) {
-      return node;
+const childrenAtFolderPath = (
+  children: PlistDict[],
+  folderPath: readonly string[],
+): PlistDict[] | undefined => {
+  let current = children;
+  for (const folderName of folderPath) {
+    const folder = current.find(
+      (node) =>
+        plistString(node, "WebBookmarkType") === "WebBookmarkTypeList" &&
+        plistString(node, "Title") === folderName,
+    );
+    const nested = folder ? plistDictChildren(folder) : undefined;
+    if (!nested) return undefined;
+    current = nested;
+  }
+  return current;
+};
+
+const leafCandidatesAtPath = (rootChildren: PlistDict[], path: string): PlistDict[] => {
+  const { sectionTitle, folderPath } = parseDomainPath(path);
+  const candidates: PlistDict[] = [];
+
+  for (const rootNode of rootChildren) {
+    const type = plistString(rootNode, "WebBookmarkType");
+    const title = plistString(rootNode, "Title");
+
+    if (type === "WebBookmarkTypeList" && title === sectionTitle) {
+      candidates.push(
+        ...(childrenAtFolderPath(plistDictChildren(rootNode) ?? [], folderPath) ?? []),
+      );
+      continue;
     }
+
+    if (sectionTitle !== "BookmarksMenu") continue;
+    if (folderPath.length === 0 && type === "WebBookmarkTypeLeaf") {
+      candidates.push(rootNode);
+      continue;
+    }
+    if (type !== "WebBookmarkTypeList" || title !== folderPath[0]) continue;
+    const nested = childrenAtFolderPath(plistDictChildren(rootNode) ?? [], folderPath.slice(1));
+    if (nested) candidates.push(...nested);
+  }
+
+  return candidates;
+};
+
+const claimLeaf = (
+  rootChildren: PlistDict[],
+  url: string,
+  name: string,
+  path: string,
+  claimed: readonly PlistDict[],
+): PlistDict | undefined =>
+  leafCandidatesAtPath(rootChildren, path).find(
+    (node) =>
+      plistString(node, "WebBookmarkType") === "WebBookmarkTypeLeaf" &&
+      plistString(node, "URLString") === url &&
+      plistString(plistDict(node, "URIDictionary") ?? {}, "title") === name &&
+      !claimed.includes(node),
+  );
+
+const findLeafReferenceLocation = (
+  nodes: PlistDict[],
+  target: PlistDict,
+): { readonly children: PlistDict[]; readonly index: number } | undefined => {
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index];
+    if (node === target) return { children: nodes, index };
+    if (!node) continue;
     const children = plistDictChildren(node);
     if (children) {
-      const found = findLeafByUrl(children, url);
-      if (found) return found;
+      const nested = findLeafReferenceLocation(children, target);
+      if (nested) return nested;
     }
   }
   return undefined;
 };
 
-/** Remove a leaf by URL from anywhere in the tree. Returns true if removed. */
-const removeLeafByUrl = (nodes: PlistDict[], url: string): boolean => {
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    if (!node) continue;
-
-    if (
-      plistString(node, "WebBookmarkType") === "WebBookmarkTypeLeaf" &&
-      plistString(node, "URLString") === url
-    ) {
-      nodes.splice(i, 1);
-      return true;
-    }
-    const children = plistDictChildren(node);
-    if (children && removeLeafByUrl(children, url)) return true;
-  }
-  return false;
-};
-
-/** Extract (remove and return) a leaf by URL from anywhere in the tree. */
-const extractLeafByUrl = (nodes: PlistDict[], url: string): PlistDict | undefined => {
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    if (!node) continue;
-
-    if (
-      plistString(node, "WebBookmarkType") === "WebBookmarkTypeLeaf" &&
-      plistString(node, "URLString") === url
-    ) {
-      nodes.splice(i, 1);
-      return node;
-    }
-    const children = plistDictChildren(node);
-    if (children) {
-      const found = extractLeafByUrl(children, url);
-      if (found) return found;
-    }
-  }
-  return undefined;
+const extractLeafReference = (
+  rootChildren: PlistDict[],
+  target: PlistDict,
+): PlistDict | undefined => {
+  const location = findLeafReferenceLocation(rootChildren, target);
+  if (!location) return undefined;
+  return location.children.splice(location.index, 1)[0];
 };

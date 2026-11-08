@@ -7,13 +7,15 @@
  * Produces graveyard entries for conflict losers.
  */
 
-import { Array as Arr, DateTime, Duration, Effect, Order } from "effect";
+import { Array as Arr, DateTime, Duration, Effect, HashSet } from "effect";
 import { execFile } from "node:child_process";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import * as Yaml from "yaml";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
+import * as Chrome from "./chrome.ts";
+import * as ChromeNative from "./chrome-native.ts";
 import * as Graveyard from "./graveyard.ts";
 import * as Orchestration from "./orchestration.ts";
 import * as Patch from "./patch.ts";
@@ -29,7 +31,7 @@ import {
   ChromeProfileBookmarks,
   SafariBookmarks,
 } from "./schema/__.ts";
-import { ensureMutationSupported } from "./unsupported.ts";
+import { collectAmbiguousPathIssues, ensureUnambiguousPaths } from "./unsupported.ts";
 import * as YamlModule from "./yaml.ts";
 
 export interface SyncResult {
@@ -56,6 +58,8 @@ export interface StatusTargetResult {
   readonly target: Targets.TargetDescriptor;
   readonly yamlPatches: readonly Patch.BookmarkPatch[];
   readonly browserPatches: readonly Patch.BookmarkPatch[];
+  readonly yamlDuplicates: Patch.DuplicateCounts;
+  readonly browserDuplicates: Patch.DuplicateCounts;
 }
 
 export interface StatusResult {
@@ -310,39 +314,73 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
 
 // -- resolveConflicts --
 
-/** Resolve conflicts between YAML-side and browser-side patches. Newest wins. */
+const conflictKey = (patch: Patch.BookmarkPatch): string =>
+  Patch.$match(patch, {
+    Add: ({ url, name, path }) => JSON.stringify(["target", url, name, path]),
+    Remove: ({ url, name, path }) => JSON.stringify(["source", url, name, path]),
+    Update: ({ url, oldName, fromPath }) => JSON.stringify(["source", url, oldName, fromPath]),
+  });
+
+const patchContentKey = (patch: Patch.BookmarkPatch): string =>
+  Patch.$match(patch, {
+    Add: ({ url, name, path }) => JSON.stringify(["Add", url, name, path]),
+    Remove: ({ url, name, path }) => JSON.stringify(["Remove", url, name, path]),
+    Update: ({ url, oldName, newName, fromPath, toPath }) =>
+      JSON.stringify(["Update", url, oldName, newName, fromPath, toPath]),
+  });
+
+/** Resolve conflicts between patches for the same bookmark occurrence. Newest wins. */
 export const resolveConflicts = (
   yamlPatches: readonly Patch.BookmarkPatch[],
   browserPatches: readonly Patch.BookmarkPatch[],
 ): Effect.Effect<ConflictResolution, Error> => {
-  const yamlByUrl = Arr.groupBy(yamlPatches, (p) => p.url);
-  const browserByUrl = Arr.groupBy(browserPatches, (p) => p.url);
+  const yamlByOccurrence = Arr.groupBy(yamlPatches, conflictKey);
+  const browserByOccurrence = Arr.groupBy(browserPatches, conflictKey);
 
   const apply: Patch.BookmarkPatch[] = [];
   const graveyard: Patch.BookmarkPatch[] = [];
 
-  // Collect all unique URLs from both sides
-  const allUrls = new Set([...Object.keys(yamlByUrl), ...Object.keys(browserByUrl)]);
+  let allOccurrences = HashSet.empty<string>();
+  for (const occurrence of Object.keys(yamlByOccurrence)) {
+    allOccurrences = HashSet.add(allOccurrences, occurrence);
+  }
+  for (const occurrence of Object.keys(browserByOccurrence)) {
+    allOccurrences = HashSet.add(allOccurrences, occurrence);
+  }
 
-  for (const url of allUrls) {
-    const yamlGroup = yamlByUrl[url];
-    const browserGroup = browserByUrl[url];
+  for (const occurrence of [...allOccurrences].sort()) {
+    const yamlGroup = yamlByOccurrence[occurrence];
+    const browserGroup = browserByOccurrence[occurrence];
 
     if (yamlGroup && !browserGroup) {
       apply.push(...yamlGroup);
     } else if (browserGroup && !yamlGroup) {
       apply.push(...browserGroup);
     } else if (yamlGroup && browserGroup) {
-      const yamlMax = maxDate(yamlGroup);
-      const browserMax = maxDate(browserGroup);
+      const pairCount = Math.max(yamlGroup.length, browserGroup.length);
+      for (let index = 0; index < pairCount; index++) {
+        const yamlPatch = yamlGroup[index];
+        const browserPatch = browserGroup[index];
+        if (!yamlPatch && browserPatch) {
+          apply.push(browserPatch);
+          continue;
+        }
+        if (yamlPatch && !browserPatch) {
+          apply.push(yamlPatch);
+          continue;
+        }
+        if (!yamlPatch || !browserPatch) continue;
 
-      if (DateTime.greaterThan(browserMax, yamlMax)) {
-        apply.push(...browserGroup);
-        graveyard.push(...yamlGroup);
-      } else {
-        // YAML wins (tie-break: YAML wins when equal)
-        apply.push(...yamlGroup);
-        graveyard.push(...browserGroup);
+        if (patchContentKey(yamlPatch) === patchContentKey(browserPatch)) {
+          apply.push(yamlPatch);
+        } else if (DateTime.greaterThan(browserPatch.date, yamlPatch.date)) {
+          apply.push(browserPatch);
+          graveyard.push(yamlPatch);
+        } else {
+          // YAML wins (tie-break: YAML wins when equal)
+          apply.push(yamlPatch);
+          graveyard.push(browserPatch);
+        }
       }
     }
   }
@@ -350,37 +388,60 @@ export const resolveConflicts = (
   return Effect.succeed({ apply, graveyard });
 };
 
-/** Find the maximum date among a group of patches. */
-const maxDate = (patches: readonly Patch.BookmarkPatch[]): DateTime.Utc =>
-  patches.reduce<DateTime.Utc>((max, patch) => {
-    return DateTime.greaterThan(patch.date, max) ? patch.date : max;
-  }, expectDefined(patches[0], "maxDate requires at least one patch").date);
-
 // -- applyPatches --
 
 /** Apply a set of patches to a bookmark tree, producing the updated tree. */
 export const applyPatches = (
   tree: BookmarkTree,
   patches: readonly Patch.BookmarkPatch[],
-): Effect.Effect<BookmarkTree, Error> => {
-  let nextTree = Patch.toTrie(tree);
+): Effect.Effect<BookmarkTree, Error> =>
+  Effect.try({
+    try: () => {
+      const nextTree = Patch.toTrie(tree);
 
-  // Sort patches: Remove -> Move -> Rename -> Add
-  const opPriority: Record<Patch.BookmarkPatch["_tag"], number> = {
-    Remove: 0,
-    Move: 1,
-    Rename: 2,
-    Add: 3,
-  };
-  const byOpOrder = Order.mapInput(Order.number, (p: Patch.BookmarkPatch) => opPriority[p._tag]);
-  const sorted = Arr.sort(patches, byOpOrder);
+      for (const patch of patches) {
+        Patch.$match(patch, {
+          Add: ({ path }) => {
+            requireBookmarkPath(path);
+          },
+          Remove: ({ path }) => {
+            requireBookmarkPath(path);
+          },
+          Update: ({ fromPath, toPath }) => {
+            requireBookmarkPath(fromPath);
+            requireBookmarkPath(toPath);
+          },
+        });
+      }
 
-  for (const patch of sorted) {
-    nextTree = applyOne(nextTree, patch);
-  }
+      // Claim every source occurrence before mutation so swaps cannot retarget a
+      // node changed by an earlier patch.
+      const claimedSources: BookmarkLeaf[] = [];
+      const claimed = patches.map((patch) => {
+        const source = Patch.$match(patch, {
+          Add: () => undefined,
+          Remove: ({ url, name, path }) => claimLeaf(nextTree, url, name, path, claimedSources),
+          Update: ({ url, oldName, fromPath }) =>
+            claimLeaf(nextTree, url, oldName, fromPath, claimedSources),
+        });
 
-  return Effect.succeed(Patch.fromTrie(nextTree));
-};
+        if (!Patch.$is("Add")(patch) && !source) {
+          throw new Error(`Missing bookmark source for ${patch._tag} "${patch.url}".`);
+        }
+        if (source) claimedSources.push(source);
+        return { patch, source };
+      });
+      const sorted = Patch.sortForApplyBy(claimed, (item) => item.patch);
+
+      for (const item of sorted) {
+        applyOne(nextTree, item.patch, item.source);
+      }
+
+      return Patch.fromTrie(nextTree);
+    },
+    catch: (cause) =>
+      cause instanceof Error ? cause : new Error("Failed to apply bookmark patches.", { cause }),
+  });
 
 const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
 
@@ -493,6 +554,10 @@ const parseBookmarkPath = (
   return sectionKey ? { sectionKey, folderPath } : undefined;
 };
 
+const requireBookmarkPath = (path: string): void => {
+  if (!parseBookmarkPath(path)) throw new Error(`Invalid bookmark path "${path}".`);
+};
+
 const cleanupEmptyRootSections = (tree: BookmarkTree): void => {
   for (const sectionKey of sectionKeys) {
     if ((tree[sectionKey]?.length ?? 0) === 0) {
@@ -501,56 +566,83 @@ const cleanupEmptyRootSections = (tree: BookmarkTree): void => {
   }
 };
 
-const findLeafLocationInSection = (
-  nodes: MutableBookmarkSection,
+const findParentAtPath = (tree: BookmarkTree, path: string): MutableBookmarkSection | undefined => {
+  const parsed = parseBookmarkPath(path);
+  if (!parsed) return undefined;
+
+  let current = asMutableTree(tree)[parsed.sectionKey];
+  if (!current) return undefined;
+
+  for (const folderName of parsed.folderPath) {
+    const folder = current.find(
+      (node): node is BookmarkFolder => BookmarkFolder.is(node) && node.name === folderName,
+    );
+    if (!folder) return undefined;
+    current = asMutableSection(folder.children);
+  }
+
+  return current;
+};
+
+const claimLeaf = (
+  tree: BookmarkTree,
   url: string,
+  name: string,
+  path: string,
+  claimed: readonly BookmarkLeaf[],
+): BookmarkLeaf | undefined => {
+  const children = findParentAtPath(tree, path);
+  return children?.find(
+    (node): node is BookmarkLeaf =>
+      BookmarkLeaf.is(node) && node.url === url && node.name === name && !claimed.includes(node),
+  );
+};
+
+const findLeafReferenceLocationInSection = (
+  nodes: MutableBookmarkSection,
+  target: BookmarkLeaf,
 ): { readonly children: MutableBookmarkSection; readonly index: number } | undefined => {
   for (let index = 0; index < nodes.length; index++) {
     const node = nodes[index];
-    if (!node) continue;
-
-    if (BookmarkLeaf.is(node) && node.url === url) {
-      return { children: nodes, index };
-    }
-
-    if (BookmarkFolder.is(node)) {
-      const found = findLeafLocationInSection(asMutableSection(node.children), url);
-      if (found) return found;
+    if (node === target) return { children: nodes, index };
+    if (node && BookmarkFolder.is(node)) {
+      const nested = findLeafReferenceLocationInSection(asMutableSection(node.children), target);
+      if (nested) return nested;
     }
   }
-
   return undefined;
 };
 
-const findLeafLocation = (
+const findLeafReferenceLocation = (
   tree: BookmarkTree,
-  url: string,
+  target: BookmarkLeaf,
 ): { readonly children: MutableBookmarkSection; readonly index: number } | undefined => {
   for (const sectionKey of sectionKeys) {
     const section = asMutableTree(tree)[sectionKey];
     if (!section) continue;
-
-    const found = findLeafLocationInSection(section, url);
-    if (found) return found;
+    const location = findLeafReferenceLocationInSection(section, target);
+    if (location) return location;
   }
-
   return undefined;
 };
 
-const removeLeaf = (tree: BookmarkTree, url: string): BookmarkLeaf | undefined => {
-  const location = findLeafLocation(tree, url);
+const extractLeafReference = (
+  tree: BookmarkTree,
+  target: BookmarkLeaf,
+): BookmarkLeaf | undefined => {
+  const location = findLeafReferenceLocation(tree, target);
   if (!location) return undefined;
-
   const [removed] = location.children.splice(location.index, 1);
   cleanupEmptyRootSections(tree);
-
-  return removed && BookmarkLeaf.is(removed)
-    ? BookmarkLeaf.make({ name: removed.name, url: removed.url })
-    : undefined;
+  return removed && BookmarkLeaf.is(removed) ? removed : undefined;
 };
 
 /** Apply a single patch to the structural working tree via exhaustive Patch.$match. */
-const applyOne = (tree: BookmarkTree, patch: Patch.BookmarkPatch): BookmarkTree =>
+const applyOne = (
+  tree: BookmarkTree,
+  patch: Patch.BookmarkPatch,
+  source: BookmarkLeaf | undefined,
+): BookmarkTree =>
   Patch.$match(patch, {
     Add: ({ url, name, path }) => {
       const parsed = parseBookmarkPath(path);
@@ -562,28 +654,29 @@ const applyOne = (tree: BookmarkTree, patch: Patch.BookmarkPatch): BookmarkTree 
       return tree;
     },
 
-    Remove: ({ url }) => {
-      removeLeaf(tree, url);
+    Remove: () => {
+      if (source) extractLeafReference(tree, source);
       return tree;
     },
 
-    Rename: ({ url, newName }) => {
-      const location = findLeafLocation(tree, url);
-      if (!location) return tree;
+    Update: ({ url, newName, fromPath, toPath }) => {
+      if (!source) return tree;
+      if (fromPath === toPath) {
+        const location = findLeafReferenceLocation(tree, source);
+        if (location) {
+          location.children[location.index] = BookmarkLeaf.make({ name: newName, url });
+        }
+        return tree;
+      }
 
-      location.children[location.index] = BookmarkLeaf.make({ name: newName, url });
-      return tree;
-    },
-
-    Move: ({ url, toPath }) => {
-      const removed = removeLeaf(tree, url);
+      const removed = extractLeafReference(tree, source);
       if (!removed) return tree;
 
       const parsed = parseBookmarkPath(toPath);
       if (!parsed) return tree;
 
       const parent = ensureFolderPath(ensureSection(tree, parsed.sectionKey), parsed.folderPath);
-      parent.push(removed);
+      parent.push(BookmarkLeaf.make({ name: newName, url }));
 
       return tree;
     },
@@ -689,9 +782,42 @@ const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =
         targets: [],
       };
 
+const runningTargetBrowsers = (
+  targets: readonly Targets.TargetDescriptor[],
+): Effect.Effect<readonly string[], Error> =>
+  Effect.gen(function* () {
+    let checkedBrowsers = HashSet.empty<string>();
+    const runningBrowsers: string[] = [];
+
+    for (const target of targets) {
+      if (target.browser === "chrome" && (yield* ChromeNative.isPaired(target.path))) continue;
+      const browser = Targets.processNameOf(target.browser);
+      if (HashSet.has(checkedBrowsers, browser)) continue;
+      checkedBrowsers = HashSet.add(checkedBrowsers, browser);
+
+      if (yield* Permissions.checkBrowserRunning(browser)) {
+        runningBrowsers.push(browser);
+      }
+    }
+
+    return runningBrowsers;
+  });
+
+const browserRunningNotice = (
+  operation: Orchestration.SyncOperation,
+  browsers: readonly string[],
+): Orchestration.SyncNotice => ({
+  state: "busy",
+  operation,
+  message: browsers
+    .map((browser) => new Permissions.BrowserRunning({ browser }).message)
+    .join("\n\n"),
+});
+
 const ensurePermanentMutationSafety = (
   yamlConfig: BookmarksConfig,
   targets: readonly Targets.TargetDescriptor[],
+  operation: Orchestration.SyncOperation,
 ): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     if (targets.some((target) => Targets.requiresFullDiskAccess(target))) {
@@ -704,9 +830,11 @@ const ensurePermanentMutationSafety = (
 
     for (const target of targets) {
       const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target));
-      yield* ensureMutationSupported(yamlTree, `yaml target ${Targets.displayNameOf(target)}`);
+      yield* ensureUnambiguousPaths(yamlTree, `yaml target ${Targets.displayNameOf(target)}`);
       const browserTree = yield* Targets.readTree(target);
-      yield* ensureMutationSupported(browserTree, `${Targets.displayNameOf(target)} target`);
+      if (operation !== "push") {
+        yield* ensureUnambiguousPaths(browserTree, `${Targets.displayNameOf(target)} target`);
+      }
     }
   });
 
@@ -731,10 +859,36 @@ const runManagedOperation = (
         yamlConfig,
         config.requestedTargets,
       );
-      yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets);
-      const mutationBackup = yield* createMutationBackup(config, yamlConfig);
-
+      if (operation !== "pull") {
+        const runningBrowsers = yield* runningTargetBrowsers(selectedTargets);
+        if (runningBrowsers.length > 0) {
+          return emptySyncResult(browserRunningNotice(operation, runningBrowsers));
+        }
+      }
+      yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets, operation);
       const nextConfig = { ...config, yamlOverride: yamlConfig };
+      if (operation !== "pull") {
+        const previewConfig = { ...nextConfig, dryRun: true };
+        const preview =
+          operation === "push"
+            ? yield* runPush(previewConfig)
+            : operation === "gc"
+              ? yield* runGc(previewConfig)
+              : yield* runSync(previewConfig);
+
+        for (const targetResult of preview.targets) {
+          const wouldMutate =
+            targetResult.writeMode === "rewrite" || targetResult.applied.length > 0;
+          if (
+            wouldMutate &&
+            targetResult.target.browser === "chrome" &&
+            !(yield* ChromeNative.isPaired(targetResult.target.path))
+          ) {
+            yield* Chrome.ensureDirectMutationSafe(targetResult.target.path);
+          }
+        }
+      }
+      const mutationBackup = yield* createMutationBackup(config, yamlConfig);
 
       switch (operation) {
         case "pull":
@@ -1068,18 +1222,29 @@ const projectTree = (
 interface PlannedTargetSync {
   readonly target: Targets.TargetDescriptor;
   readonly tree: BookmarkTree;
+  readonly expectedTree: BookmarkTree;
   readonly result: TargetResult;
   readonly writePatches: readonly Patch.BookmarkPatch[];
 }
 
 const planSyncTarget = (
   target: Targets.TargetDescriptor,
-  baselineTree: BookmarkTree,
-  yamlTree: BookmarkTree,
+  originalBaselineTree: BookmarkTree,
+  originalYamlTree: BookmarkTree,
   maxAge: Duration.Duration,
 ): Effect.Effect<PlannedTargetSync, Error> =>
   Effect.gen(function* () {
+    const baselineTree =
+      target.browser === "chrome"
+        ? yield* ChromeNative.normalizeDesiredTree(target.path, originalBaselineTree)
+        : originalBaselineTree;
+    const yamlTree =
+      target.browser === "chrome"
+        ? yield* ChromeNative.normalizeDesiredTree(target.path, originalYamlTree)
+        : originalYamlTree;
     const browserTree = yield* Targets.readTree(target);
+    yield* ensureUnambiguousPaths(yamlTree, `yaml target ${Targets.displayNameOf(target)}`);
+    yield* ensureUnambiguousPaths(browserTree, `${Targets.displayNameOf(target)} target`);
     const yamlPatches = yield* Patch.generatePatches(
       baselineTree,
       yamlTree,
@@ -1144,11 +1309,19 @@ const planSyncTarget = (
       `${target.browser} target`,
       `${target.browser} target`,
     );
-    const writeMode = finalProjection.exact ? ("patches" as const) : ("rewrite" as const);
+    const adapterRequiresRewrite = yield* Targets.requiresFullRewrite(
+      target,
+      finalProjection.patches,
+    );
+    const writeMode =
+      finalProjection.exact && !adapterRequiresRewrite
+        ? ("patches" as const)
+        : ("rewrite" as const);
 
     return {
       target,
       tree: finalTree,
+      expectedTree: browserTree,
       result: {
         target,
         applied: finalProjection.patches,
@@ -1192,31 +1365,41 @@ const pullTarget = (
 
 const pushTarget = (
   target: Targets.TargetDescriptor,
-  yamlTree: BookmarkTree,
+  originalYamlTree: BookmarkTree,
   dryRun: boolean,
 ): Effect.Effect<TargetResult, Error> =>
   Effect.gen(function* () {
+    const yamlTree =
+      target.browser === "chrome"
+        ? yield* ChromeNative.normalizeDesiredTree(target.path, originalYamlTree)
+        : originalYamlTree;
     const browserTree = yield* Targets.readTree(target);
-    const finalProjection = yield* projectTree(
-      browserTree,
-      yamlTree,
-      "yaml",
-      `${target.browser} target`,
-    );
-    const writeMode = finalProjection.exact ? ("patches" as const) : ("rewrite" as const);
+    yield* ensureUnambiguousPaths(yamlTree, `yaml target ${Targets.displayNameOf(target)}`);
+    const sourceIsAmbiguous = collectAmbiguousPathIssues(browserTree).length > 0;
+    const finalProjection = sourceIsAmbiguous
+      ? undefined
+      : yield* projectTree(browserTree, yamlTree, "yaml", `${target.browser} target`);
+    const writePatches = finalProjection?.patches ?? [];
+    const adapterRequiresRewrite = finalProjection
+      ? yield* Targets.requiresFullRewrite(target, writePatches)
+      : true;
+    const writeMode =
+      finalProjection?.exact && !adapterRequiresRewrite
+        ? ("patches" as const)
+        : ("rewrite" as const);
 
     if (!dryRun) {
       if (writeMode === "rewrite") {
-        yield* Targets.writeTree(target, yamlTree);
+        yield* Targets.writeTree(target, yamlTree, browserTree);
       } else {
-        yield* Targets.applyPatches(target, finalProjection.patches);
+        yield* Targets.applyPatches(target, writePatches);
       }
       yield* verifyTargetWrite(target, yamlTree);
     }
 
     return {
       target,
-      applied: finalProjection.patches,
+      applied: writePatches,
       graveyarded: [],
       writeMode,
     };
@@ -1274,7 +1457,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     if (!config.dryRun) {
       for (const targetSync of plannedTargetSyncs) {
         if ((targetSync.result.writeMode ?? "patches") === "rewrite") {
-          yield* Targets.writeTree(targetSync.target, targetSync.tree);
+          yield* Targets.writeTree(targetSync.target, targetSync.tree, targetSync.expectedTree);
         } else {
           yield* Targets.applyPatches(targetSync.target, targetSync.writePatches);
         }
@@ -1364,10 +1547,16 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
     const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets);
 
     for (const target of selectedTargets) {
-      const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target));
+      const resolvedTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target));
+      const yamlTree =
+        target.browser === "chrome"
+          ? yield* ChromeNative.normalizeDesiredTree(target.path, resolvedTree)
+          : resolvedTree;
       const browserTree = yield* Targets.readTree(target);
       targetStatuses.push({
         target,
+        yamlDuplicates: Patch.countDuplicates(yamlTree),
+        browserDuplicates: Patch.countDuplicates(browserTree),
         yamlPatches: yield* Patch.generatePatches(
           browserTree,
           yamlTree,
@@ -1443,6 +1632,22 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
         try: () => Fs.copyFile(candidate.path, destination),
         catch: (error) =>
           new Error(`Failed to back up ${candidate.path}: ${messageFromUnknown(error)}`),
+      });
+      files.push(destination);
+    }
+
+    // Chrome may not yet have flushed its live model to the disk file above.
+    for (const target of selectedTargets) {
+      if (target.browser !== "chrome" || !(yield* ChromeNative.isPaired(target.path))) continue;
+      const tree = yield* ChromeNative.readTree(target.path);
+      const destination = Path.join(
+        backupDir,
+        `${timestamp}--${Targets.displayNameOf(target).replaceAll("/", "--")}--live-tree.json`,
+      );
+      yield* Effect.tryPromise({
+        try: () => Fs.writeFile(destination, JSON.stringify(tree, null, 2), { mode: 0o600 }),
+        catch: (error) =>
+          new Error(`Failed to back up live Chrome bookmarks: ${messageFromUnknown(error)}`),
       });
       files.push(destination);
     }

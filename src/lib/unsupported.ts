@@ -1,12 +1,56 @@
-import { Data, Effect } from "effect";
+import { Data, Effect, HashSet } from "effect";
 import type { BookmarkSection, BookmarkTree } from "./schema/__.ts";
-import { BookmarkFolder, BookmarkLeaf } from "./schema/__.ts";
+import { BookmarkFolder } from "./schema/__.ts";
 
 export interface BookmarkIssue {
-  readonly code: "duplicate-url" | "separator" | "unsupported-node";
+  readonly code: "ambiguous-path" | "separator" | "unsupported-node";
   readonly path: string;
   readonly message: string;
 }
+
+export const collectAmbiguousPathIssues = (tree: BookmarkTree): readonly BookmarkIssue[] => {
+  const issues: BookmarkIssue[] = [];
+
+  const visit = (nodes: BookmarkSection | undefined, path: string): void => {
+    let folderNames = HashSet.empty<string>();
+    for (const node of nodes ?? []) {
+      if (!BookmarkFolder.is(node)) continue;
+      const folderPath = `${path}/${node.name}`;
+      if (node.name.includes("/")) {
+        issues.push({
+          code: "ambiguous-path",
+          path: folderPath,
+          message: "Folder names containing '/' cannot be addressed safely.",
+        });
+      }
+      if (HashSet.has(folderNames, node.name)) {
+        issues.push({
+          code: "ambiguous-path",
+          path: folderPath,
+          message: `Sibling bookmark folders named "${node.name}" cannot be addressed safely.`,
+        });
+      } else {
+        folderNames = HashSet.add(folderNames, node.name);
+      }
+      visit(node.children, folderPath);
+    }
+  };
+
+  for (const sectionKey of ["bar", "menu", "reading_list", "mobile"] as const) {
+    visit(tree[sectionKey], sectionKey);
+  }
+  return issues;
+};
+
+export const ensureUnambiguousPaths = (
+  tree: BookmarkTree,
+  source: string,
+): Effect.Effect<void, UnsupportedBookmarks> => {
+  const issues = collectAmbiguousPathIssues(tree);
+  return issues.length === 0
+    ? Effect.void
+    : Effect.fail(new UnsupportedBookmarks({ source, issues }));
+};
 
 export class UnsupportedBookmarks extends Data.TaggedError("UnsupportedBookmarks")<{
   readonly source: string;
@@ -20,57 +64,10 @@ export class UnsupportedBookmarks extends Data.TaggedError("UnsupportedBookmarks
       `Cannot safely mutate bookmarks because ${this.source} contains unsupported constructs:`,
       ...this.issues.map((issue) => `- ${issue.path}: ${issue.message}`),
       "",
-      "Resolve the listed duplicate URLs or separators and retry. These constructs cannot round-trip safely yet.",
+      "Resolve the listed unsupported bookmark constructs and retry.",
     ].join("\n");
   }
 }
-
-export const collectDuplicateUrlIssues = (tree: BookmarkTree): readonly BookmarkIssue[] => {
-  const issues: BookmarkIssue[] = [];
-  const seen = new Set<string>();
-
-  const visit = (nodes: BookmarkSection | undefined, path: string): void => {
-    if (!nodes) return;
-
-    for (const node of nodes) {
-      if (BookmarkLeaf.is(node)) {
-        const leafPath = `${path}/${node.name}`;
-        if (seen.has(node.url)) {
-          issues.push({
-            code: "duplicate-url",
-            path: leafPath,
-            message: `Duplicate URL "${node.url}" is not supported; bookmark identity is URL-based so mutation would be ambiguous.`,
-          });
-          continue;
-        }
-
-        seen.add(node.url);
-        continue;
-      }
-
-      if (BookmarkFolder.is(node)) {
-        visit(node.children, `${path}/${node.name}`);
-      }
-    }
-  };
-
-  for (const sectionKey of ["bar", "menu", "reading_list", "mobile"] as const) {
-    visit(tree[sectionKey], sectionKey);
-  }
-
-  return issues;
-};
-
-export const ensureMutationSupported = (
-  tree: BookmarkTree,
-  source: string,
-): Effect.Effect<void, UnsupportedBookmarks> =>
-  Effect.gen(function* () {
-    const issues = collectDuplicateUrlIssues(tree);
-    if (issues.length > 0) {
-      return yield* Effect.fail(new UnsupportedBookmarks({ source, issues }));
-    }
-  });
 
 export const separatorIssue = (path: string, detail: string): BookmarkIssue => ({
   code: "separator",
