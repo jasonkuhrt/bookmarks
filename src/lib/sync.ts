@@ -10,7 +10,7 @@
  * only; it is never the baseline.
  */
 
-import { Array as Arr, DateTime, Duration, Effect, HashSet } from "effect";
+import { Array as Arr, DateTime, Duration, Effect, HashSet, Option } from "effect";
 import { execFile } from "node:child_process";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
@@ -1127,9 +1127,9 @@ const toTargetResult = (
  *
  * Each selected target merges its YAML and browser edits since its baseline (an empty tree
  * before its first sync, so nothing is deleted), and absorbs the result into the YAML before
- * the next target merges. Then the final YAML is saved and every target written from it, except a target
- * whose browser is open: it keeps its writes for later and takes its current tree as its
- * baseline, so its own edits, already in the YAML, are not applied twice.
+ * the next target merges. Then the final YAML is saved and every target written from it,
+ * except a target whose browser is open: it keeps its writes for later and takes its current
+ * tree as its baseline, so its own edits, already in the YAML, are not applied twice.
  */
 const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
@@ -1154,7 +1154,7 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
         (yield* ChromeNative.isPaired(target.path))
       ) {
         const fileTree = yield* Effect.option(Targets.readFileTree(target));
-        if (fileTree._tag === "Some") filesBeforeRead.set(target.path, fileTree.value);
+        if (Option.isSome(fileTree)) filesBeforeRead.set(target.path, fileTree.value);
       }
       const yamlTree = yield* YamlModule.resolveTarget(nextConfig, resolvedTargetOf(target));
       const merge = yield* mergeTarget(
