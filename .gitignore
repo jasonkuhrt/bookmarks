@@ -3,3 +3,6 @@ coverage/
 build/
 *.log
 .serena/
+
+# Session local state
+.sessions/

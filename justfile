@@ -40,7 +40,7 @@ test-integration:
   bun run test:integration
 
 coverage:
-  bun run check:cov
+  bun run test:coverage
 
 package-check:
   bun run check:package

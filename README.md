@@ -249,7 +249,6 @@ bun run check
 bun run check:lint
 bun run check:types
 bun run test:coverage
-bun run check:cov
 ```
 
 The test suite is fixture-driven and hermetic. It does not depend on live Safari or Chrome bookmark files.
