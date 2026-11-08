@@ -4,7 +4,6 @@ import { Effect, Layer, Schema } from "effect";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrate } from "../../scripts/migrate-reading-list.ts";
 import * as Baseline from "./baseline.ts";
 import * as ReadingList from "./reading-list.ts";
 import * as Chrome from "./chrome.ts";
@@ -593,25 +592,28 @@ const article = (name: string, read = false, url = "https://article.example/") =
 test("first sync after migration reconciles native overlap and deletion history; second sync is a no-op", async () => {
   const oldLeaf = leaf("Article", "https://article.example/");
   const oldTree = BookmarkTree.make({ menu: [folder("Read Later", [oldLeaf])] });
-  const migrated = migrate(
-    JSON.stringify({ version: 2, all: { reading_list: [oldLeaf] } }),
-    JSON.stringify({
-      version: 1,
-      targets: {
-        safari: { reading_list: [oldLeaf] },
-        "chrome/default": { reading_list: [oldLeaf] },
-      },
-    }),
-    { "chrome/default": oldTree },
+  const safariList = [article("Article"), article("Removed", false, "https://removed.example/")];
+  await run(
+    YamlModule.save(
+      world.yamlPath,
+      BookmarksConfig.make({ all: SharedBookmarks.make({ reading_list: [article("Article")] }) }),
+    ),
   );
-  await writeFile(world.yamlPath, migrated.yaml);
-  await run(Baseline.save(migrated.baselines));
+  await run(
+    Baseline.save({
+      safari: TargetState.make({ tree: BookmarkTree.make({}), readingList: safariList }),
+      "chrome/default": TargetState.make({ tree: oldTree, readingList: [] }),
+    }),
+  );
   await run(Chrome.writeTree(world.chromePath, oldTree));
   await writeSafari(world.safariPath, BookmarkTree.make({}));
   await run(
     Safari.writeState(
       world.safariPath,
-      TargetState.make({ tree: BookmarkTree.make({}), readingList: [article("Article")] }),
+      TargetState.make({
+        tree: BookmarkTree.make({}),
+        readingList: safariList,
+      }),
     ),
   );
   const chromeOnly = article("Chrome Only", false, "https://chrome-only.example/");
@@ -620,20 +622,20 @@ test("first sync after migration reconciles native overlap and deletion history;
     article("Chrome title", true),
   ]);
   const result = await Effect.runPromise(syncThrough(chrome.layer));
+  const expected = [chromeOnly, article("Chrome title", true)];
   expect(chrome.live().menu ?? []).toEqual([]);
-  expect(ReadingList.equal(chrome.readingList(), [chromeOnly, article("Chrome title", true)])).toBe(
-    true,
-  );
-  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual([
-    chromeOnly,
-    article("Chrome title", true),
-  ]);
+  expect(ReadingList.equal(chrome.readingList(), expected)).toBe(true);
+  expect((await readYaml()).all.reading_list).toEqual(expected);
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual(expected);
   expect(
     result.targets
       .find((entry) => entry.target.browser === "safari")
       ?.readingListChanges?.map((change) => change._tag),
-  ).toEqual(["Added", "Renamed", "MarkedRead"]);
+  ).toEqual(["Removed", "Added", "Renamed", "MarkedRead"]);
   const again = await Effect.runPromise(syncThrough(chrome.layer));
+  expect(ReadingList.equal(chrome.readingList(), expected)).toBe(true);
+  expect((await readYaml()).all.reading_list).toEqual(expected);
+  expect((await run(Safari.readState(world.safariPath))).readingList).toEqual(expected);
   expect(again.yamlChanged).toBe(false);
   expect(again.applied).toEqual([]);
   expect(again.readingListChanges).toEqual([]);
