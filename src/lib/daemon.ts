@@ -247,7 +247,7 @@ const decodeRuntimeState = (value: unknown): DaemonRuntimeState => {
     yamlPath,
     ...(value["lastError"] ? { lastError: value["lastError"] } : {}),
     ...(value["lastEventAt"] ? { lastEventAt: value["lastEventAt"] } : {}),
-    ...(value["lastOutcome"] ? { lastOutcome: value["lastOutcome"] as DaemonOutcome } : {}),
+    ...(value["lastOutcome"] ? { lastOutcome: value["lastOutcome"] } : {}),
     ...(value["lastSyncAt"] ? { lastSyncAt: value["lastSyncAt"] } : {}),
     ...(value["nextSyncAt"] ? { nextSyncAt: value["nextSyncAt"] } : {}),
   };
