@@ -33,7 +33,7 @@
     "build:clean": "tsrs --build --clean && rm -rf build",
     "prebuild": "bun run build:clean",
     "build": "tsrs --build tsconfig.build.json",
-    "test": "bun test src",
+    "test": "bun test src extension",
     "test:integration": "bun test src/bin/bookmarks.test.ts",
     "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir coverage",
     "prepack": "bun run build && bun scripts/prepack-imports.ts",
