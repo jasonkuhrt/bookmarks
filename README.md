@@ -111,7 +111,7 @@ What sync does:
 - sends destructive losers to the graveyard instead of dropping them
 - creates backups before mutation, and none when nothing changes
 - updates paired Chrome profiles through Chrome's bookmark API; writes Safari's file while Safari is closed
-- rereads and verifies the result, then records each target's new baseline
+- saves the YAML before it writes any browser, then rereads and verifies each browser it writes and records that target's new baseline at once, so a sync that fails part way leaves every baseline true to its browser
 
 The baseline lives in the state folder, never in git: a YAML edit committed before any browser saw it is applied to the browsers, not read as a deletion. Git keeps the YAML's history; sync auto-commits each change it makes.
 
@@ -145,7 +145,7 @@ On this machine, dotfiles exposes installation through `just bookmarks-chrome-se
 
 The companion extension requests only bookmarks, native messaging, local extension storage, and reconnect alarms. It has no website permissions. A private local socket connects the CLI to the native host; the host accepts only this extension's stable ID. Pairing compares the live tree against the selected profile and pins that extension instance. Multiple matching instances require the user to disambiguate.
 
-Backups include Chrome's live tree as well as its disk snapshot. An interrupted write does not advance the baseline; inspect `bookmarks status` before retrying. Bookmark changes are individual Chrome operations, not an atomic transaction.
+Backups include Chrome's live tree as well as its disk snapshot. An interrupted write does not advance that target's baseline: the YAML already holds the merge, so the next sync finishes the write. Inspect `bookmarks status` before retrying by hand. Bookmark changes are individual Chrome operations, not an atomic transaction.
 
 ## CLI
 

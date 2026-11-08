@@ -166,6 +166,35 @@ const readSafari = () => run(Safari.readBookmarks(world.safariPath));
 const readYaml = () => run(YamlModule.load(world.yamlPath));
 const syncNow = () => run(Sync.sync({ yamlPath: world.yamlPath }));
 
+/**
+ * Chrome paired through a stand-in for its extension, holding `start` live. `onRequest` runs
+ * before each request the sync makes, and fails it by returning an error.
+ */
+const pairedChrome = (
+  start: BookmarkTree,
+  onRequest: (operation: "snapshot" | "reconcile") => Error | undefined = () => undefined,
+) => {
+  let live = BookmarkTree.make({ bar: start.bar ?? [], menu: start.menu ?? [], mobile: [] });
+  const layer = Layer.succeed(ChromeBridgeRuntime, {
+    loadBindings: Effect.succeed([{ profilePath: world.chromePath, instanceId: "instance" }]),
+    saveBindings: () => Effect.die("Unexpected binding write"),
+    instances: Effect.succeed(["instance"]),
+    request: (_id, request) =>
+      Effect.suspend(() => {
+        const decoded = Schema.decodeUnknownSync(NativeRequestSchema)(request);
+        const failure = onRequest(decoded.operation);
+        if (failure) return Effect.fail(failure);
+        if (decoded.operation === "reconcile") live = decoded.tree;
+        return Effect.succeed({ id: decoded.id, ok: true as const, value: live });
+      }),
+    launch: () => Effect.die("Unexpected browser launch"),
+  });
+  return { layer, live: () => live };
+};
+
+const syncThrough = (layer: Layer.Layer<never>) =>
+  Sync.sync({ yamlPath: world.yamlPath }).pipe(Effect.provide(layer));
+
 describe("sync across browsers", () => {
   test("an edit in Chrome to a shared folder reaches Safari and stays in the shared bar", async () => {
     const start = BookmarkTree.make({ bar: [folder("Build", [leaf("A")])] });
@@ -376,6 +405,34 @@ describe("sync across browsers", () => {
 
     expect(names((await readChrome()).bar)).toEqual(["Empty", "A", "B"]);
     expect(names((await readYaml()).all.bar)).toEqual(["Empty", "A", "B"]);
+  });
+
+  test("a sync that fails after writing one browser leaves no baseline that duplicates a replaced bookmark", async () => {
+    const docs = (host: string) => leaf("Docs", `https://${host}/`);
+    const yamlWith = (host: string) =>
+      run(YamlModule.save(world.yamlPath, sharedConfig(BookmarkTree.make({ bar: [docs(host)] }))));
+    const start = BookmarkTree.make({ bar: [docs("old.example")] });
+    await yamlWith("old.example");
+    await writeSafari(world.safariPath, start);
+    let chromeFails = false;
+    const chrome = pairedChrome(start, (operation) =>
+      chromeFails && operation === "reconcile" ? new Error("Chrome closed mid-write") : undefined,
+    );
+    await run(syncThrough(chrome.layer));
+
+    await yamlWith("new.example");
+    chromeFails = true;
+    const failure = await Effect.runPromise(Effect.flip(syncThrough(chrome.layer)));
+    expect(failure.message).toContain("Chrome closed mid-write");
+    expect((await readSafari()).bar).toEqual([docs("new.example")]);
+
+    chromeFails = false;
+    await yamlWith("corrected.example");
+    await run(syncThrough(chrome.layer));
+
+    expect((await readYaml()).all.bar).toEqual([docs("corrected.example")]);
+    expect((await readSafari()).bar).toEqual([docs("corrected.example")]);
+    expect(chrome.live().bar).toEqual([docs("corrected.example")]);
   });
 
   test("a YAML edit made while a sync runs is never overwritten", async () => {

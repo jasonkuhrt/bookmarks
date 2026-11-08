@@ -4,9 +4,10 @@
  * Each target (Safari, a Chrome profile) is merged three ways: its baseline (the tree it held
  * after its last sync), its tree as bookmarks.yaml resolves it, and its tree in the browser.
  * Targets merge one after another, each absorbing its result into the YAML's layers, so an
- * edit in one browser reaches the YAML before the next target merges. The final YAML is then
- * written to every browser, and each target's baseline becomes what it now holds. Conflict
- * losers go to the graveyard. Git keeps the YAML's history only; it is never the baseline.
+ * edit in one browser reaches the YAML before the next target merges. The final YAML is saved,
+ * then written to every browser, and each target's baseline becomes what it holds as soon as
+ * its write is verified. Conflict losers go to the graveyard. Git keeps the YAML's history
+ * only; it is never the baseline.
  */
 
 import { Array as Arr, DateTime, Duration, Effect, HashSet } from "effect";
@@ -905,13 +906,21 @@ const saveConfig = (yamlPath: string, config: BookmarksConfig): Effect.Effect<vo
     yield* gitAutoCommit(yamlPath);
   });
 
-const saveBaselines = (
-  previous: Baseline.Baselines,
-  next: Baseline.Baselines,
-): Effect.Effect<void, Error> =>
+/**
+ * Record one target's baseline as soon as the target holds `tree`, so a later target's failure
+ * can't leave it reading its own write as a browser edit. Returns the baselines now saved.
+ */
+const saveBaseline = (
+  saved: Baseline.Baselines,
+  key: string,
+  tree: BookmarkTree,
+): Effect.Effect<Baseline.Baselines, Error> =>
   Effect.gen(function* () {
-    if ((yield* Baseline.render(previous)) === (yield* Baseline.render(next))) return;
-    yield* Baseline.save(next);
+    const next = { ...saved, [key]: tree };
+    if ((yield* Baseline.render(saved)) !== (yield* Baseline.render(next))) {
+      yield* Baseline.save(next);
+    }
+    return next;
   });
 
 /** The tree a target should hold for a config: Chrome's in the form Chrome stores. */
@@ -1102,7 +1111,7 @@ const toTargetResult = (
  *
  * Each selected target merges its YAML and browser edits since its baseline (an empty tree
  * before its first sync, so nothing is deleted), and absorbs the result into the YAML before
- * the next target merges. Then every target is written from the final YAML, except a target
+ * the next target merges. Then the final YAML is saved and every target written from it, except a target
  * whose browser is open: it keeps its writes for later and takes its current tree as its
  * baseline, so its own edits, already in the YAML, are not applied twice.
  */
@@ -1151,22 +1160,21 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
 
     if (!config.dryRun) {
       yield* ensureYamlUnchanged(config.yamlPath, yamlTextAtLoad);
-      const nextBaselines: Record<string, BookmarkTree> = { ...baselines };
+      // The YAML records the merge before any browser is written. A target whose write then
+      // fails keeps its old baseline, so the next sync reads the YAML as ahead of it, and a
+      // target already written never reads the YAML's next edit against a stale baseline.
+      if (yamlChanged) yield* saveConfig(config.yamlPath, nextConfig);
+      let savedBaselines = baselines;
       for (const plan of plans) {
         const key = Targets.keyOf(plan.target);
-        if (readOnlyTargets.has(key)) {
-          nextBaselines[key] = plan.browserTree;
-          continue;
+        let settledTree = plan.browserTree;
+        if (!readOnlyTargets.has(key)) {
+          yield* Effect.log(`Writing ${Targets.displayNameOf(plan.target)}...`);
+          yield* executeWrite(plan);
+          settledTree = plan.desiredTree;
         }
-        yield* Effect.log(`Writing ${Targets.displayNameOf(plan.target)}...`);
-        yield* executeWrite(plan);
-        nextBaselines[key] = plan.desiredTree;
+        savedBaselines = yield* saveBaseline(savedBaselines, key, settledTree);
       }
-      if (yamlChanged) {
-        yield* ensureYamlUnchanged(config.yamlPath, yamlTextAtLoad);
-        yield* saveConfig(config.yamlPath, nextConfig);
-      }
-      yield* saveBaselines(baselines, nextBaselines);
     }
 
     const targetResults = plans.map((plan, index) =>
@@ -1188,8 +1196,7 @@ const pushTrees = (
   selectedTargets: readonly Targets.TargetDescriptor[],
 ): Effect.Effect<readonly TargetResult[], Error> =>
   Effect.gen(function* () {
-    const baselines = yield* Baseline.load();
-    const nextBaselines: Record<string, BookmarkTree> = { ...baselines };
+    let savedBaselines = yield* Baseline.load();
     const results: TargetResult[] = [];
 
     for (const target of selectedTargets) {
@@ -1200,12 +1207,11 @@ const pushTrees = (
       const plan = yield* planWrite(target, browserTree, desiredTree);
       if (!config.dryRun) {
         yield* executeWrite(plan);
-        nextBaselines[Targets.keyOf(target)] = desiredTree;
+        savedBaselines = yield* saveBaseline(savedBaselines, Targets.keyOf(target), desiredTree);
       }
       results.push(toTargetResult(plan));
     }
 
-    if (!config.dryRun) yield* saveBaselines(baselines, nextBaselines);
     return results;
   });
 
@@ -1399,9 +1405,10 @@ const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       cleanedConfig,
       config.requestedTargets,
     );
-    const targetResults = yield* pushTrees(config, cleanedConfig, selectedTargets);
     const yamlChanged = (yield* renderConfig(cleanedConfig)) !== (yield* renderConfig(yamlConfig));
+    // As in a sync, the YAML is saved before any browser, so each browser's baseline matches it.
     if (!config.dryRun && yamlChanged) yield* saveConfig(config.yamlPath, cleanedConfig);
+    const targetResults = yield* pushTrees(config, cleanedConfig, selectedTargets);
 
     return {
       applied: targetResults.flatMap((result) => result.applied),
