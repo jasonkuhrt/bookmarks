@@ -30,9 +30,9 @@
   "scripts": {
     "generate:icons": "bash scripts/generate-icons.sh",
     "build:chrome-extension": "bun scripts/build-chrome-extension.ts",
-    "build:clean": "tsgo --build --clean && rm -rf build",
+    "build:clean": "tsrs --build --clean && rm -rf build",
     "prebuild": "bun run build:clean",
-    "build": "tsgo --build tsconfig.build.json",
+    "build": "tsrs --build tsconfig.build.json",
     "test": "bun test src",
     "test:integration": "bun test src/bin/bookmarks.test.ts",
     "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir coverage",
@@ -40,11 +40,11 @@
     "postpack": "bun scripts/prepack-imports.ts --restore",
     "fix": "bun run fix:format && bun run fix:lint",
     "fix:format": "oxfmt --write",
-    "fix:lint": "oxlint --type-aware --fix-dangerously --deny-warnings",
+    "fix:lint": "OXLINT_TSGOLINT_PATH=./node_modules/.bin/tsrs-lint oxlint --type-aware --fix-dangerously --deny-warnings",
     "check": "bun run check:format && bun run check:lint && bun run check:types && bun run test && bun run check:package && bun run check:exports && bun run check:ci",
     "check:format": "oxfmt --check",
-    "check:lint": "oxlint --type-aware --report-unused-disable-directives --deny-warnings",
-    "check:types": "tsgo",
+    "check:lint": "OXLINT_TSGOLINT_PATH=./node_modules/.bin/tsrs-lint oxlint --type-aware --report-unused-disable-directives --deny-warnings",
+    "check:types": "tsrs --noEmit --fast",
     "check:package": "bun run build && publint run --strict",
     "check:exports": "attw --pack . --profile esm-only",
     "check:ci": "actionlint",
@@ -64,12 +64,10 @@
     "@tsconfig/strictest": "2.0.8",
     "@types/bun": "^1.3.10",
     "@types/node": "25.3.5",
-    "@typescript/native-preview": "7.0.0-dev.20260306.1",
     "lint-staged": "^16.4.0",
     "oxfmt": "^0.36.0",
-    "oxlint": "^1.51.0",
-    "oxlint-tsgolint": "^0.16.0",
+    "oxlint": "1.51.0",
     "publint": "^0.3.18",
-    "typescript": "5.9.3"
+    "tsrs": "0.23.0-ts7.1.0-beta"
   }
 }

@@ -2,10 +2,6 @@
  * @type {import("lint-staged").Configuration}
  */
 export default {
-  "*.{js,jsx,ts,tsx,mjs,cjs,mts,cts}": [
-    "oxfmt --write",
-    "oxlint --type-aware --fix-dangerously --deny-warnings --",
-    "oxfmt --write",
-  ],
+  "*.{js,jsx,ts,tsx,mjs,cjs,mts,cts}": ["oxfmt --write", "bun run fix:lint --", "oxfmt --write"],
   "*.{json,md}": ["oxfmt --write"],
 };

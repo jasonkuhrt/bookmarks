@@ -4,6 +4,7 @@
     // Package
     "module": "NodeNext",
     "moduleResolution": "nodenext",
+    "types": ["bun", "node"],
 
     // DX
     "tsBuildInfoFile": "node_modules/.cache/.tsbuildinfo",
