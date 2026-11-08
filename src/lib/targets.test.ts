@@ -277,7 +277,7 @@ describe("targets", () => {
           { browser: "chrome", profile: "default", path: chromePath, enabled: true },
           [
             Patch.Add({
-              url: "https://targets.example",
+              url: "https://targets.example/",
               name: "Targets Test",
               path: "bar",
               date: DateTime.unsafeMake("2026-03-07T00:00:00.000Z"),
@@ -295,7 +295,7 @@ describe("targets", () => {
       );
       expect(
         (tree.bar ?? []).some(
-          (node) => BookmarkLeaf.is(node) && node.url === "https://targets.example",
+          (node) => BookmarkLeaf.is(node) && node.url === "https://targets.example/",
         ),
       ).toBe(true);
 
@@ -303,7 +303,7 @@ describe("targets", () => {
         Targets.writeTree(
           { browser: "chrome", profile: "default", path: chromePath, enabled: true },
           BookmarkTree.make({
-            bar: [new BookmarkLeaf({ name: "Rewritten", url: "https://rewrite.example" })],
+            bar: [new BookmarkLeaf({ name: "Rewritten", url: "https://rewrite.example/" })],
           }),
         ),
       );
@@ -326,7 +326,7 @@ describe("targets", () => {
         run(
           Targets.applyPatches({ browser: "firefox", path: chromePath, enabled: true }, [
             Patch.Remove({
-              url: "https://rewrite.example",
+              url: "https://rewrite.example/",
               name: "Rewritten",
               path: "bar",
               date: DateTime.unsafeMake("2026-03-07T00:00:00.000Z"),

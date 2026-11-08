@@ -20,7 +20,7 @@ export const defaultSchemaPath = (): string =>
   process.env["BOOKMARKS_SCHEMA_PATH"] ?? join(defaultConfigDir(), "bookmarks.schema.json");
 
 export const defaultSyncBaselinePath = (): string =>
-  process.env["BOOKMARKS_SYNC_BASELINE_PATH"] ?? join(defaultStateDir(), "sync-baseline.yaml");
+  process.env["BOOKMARKS_SYNC_BASELINE_PATH"] ?? join(defaultStateDir(), "sync-baselines.json");
 
 export const defaultBackupDir = (): string =>
   process.env["BOOKMARKS_BACKUP_DIR"] ?? join(defaultStateDir(), "backups");

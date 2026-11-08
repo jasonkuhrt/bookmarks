@@ -4,21 +4,38 @@ import * as Chrome from "./chrome.ts";
 import type { BookmarkTree } from "./schema/__.ts";
 import { ChromeBridgeRuntime } from "./chrome-native-runtime.ts";
 import { NativeResponseSchema, protocolVersion } from "./chrome-native-protocol.ts";
-import { canonicalTree } from "./chrome-native-tree.ts";
+import * as Canonical from "./canonical.ts";
 
 const normalizeTree = (tree: BookmarkTree) =>
   JSON.stringify({ bar: tree.bar ?? [], menu: tree.menu ?? [], mobile: tree.mobile ?? [] });
 export const treesEqual = (left: BookmarkTree, right: BookmarkTree) =>
   normalizeTree(left) === normalizeTree(right);
 
+const webUrlsIn = (nodes: BookmarkTree["bar"]): readonly string[] =>
+  (nodes ?? []).flatMap((node) =>
+    node._tag === "BookmarkLeaf"
+      ? /^https?:/i.test(node.url)
+        ? [node.url]
+        : []
+      : webUrlsIn(node.children),
+  );
+
+const isParseable = (url: string): boolean => URL.canParse(url);
+
+/** Chrome refuses an unparseable web URL, so a tree bound for Chrome fails before any write. */
 export const normalizeDesiredTree = (profilePath: string, tree: BookmarkTree) =>
   Effect.gen(function* () {
     if (!(yield* isPaired(profilePath))) return tree;
-    return yield* Effect.try({
-      try: () => canonicalTree(tree),
-      catch: () =>
-        new Error("Chrome bookmarks contain an invalid HTTP(S) URL. Correct it before syncing."),
-    });
+    const invalid = [tree.bar, tree.menu, tree.reading_list, tree.mobile]
+      .flatMap(webUrlsIn)
+      .find((url) => !isParseable(url));
+    if (invalid !== undefined)
+      return yield* Effect.fail(
+        new Error(
+          `Chrome bookmarks contain an invalid HTTP(S) URL (${invalid}). Correct it before syncing.`,
+        ),
+      );
+    return Canonical.canonicalTree(tree);
   });
 
 export const bindingFor = (profilePath: string) =>

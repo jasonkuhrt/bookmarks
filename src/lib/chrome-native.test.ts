@@ -141,8 +141,17 @@ test("paired Targets routes reads and full rewrites through the live bridge with
     expect(initial).toEqual(before);
     expect(requiresRewrite).toBe(true);
     expect(final).toEqual(after);
-    expect(operations).toEqual(["snapshot", "reconcile", "snapshot"]);
+    // The write takes a fresh snapshot, so a bookmark edited after planning is never overwritten.
+    expect(operations).toEqual(["snapshot", "snapshot", "reconcile", "snapshot"]);
     expect(await readFile(bookmarksPath, "utf8")).toBe(diskContents);
+
+    liveTree = before;
+    expect(
+      await rejectionOf(
+        Effect.runPromise(Targets.writeTree(target, before, after).pipe(Effect.provide(layer))),
+      ),
+    ).toContain("changed after the sync planned its write");
+    expect(operations.at(-1)).toBe("snapshot");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

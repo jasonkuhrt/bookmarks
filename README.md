@@ -43,7 +43,7 @@ Important paths:
 
 - `~/.config/bookmarks/bookmarks.yaml`
 - `~/.config/bookmarks/bookmarks.schema.json`
-- `~/.local/state/bookmarks/sync-baseline.yaml`
+- `~/.local/state/bookmarks/sync-baselines.json`
 - `~/.local/state/bookmarks/backups/`
 - `~/.local/state/bookmarks/runtime/`
 
@@ -52,7 +52,7 @@ Relevant commands bootstrap what they can safely bootstrap:
 - they create the managed config and state directories if they do not exist
 - they mirror the repo JSON schema into the managed schema path
 - write commands create `bookmarks.yaml` when they first save it
-- non-git syncs maintain `sync-baseline.yaml` automatically so sync remains incremental without git
+- syncs keep `sync-baselines.json`: the tree each target held after its last sync, which the next merge diffs against
 
 The YAML file can reference the adjacent schema with:
 
@@ -106,15 +106,22 @@ What sync does:
 
 - reads the managed `bookmarks.yaml`
 - discovers Safari once and all discovered Chrome profiles
-- merges YAML and browser changes
+- merges each target three ways: its baseline, the YAML, and the browser
+- writes each target's result back into the YAML layer it came from, so an edit in one browser to a shared folder lands in `all` and reaches every other browser
 - sends destructive losers to the graveyard instead of dropping them
-- creates backups before mutation
+- creates backups before mutation, and none when nothing changes
 - updates paired Chrome profiles through Chrome's bookmark API; writes Safari's file while Safari is closed
-- rereads and verifies the result
+- rereads and verifies the result, then records each target's new baseline
+
+The baseline lives in the state folder, never in git: a YAML edit committed before any browser saw it is applied to the browsers, not read as a deletion. Git keeps the YAML's history; sync auto-commits each change it makes.
+
+Every tree is compared in one canonical form, Chrome's: web URLs in their WHATWG form, a `'` in a bookmarklet's query as `%27`, and line breaks in titles as spaces. A bookmark stored differently by Safari and Chrome compares equal.
+
+Chrome has no reading list an extension can write, so `all.reading_list` lives in a **Read Later** folder in Chrome's Other Bookmarks. Moving that folder within Other Bookmarks is kept; editing its links edits the shared reading list.
 
 The same URL can appear in multiple folders or more than once in a folder. Sync preserves every placement, and `status` reports duplicate counts as information. You do not need to remove duplicates before syncing.
 
-Paired Chrome stays open during sync. The CLI opens its profile if needed. Safari and unpaired file-backed targets must be closed; the daemon retains queued work while those browsers are open.
+Paired Chrome stays open during sync. The CLI opens its profile if needed. Safari and unpaired file-backed targets are read while open, and their changes reach the YAML and the other browsers; the writes they need wait until they quit (`waiting` in `sync --json`). `sync --from-yaml` and `gc` write every target, so they defer while such a browser is open.
 
 If sync hits ambiguous or unsupported semantics, it stops before mutation and returns a clear error instead of silently mangling data.
 
@@ -180,11 +187,13 @@ Notes:
 
 What it does:
 
-- watches `bookmarks.yaml`
-- queues a sync 60 seconds after the last file edit instead of syncing on every keystroke
+- syncs once when it starts, so changes made while it was down are not left waiting for an edit
+- watches `bookmarks.yaml` and every discovered browser's bookmark file (Safari's `Bookmarks.plist`, each Chrome profile's `Bookmarks`)
+- queues a sync 60 seconds after the last edit to any of them instead of syncing on every keystroke
 - updates the machine-managed header at the top of `bookmarks.yaml` with watcher state
-- uses the normal `bookmarks status` check before syncing, so no-op edits do not create sync backups
-- retains queued changes while a file-backed browser is open and retries when it closes; paired Chrome can stay open
+- runs `bookmarks sync`, which makes no backup when nothing changes
+- when a sync leaves writes for an open browser, waits (`phase=waiting`) and syncs again once that browser quits; paired Chrome can stay open
+- retries a failed sync with backoff, up to every 5 minutes
 
 Manual immediate sync stays explicit:
 

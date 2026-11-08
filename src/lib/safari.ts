@@ -10,6 +10,7 @@ import { parse } from "@plist/binary.parse";
 import { serialize } from "@plist/binary.serialize";
 import { Effect, Schema } from "effect";
 import { rename } from "node:fs/promises";
+import * as Canonical from "./canonical.ts";
 import * as Patch from "./patch.ts";
 import type { BookmarkNode, BookmarkSection } from "./schema/__.ts";
 import { BookmarkFolder, BookmarkLeaf, BookmarkTree } from "./schema/__.ts";
@@ -67,12 +68,35 @@ const ensurePlistChildren = (dict: PlistDict): PlistValue[] => {
   return nextChildren;
 };
 
+/**
+ * Rewrite every bookmark's URL and title to the engine's canonical form in place, so lookups
+ * by URL and name match the canonical trees patches come from, and a write stores that form.
+ */
+const canonicalizePlistNodes = (nodes: readonly PlistValue[]): void => {
+  for (const node of nodes) {
+    if (!isPlistDict(node)) continue;
+    const url = plistString(node, "URLString");
+    if (url !== undefined) node["URLString"] = Canonical.canonicalUrl(url);
+    const uriDictionary = plistDict(node, "URIDictionary");
+    const leafTitle = uriDictionary ? plistString(uriDictionary, "title") : undefined;
+    if (uriDictionary && leafTitle !== undefined) {
+      uriDictionary["title"] = Canonical.canonicalName(leafTitle);
+    }
+    const folderTitle = plistString(node, "Title");
+    if (folderTitle !== undefined) node["Title"] = Canonical.canonicalName(folderTitle);
+    const children = node["Children"];
+    if (Array.isArray(children)) canonicalizePlistNodes(children);
+  }
+};
+
 const parsePlistRoot = (data: ArrayBuffer, plistPath: string): PlistDict => {
   try {
     const root = parse(data);
     if (!isPlistDict(root)) {
       throw new Error("Parsed plist root is not a dictionary.");
     }
+    const children = root["Children"];
+    if (Array.isArray(children)) canonicalizePlistNodes(children);
     return root;
   } catch (error) {
     throw new Error(

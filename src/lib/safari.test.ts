@@ -158,7 +158,7 @@ describe("readBookmarks", () => {
               Children: [
                 {
                   WebBookmarkType: "WebBookmarkTypeLeaf",
-                  URLString: "https://first.example",
+                  URLString: "https://first.example/",
                   URIDictionary: { title: "First" },
                 },
                 {
@@ -172,14 +172,14 @@ describe("readBookmarks", () => {
                   Children: [
                     {
                       WebBookmarkType: "WebBookmarkTypeLeaf",
-                      URLString: "https://inside.example",
+                      URLString: "https://inside.example/",
                       URIDictionary: { title: "Inside" },
                     },
                   ],
                 },
                 {
                   WebBookmarkType: "WebBookmarkTypeLeaf",
-                  URLString: "https://last.example",
+                  URLString: "https://last.example/",
                   URIDictionary: { title: "Last" },
                 },
               ],
@@ -415,7 +415,7 @@ describe("applyPatches", () => {
 
   test("Update patches claim duplicate sources before swapping names", async () => {
     const { dir, path } = await setupCopy();
-    const url = "https://duplicate-swap.example";
+    const url = "https://duplicate-swap.example/";
     try {
       await run(
         Safari.writeTree(
@@ -462,7 +462,7 @@ describe("requiresFullRewrite", () => {
         await run(
           Safari.requiresFullRewrite(path, [
             Patch.Add({
-              url: "https://new-menu.example",
+              url: "https://new-menu.example/",
               name: "New menu item",
               path: "menu",
               date: now,
@@ -481,24 +481,29 @@ describe("writeTree", () => {
     try {
       const desired = BookmarkTree.make({
         bar: [
-          BookmarkLeaf.make({ name: "Top Link", url: "https://top.example" }),
+          BookmarkLeaf.make({ name: "Top Link", url: "https://top.example/" }),
           BookmarkFolder.make({
             name: "Favorites Folder",
-            children: [BookmarkLeaf.make({ name: "Docs", url: "https://docs.example" })],
+            children: [BookmarkLeaf.make({ name: "Docs", url: "https://docs.example/" })],
           }),
           BookmarkFolder.make({ name: "Empty", children: [] }),
         ],
         menu: [
-          BookmarkLeaf.make({ name: "Menu Link", url: "https://menu.example" }),
+          BookmarkLeaf.make({ name: "Menu Link", url: "https://menu.example/" }),
           BookmarkFolder.make({
             name: "Loose Folder",
             children: [
-              BookmarkLeaf.make({ name: "Loose Folder Link", url: "https://loose-folder.example" }),
+              BookmarkLeaf.make({
+                name: "Loose Folder Link",
+                url: "https://loose-folder.example/",
+              }),
             ],
           }),
-          BookmarkLeaf.make({ name: "Loose Leaf", url: "https://loose.example" }),
+          BookmarkLeaf.make({ name: "Loose Leaf", url: "https://loose.example/" }),
         ],
-        reading_list: [BookmarkLeaf.make({ name: "Reading Item", url: "https://reading.example" })],
+        reading_list: [
+          BookmarkLeaf.make({ name: "Reading Item", url: "https://reading.example/" }),
+        ],
       });
 
       await run(Safari.writeTree(path, desired));
@@ -512,7 +517,7 @@ describe("writeTree", () => {
 
   test("never reuses a native UUID when the desired tree reuses one duplicate leaf object", async () => {
     const { dir, path } = await setupFixture();
-    const url = "https://shared-object.example";
+    const url = "https://shared-object.example/";
 
     try {
       await run(
@@ -548,6 +553,61 @@ describe("writeTree", () => {
         throw new Error("Expected Safari bookmark leaves");
       }
       expect(first["WebBookmarkUUID"]).not.toBe(second["WebBookmarkUUID"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("canonical form", () => {
+  test("a bookmark Safari stores as typed is read, matched and rewritten in the canonical form", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-canonical-"));
+    const path = join(dir, "Bookmarks.plist");
+    const typed = "javascript:go('https://x.example/?u='+1)";
+    const canonical = "javascript:go('https://x.example/?u=%27+1)";
+
+    try {
+      await Bun.write(
+        path,
+        serialize({
+          Children: [
+            {
+              WebBookmarkType: "WebBookmarkTypeList",
+              Title: "BookmarksBar",
+              Children: [
+                {
+                  WebBookmarkType: "WebBookmarkTypeLeaf",
+                  URLString: typed,
+                  URIDictionary: { title: "Save\nit" },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      expect((await run(Safari.readBookmarks(path))).bar).toEqual([
+        BookmarkLeaf.make({ name: "Save it", url: canonical }),
+      ]);
+
+      await run(
+        Safari.applyPatches(path, [
+          Patch.Update({
+            url: canonical,
+            oldName: "Save it",
+            newName: "Saved",
+            fromPath: "bar",
+            toPath: "bar",
+            date: DateTime.unsafeNow(),
+          }),
+        ]),
+      );
+
+      const root = parse(await Bun.file(path).arrayBuffer());
+      expect(JSON.stringify(root)).toContain(JSON.stringify(canonical).slice(1, -1));
+      expect((await run(Safari.readBookmarks(path))).bar).toEqual([
+        BookmarkLeaf.make({ name: "Saved", url: canonical }),
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

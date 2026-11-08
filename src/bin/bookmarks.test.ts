@@ -161,7 +161,7 @@ const readFirstObject = (items: readonly unknown[], label: string): Record<strin
 const writeChromeBookmarks = async (
   path: string,
   title = "Top Link",
-  url = "https://top.example",
+  url = "https://top.example/",
 ): Promise<void> => {
   await Bun.write(
     path,
@@ -264,7 +264,7 @@ describe("bookmarks CLI", () => {
 
       const config = BookmarksConfig.make({
         all: new BookmarkTree({
-          bar: [new BookmarkLeaf({ name: "Docs", url: "https://docs.example" })],
+          bar: [new BookmarkLeaf({ name: "Docs", url: "https://docs.example/" })],
         }),
         chrome: ChromeBookmarks.make({
           profiles: {
@@ -328,7 +328,7 @@ describe("bookmarks CLI", () => {
       expect(schema).toContain('"$schema"');
 
       const yamlAfter = await readFile(yamlPath, "utf-8");
-      expect(yamlAfter).toContain("https://docs.example");
+      expect(yamlAfter).toContain("https://docs.example/");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -344,8 +344,8 @@ describe("bookmarks CLI", () => {
 
     try {
       await writeChromeDataDir(chromeDataDir, [
-        { directory: "Default", title: "Default", url: "https://default.example" },
-        { directory: "Profile 1", title: "Loose", url: "https://loose.example" },
+        { directory: "Default", title: "Default", url: "https://default.example/" },
+        { directory: "Profile 1", title: "Loose", url: "https://loose.example/" },
       ]);
       await run(
         YamlModule.save(
@@ -356,7 +356,7 @@ describe("bookmarks CLI", () => {
                 new BookmarkFolder({
                   name: "Organized",
                   children: [
-                    new BookmarkLeaf({ name: "Canonical", url: "https://canonical.example" }),
+                    new BookmarkLeaf({ name: "Canonical", url: "https://canonical.example/" }),
                   ],
                 }),
               ],
@@ -458,7 +458,7 @@ describe("bookmarks CLI", () => {
       expect(readString(parsedSync, "command")).toBe("sync");
       const backup = expectPresent(readNullableObject(parsedSync, "backup"), "Expected backup");
       expect(readStringArray(backup, "files")).toHaveLength(1);
-      expect(readStringArray(backup, "skipped")).toEqual(["yaml"]);
+      expect(readStringArray(backup, "skipped")).toEqual(["yaml", "sync baselines"]);
 
       const yamlAfter = await readFile(yamlPath, "utf-8");
       expect(yamlAfter).toContain("Top Link");
@@ -467,7 +467,7 @@ describe("bookmarks CLI", () => {
     }
   });
 
-  test("sync --json defers while browsers are open and backs up before syncing once closed", async () => {
+  test("sync --json merges an open browser into the YAML and leaves its file until it closes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-cli-sync-"));
     const yamlPath = join(dir, "bookmarks.yaml");
     const chromeDataDir = join(dir, "Chrome");
@@ -492,7 +492,9 @@ describe("bookmarks CLI", () => {
       );
 
       const config = BookmarksConfig.make({
-        all: new BookmarkTree({}),
+        all: new BookmarkTree({
+          menu: [new BookmarkLeaf({ name: "From YAML", url: "https://from-yaml.example/" })],
+        }),
         chrome: ChromeBookmarks.make({
           profiles: {
             default: ChromeProfileBookmarks.make({}),
@@ -521,34 +523,31 @@ describe("bookmarks CLI", () => {
 
       const yamlBefore = await readFile(yamlPath, "utf-8");
       const chromeBefore = await readFile(chromePath, "utf-8");
-      const deferredJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
-      expect(deferredJson.exitCode).toBe(0);
-      const deferred = parseJsonObject(deferredJson.stdout);
-      const notice = expectPresent(
-        readOptionalNullableObject(deferred, "orchestration"),
-        "Expected deferred sync notice",
-      );
-      expect(readString(notice, "state")).toBe("busy");
-      expect(readString(notice, "message")).toContain("Google Chrome");
-      expect(readNullableObject(deferred, "backup")).toBeNull();
-      expect(await readFile(yamlPath, "utf-8")).toBe(yamlBefore);
+      const openJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], cliEnv);
+      expect(openJson.exitCode).toBe(0);
+      const open = parseJsonObject(openJson.stdout);
+      expect(readOptionalNullableObject(open, "orchestration")).toBeNull();
+      expect(JSON.stringify(open["waiting"])).toContain('"browser":"Google Chrome"');
+      const openBackup = expectPresent(readNullableObject(open, "backup"), "Expected backup");
+      expect(readString(openBackup, "backupDir")).toBe(backupDir);
+      expect(readStringArray(openBackup, "files")).toHaveLength(2);
+      // The open browser's bookmarks reach the YAML; its own file is left for later.
+      const yamlAfter = await readFile(yamlPath, "utf-8");
+      expect(yamlAfter).not.toBe(yamlBefore);
+      expect(yamlAfter).toContain("Top Link");
       expect(await readFile(chromePath, "utf-8")).toBe(chromeBefore);
 
-      const syncJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], {
+      const closedJson = await runCommand(dir, [bunBinary, cliPath, "sync", "--json"], {
         ...cliEnv,
         BOOKMARKS_FORCE_BROWSER_RUNNING: "",
       });
-      expect(syncJson.exitCode).toBe(0);
-
-      const parsedSync = parseJsonObject(syncJson.stdout);
-      expect(readOptionalNullableObject(parsedSync, "orchestration")).toBeNull();
-      const backup = expectPresent(readNullableObject(parsedSync, "backup"), "Expected backup");
-      expect(readString(backup, "backupDir")).toBe(backupDir);
-      expect(readStringArray(backup, "files")).toHaveLength(2);
-      expect(readStringArray(backup, "skipped")).toHaveLength(0);
-
-      const yamlAfter = await readFile(yamlPath, "utf-8");
-      expect(yamlAfter).toContain("Top Link");
+      expect(closedJson.exitCode).toBe(0);
+      const closed = parseJsonObject(closedJson.stdout);
+      expect(readOptionalNullableObject(closed, "orchestration")).toBeNull();
+      expect(closed["waiting"]).toEqual([]);
+      expect(readNullableObject(closed, "backup")).not.toBeNull();
+      expect(await readFile(yamlPath, "utf-8")).toBe(yamlAfter);
+      expect(await readFile(chromePath, "utf-8")).toContain("https://from-yaml.example/");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -719,8 +718,8 @@ describe("bookmarks CLI", () => {
 
     try {
       await writeChromeDataDir(chromeDataDir, [
-        { directory: "Default", title: "Top Link", url: "https://top.example" },
-        { directory: "Profile 1", title: "Work Link", url: "https://work.example" },
+        { directory: "Default", title: "Top Link", url: "https://top.example/" },
+        { directory: "Profile 1", title: "Work Link", url: "https://work.example/" },
       ]);
 
       const config = BookmarksConfig.make({

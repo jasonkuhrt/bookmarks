@@ -1,22 +1,26 @@
 /**
  * Core sync engine.
  *
- * Pipeline: sync baseline -> three-way diff -> resolve conflicts -> apply -> save -> baseline advance.
- * When bookmarks.yaml is tracked by git, HEAD is the sync baseline. Otherwise we keep
- * a managed sync baseline in state storage so sync remains incremental outside git.
- * Produces graveyard entries for conflict losers.
+ * Each target (Safari, a Chrome profile) is merged three ways: its baseline (the tree it held
+ * after its last sync), its tree as bookmarks.yaml resolves it, and its tree in the browser.
+ * Targets merge one after another, each absorbing its result into the YAML's layers, so an
+ * edit in one browser reaches the YAML before the next target merges. The final YAML is then
+ * written to every browser, and each target's baseline becomes what it now holds. Conflict
+ * losers go to the graveyard. Git keeps the YAML's history only; it is never the baseline.
  */
 
 import { Array as Arr, DateTime, Duration, Effect, HashSet } from "effect";
 import { execFile } from "node:child_process";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
-import * as Yaml from "yaml";
+import * as Baseline from "./baseline.ts";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
 import * as Chrome from "./chrome.ts";
 import * as ChromeNative from "./chrome-native.ts";
 import * as Graveyard from "./graveyard.ts";
+import * as Layers from "./layers.ts";
+import { stripManagedConfigHeader } from "./managed-config-header.ts";
 import * as Orchestration from "./orchestration.ts";
 import * as Patch from "./patch.ts";
 import * as Permissions from "./permissions.ts";
@@ -40,6 +44,17 @@ export interface SyncResult {
   readonly targets: readonly TargetResult[];
   readonly orchestration?: Orchestration.SyncNotice;
   readonly backup?: BackupResult;
+  /** Whether the sync changed bookmarks.yaml (or would, in a dry run). */
+  readonly yamlChanged?: boolean;
+  /** Targets whose browser was open, so their changes wait until it closes. */
+  readonly waiting?: readonly WaitingTarget[];
+}
+
+export interface WaitingTarget {
+  readonly target: Targets.TargetDescriptor;
+  /** The process that must quit before this target can be written. */
+  readonly browser: string;
+  readonly pending: number;
 }
 
 export interface ConflictResolution {
@@ -81,13 +96,6 @@ interface ResolvedGitTarget {
 const messageFromUnknown = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-const expectDefined = <T>(value: T | undefined, message: string): T => {
-  if (value === undefined) {
-    throw new Error(message);
-  }
-  return value;
-};
-
 const fileExists = (path: string): Effect.Effect<boolean, Error> =>
   Effect.tryPromise({
     try: async () => {
@@ -106,71 +114,7 @@ const hasChromeProfile = (
 ): target is Pick<Targets.TargetDescriptor, "browser"> & { readonly profile: string } =>
   target.browser === "chrome" && typeof target.profile === "string";
 
-const recordFromEntries = <K extends string, V>(
-  entries: Iterable<readonly [K, V]>,
-): Record<K, V> => {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.fromEntries preserves the supplied entry pairs but widens their key/value types.
-  return Object.fromEntries(entries) as Record<K, V>;
-};
-
-const targetTree = <V>(trees: Readonly<Record<string, V>>, targetId: string): V =>
-  expectDefined(trees[targetId], `Missing resolved tree for ${targetId}`);
-
-// -- Git baseline --
-
-/**
- * Read the last-committed version of bookmarks.yaml from git.
- * Returns empty BookmarkTree if the file has never been committed.
- */
-const readGitBaselineConfigAt = (
-  resolvedGitTarget: ResolvedGitTarget,
-): Effect.Effect<BookmarksConfig | null, Error> =>
-  Effect.gen(function* () {
-    const { repoRoot, relPath } = resolvedGitTarget;
-
-    const raw = yield* Effect.tryPromise({
-      try: () =>
-        new Promise<string>((resolve, reject) => {
-          execFile("git", ["show", `HEAD:${relPath}`], { cwd: repoRoot }, (err, stdout) => {
-            if (err) reject(err);
-            else resolve(stdout);
-          });
-        }),
-      catch: () => new Error(`git show HEAD:${relPath} failed — treating as fresh sync`),
-    }).pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
-
-    if (raw === null) {
-      yield* Effect.log("No committed bookmarks.yaml found — using empty baseline (fresh sync)");
-      return null;
-    }
-
-    // Parse and validate the committed YAML
-    const parsed = yield* Effect.try({
-      try: () => Yaml.parse(raw) as unknown,
-      catch: (error) =>
-        new Error(`Failed to parse committed bookmarks.yaml: ${messageFromUnknown(error)}`),
-    });
-    const config = yield* YamlModule.decodeDocument(parsed, "committed bookmarks.yaml");
-    return config;
-  });
-
-export const readGitBaselineConfig = (
-  yamlPath: string,
-): Effect.Effect<BookmarksConfig | null, Error> =>
-  Effect.gen(function* () {
-    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
-    if (!resolvedGitTarget) {
-      yield* Effect.log("bookmarks.yaml is not inside a git repo — using empty baseline");
-      return null;
-    }
-
-    return yield* readGitBaselineConfigAt(resolvedGitTarget);
-  });
-
-export const readGitBaseline = (yamlPath: string): Effect.Effect<BookmarkTree, Error> =>
-  readGitBaselineConfig(yamlPath).pipe(
-    Effect.map((config) => config?.all ?? BookmarkTree.make({})),
-  );
+// -- Git history --
 
 /** Resolve the git repo root for a given file path. */
 const gitRepoRoot = (filePath: string): Effect.Effect<string, Error> =>
@@ -209,44 +153,7 @@ const resolveGitTarget = (filePath: string): Effect.Effect<ResolvedGitTarget | u
     };
   });
 
-const readManagedBaselineConfig = (): Effect.Effect<BookmarksConfig | null, Error> =>
-  Effect.gen(function* () {
-    const baselinePath = Paths.defaultSyncBaselinePath();
-    const exists = yield* fileExists(baselinePath);
-
-    if (!exists) {
-      yield* Effect.log(`No managed sync baseline found at ${baselinePath} — using empty baseline`);
-      return null;
-    }
-
-    yield* Effect.log(`Using managed sync baseline from ${baselinePath}`);
-    return yield* YamlModule.load(baselinePath);
-  });
-
-const readSyncBaselineConfig = (yamlPath: string): Effect.Effect<BookmarksConfig | null, Error> =>
-  Effect.gen(function* () {
-    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
-    if (resolvedGitTarget) {
-      return yield* readGitBaselineConfigAt(resolvedGitTarget);
-    }
-
-    return yield* readManagedBaselineConfig();
-  });
-
-const advanceSyncBaseline = (
-  yamlPath: string,
-  config: BookmarksConfig,
-): Effect.Effect<void, Error> =>
-  Effect.gen(function* () {
-    const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
-    if (resolvedGitTarget) return;
-
-    const baselinePath = Paths.defaultSyncBaselinePath();
-    yield* Effect.log(`Saving managed sync baseline to ${baselinePath}...`);
-    yield* YamlModule.saveStateFile(baselinePath, config);
-  });
-
-/** Auto-commit bookmarks.yaml so the committed version becomes the new baseline. */
+/** Commit bookmarks.yaml after a sync changes it, so its git log records every sync. */
 export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     const resolvedGitTarget = yield* resolveGitTarget(yamlPath);
@@ -256,7 +163,6 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
     }
     const { repoRoot, relPath } = resolvedGitTarget;
 
-    // Stage the file
     yield* Effect.tryPromise({
       try: () =>
         new Promise<void>((resolve, reject) => {
@@ -268,7 +174,6 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
       catch: (error) => new Error(`git add failed: ${messageFromUnknown(error)}`),
     });
 
-    // Check if there are staged changes to commit
     const hasStagedChanges = yield* Effect.tryPromise({
       try: () =>
         new Promise<boolean>((resolve, reject) => {
@@ -292,7 +197,6 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
       return;
     }
 
-    // Commit with auto-sync message
     yield* Effect.tryPromise({
       try: () =>
         new Promise<void>((resolve, reject) => {
@@ -309,7 +213,7 @@ export const gitAutoCommit = (yamlPath: string): Effect.Effect<void, Error> =>
       catch: (error) => new Error(`git commit failed: ${messageFromUnknown(error)}`),
     });
 
-    yield* Effect.log("Auto-committed bookmarks.yaml (new baseline)");
+    yield* Effect.log("Auto-committed bookmarks.yaml");
   });
 
 // -- resolveConflicts --
@@ -443,21 +347,12 @@ export const applyPatches = (
       cause instanceof Error ? cause : new Error("Failed to apply bookmark patches.", { cause }),
   });
 
-const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
-
-type SectionKey = (typeof sectionKeys)[number];
 type MutableBookmarkSection = BookmarkNode[];
-type MutableBookmarkTree = Record<SectionKey, MutableBookmarkSection | undefined>;
+type MutableBookmarkTree = Record<Layers.SectionKey, MutableBookmarkSection | undefined>;
 
-const supportedSectionsByBrowser: Record<string, readonly SectionKey[]> = {
-  safari: ["bar", "menu", "reading_list"],
-  chrome: ["bar", "menu", "mobile"],
-};
+const sectionKeys = Layers.sectionKeys;
 
 const emptyTree = (): BookmarkTree => BookmarkTree.make({});
-
-const sectionKeysForBrowser = (browser: string): readonly SectionKey[] =>
-  supportedSectionsByBrowser[browser] ?? sectionKeys;
 
 const resolvedTargetOf = (
   target: Pick<Targets.TargetDescriptor, "browser" | "profile">,
@@ -465,23 +360,6 @@ const resolvedTargetOf = (
   target.profile
     ? { browser: target.browser, profile: target.profile }
     : { browser: target.browser };
-
-const browserOfTargetId = (targetId: string): string =>
-  targetId === "safari" ? "safari" : (targetId.split("/")[0] ?? targetId);
-
-const profileOfTargetId = (targetId: string): string | undefined => {
-  const slashIndex = targetId.indexOf("/");
-  return slashIndex === -1 ? undefined : targetId.slice(slashIndex + 1);
-};
-
-const resolvedTargetOfId = (
-  targetId: string,
-): { readonly browser: string; readonly profile?: string } => {
-  const profile = profileOfTargetId(targetId);
-  return profile
-    ? { browser: browserOfTargetId(targetId), profile }
-    : { browser: browserOfTargetId(targetId) };
-};
 
 const asMutableTree = (tree: BookmarkTree): MutableBookmarkTree =>
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Patch application mutates an internal working copy before re-materializing an immutable tree.
@@ -507,13 +385,16 @@ const normalizeSection = (nodes: BookmarkSection | undefined): BookmarkSection |
 
 const setSection = (
   tree: BookmarkTree,
-  sectionKey: SectionKey,
+  sectionKey: Layers.SectionKey,
   nodes: MutableBookmarkSection | undefined,
 ): void => {
   asMutableTree(tree)[sectionKey] = nodes;
 };
 
-const ensureSection = (tree: BookmarkTree, sectionKey: SectionKey): MutableBookmarkSection => {
+const ensureSection = (
+  tree: BookmarkTree,
+  sectionKey: Layers.SectionKey,
+): MutableBookmarkSection => {
   const existing = asMutableTree(tree)[sectionKey];
   if (existing) return existing;
 
@@ -548,7 +429,9 @@ const ensureFolderPath = (
 
 const parseBookmarkPath = (
   path: string,
-): { readonly sectionKey: SectionKey; readonly folderPath: readonly string[] } | undefined => {
+):
+  | { readonly sectionKey: Layers.SectionKey; readonly folderPath: readonly string[] }
+  | undefined => {
   const [rawSectionKey, ...folderPath] = path.split("/");
   const sectionKey = sectionKeys.find((key) => key === rawSectionKey);
   return sectionKey ? { sectionKey, folderPath } : undefined;
@@ -688,8 +571,15 @@ export interface SyncConfig {
   readonly requestedTargets?: readonly string[];
   /** Max age for graveyard entries before GC removes them. Default: 90 days. */
   readonly graveyardMaxAge?: Duration.Duration;
-  /** Optional YAML config override for one-way workflows such as `pull`. */
+  /** Optional YAML config override, used to plan and run from one loaded config. */
   readonly yamlOverride?: BookmarksConfig;
+  /**
+   * Target keys whose browser is open and holds its own bookmark file: they are read and
+   * merged into the YAML, but not written. Their changes wait until the browser closes.
+   */
+  readonly readOnlyTargets?: ReadonlyMap<string, string>;
+  /** bookmarks.yaml's text, without the managed header, when its config was loaded. */
+  readonly yamlTextAtLoad?: string | undefined;
 }
 
 export interface BackupConfig {
@@ -701,6 +591,43 @@ export interface BackupConfig {
 const emptyConfig = (): BookmarksConfig =>
   BookmarksConfig.make({
     all: BookmarkTree.make({}),
+  });
+
+/** bookmarks.yaml without the daemon's header line, or undefined when there is no file. */
+const readYamlBody = (yamlPath: string): Effect.Effect<string | undefined, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        return stripManagedConfigHeader(await Fs.readFile(yamlPath, "utf-8"));
+      } catch (error) {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "ENOENT"
+        )
+          return undefined;
+        throw error;
+      }
+    },
+    catch: (error) => new Error(`Failed to read ${yamlPath}: ${messageFromUnknown(error)}`),
+  });
+
+/**
+ * Refuse to write when bookmarks.yaml changed after the sync loaded it: saving would drop that
+ * edit. The edit itself queues the next sync, which merges it.
+ */
+const ensureYamlUnchanged = (
+  yamlPath: string,
+  textAtLoad: string | undefined,
+): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    if ((yield* readYamlBody(yamlPath)) === textAtLoad) return;
+    return yield* Effect.fail(
+      new Error(
+        "bookmarks.yaml changed while the sync ran, so the sync stopped before writing. The next sync merges the edit.",
+      ),
+    );
   });
 
 const loadConfig = (config: SyncConfig): Effect.Effect<BookmarksConfig, Error> =>
@@ -782,25 +709,26 @@ const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =
         targets: [],
       };
 
-const runningTargetBrowsers = (
+/**
+ * Selected targets whose browser is running and owns the bookmark file, keyed by target with
+ * the browser's process name. Paired Chrome is written through its live API, so it never is.
+ */
+const runningFileTargets = (
   targets: readonly Targets.TargetDescriptor[],
-): Effect.Effect<readonly string[], Error> =>
+): Effect.Effect<ReadonlyMap<string, string>, Error> =>
   Effect.gen(function* () {
-    let checkedBrowsers = HashSet.empty<string>();
-    const runningBrowsers: string[] = [];
+    const running = new Map<string, string>();
+    const checked = new Map<string, boolean>();
 
     for (const target of targets) {
       if (target.browser === "chrome" && (yield* ChromeNative.isPaired(target.path))) continue;
       const browser = Targets.processNameOf(target.browser);
-      if (HashSet.has(checkedBrowsers, browser)) continue;
-      checkedBrowsers = HashSet.add(checkedBrowsers, browser);
-
-      if (yield* Permissions.checkBrowserRunning(browser)) {
-        runningBrowsers.push(browser);
-      }
+      const isRunning = checked.get(browser) ?? (yield* Permissions.checkBrowserRunning(browser));
+      checked.set(browser, isRunning);
+      if (isRunning) running.set(Targets.keyOf(target), browser);
     }
 
-    return runningBrowsers;
+    return running;
   });
 
 const browserRunningNotice = (
@@ -809,7 +737,7 @@ const browserRunningNotice = (
 ): Orchestration.SyncNotice => ({
   state: "busy",
   operation,
-  message: browsers
+  message: [...new Set(browsers)]
     .map((browser) => new Permissions.BrowserRunning({ browser }).message)
     .join("\n\n"),
 });
@@ -848,69 +776,70 @@ const createMutationBackup = (
     yamlOverride: yamlConfig,
   });
 
+const writesBrowser = (result: TargetResult): boolean =>
+  result.writeMode === "rewrite" || result.applied.length > 0;
+
 const runManagedOperation = (
   requestedOperation: Orchestration.SyncOperation,
   config: SyncConfig,
 ): Effect.Effect<SyncResult, Error> =>
   Orchestration.withOrchestratedSync(config.yamlPath, requestedOperation, (operation) =>
     Effect.gen(function* () {
+      const yamlTextAtLoad = yield* readYamlBody(config.yamlPath);
       const yamlConfig = yield* loadConfig(config);
       const { selectedTargets } = yield* resolveSelectedTargets(
         yamlConfig,
         config.requestedTargets,
       );
-      if (operation !== "pull") {
-        const runningBrowsers = yield* runningTargetBrowsers(selectedTargets);
-        if (runningBrowsers.length > 0) {
-          return emptySyncResult(browserRunningNotice(operation, runningBrowsers));
-        }
+      const running = yield* runningFileTargets(selectedTargets);
+      // A merge reads an open browser and leaves its writes for later; a one-way write can't.
+      if (operation !== "sync" && running.size > 0) {
+        return emptySyncResult(browserRunningNotice(operation, [...running.values()]));
       }
       yield* ensurePermanentMutationSafety(yamlConfig, selectedTargets, operation);
-      const nextConfig = { ...config, yamlOverride: yamlConfig };
-      if (operation !== "pull") {
-        const previewConfig = { ...nextConfig, dryRun: true };
-        const preview =
-          operation === "push"
-            ? yield* runPush(previewConfig)
-            : operation === "gc"
-              ? yield* runGc(previewConfig)
-              : yield* runSync(previewConfig);
+      const nextConfig = {
+        ...config,
+        yamlOverride: yamlConfig,
+        readOnlyTargets: running,
+        yamlTextAtLoad,
+      };
+      const previewConfig = { ...nextConfig, dryRun: true };
+      const preview =
+        operation === "push"
+          ? yield* runPush(previewConfig)
+          : operation === "gc"
+            ? yield* runGc(previewConfig)
+            : yield* runSync(previewConfig);
 
-        for (const targetResult of preview.targets) {
-          const wouldMutate =
-            targetResult.writeMode === "rewrite" || targetResult.applied.length > 0;
-          if (
-            wouldMutate &&
-            targetResult.target.browser === "chrome" &&
-            !(yield* ChromeNative.isPaired(targetResult.target.path))
-          ) {
-            yield* Chrome.ensureDirectMutationSafe(targetResult.target.path);
-          }
+      for (const targetResult of preview.targets) {
+        if (
+          writesBrowser(targetResult) &&
+          !running.has(Targets.keyOf(targetResult.target)) &&
+          targetResult.target.browser === "chrome" &&
+          !(yield* ChromeNative.isPaired(targetResult.target.path))
+        ) {
+          yield* Chrome.ensureDirectMutationSafe(targetResult.target.path);
         }
       }
-      const mutationBackup = yield* createMutationBackup(config, yamlConfig);
+
+      const mutates =
+        preview.yamlChanged === true ||
+        preview.targets.some(
+          (targetResult) =>
+            writesBrowser(targetResult) && !running.has(Targets.keyOf(targetResult.target)),
+        );
+      // A sync that changes nothing still records baselines, but needs no backup.
+      const mutationBackup = mutates ? yield* createMutationBackup(config, yamlConfig) : undefined;
+      const withBackup = (result: SyncResult): SyncResult =>
+        mutationBackup ? { ...result, backup: mutationBackup } : result;
 
       switch (operation) {
-        case "pull":
-          return {
-            ...(yield* runPull(nextConfig)),
-            backup: mutationBackup,
-          };
         case "push":
-          return {
-            ...(yield* runPush(nextConfig)),
-            backup: mutationBackup,
-          };
+          return withBackup(yield* runPush(nextConfig));
         case "gc":
-          return {
-            ...(yield* runGc(nextConfig)),
-            backup: mutationBackup,
-          };
+          return withBackup(yield* runGc(nextConfig));
         case "sync":
-          return {
-            ...(yield* runSync(nextConfig)),
-            backup: mutationBackup,
-          };
+          return withBackup(yield* runSync(nextConfig));
       }
     }),
   ).pipe(
@@ -950,45 +879,6 @@ const sectionsEqual = (
   return true;
 };
 
-const longestCommonPrefix = (
-  sections: readonly (BookmarkSection | undefined)[],
-): BookmarkSection | undefined => {
-  const normalizedSections = sections.map((section) => normalizeSection(section) ?? []);
-  const firstSection = normalizedSections[0] ?? [];
-  const prefixLength = Math.min(...normalizedSections.map((section) => section.length));
-  const prefix: BookmarkNode[] = [];
-
-  for (let index = 0; index < prefixLength; index++) {
-    const candidate = firstSection[index];
-    if (!candidate) break;
-    if (
-      !normalizedSections.every((section) => {
-        const sectionNode = section[index];
-        return sectionNode !== undefined && nodesEqual(sectionNode, candidate);
-      })
-    )
-      break;
-    prefix.push(cloneNode(candidate));
-  }
-
-  return prefix.length > 0 ? prefix : undefined;
-};
-
-const sectionSuffix = (
-  section: BookmarkSection | undefined,
-  prefixLength: number,
-): BookmarkSection | undefined => {
-  const normalized = normalizeSection(section) ?? [];
-  const suffix = normalized.slice(prefixLength).map((node) => cloneNode(node));
-  return suffix.length > 0 ? suffix : undefined;
-};
-
-const isTreeEmpty = (tree: BookmarkTree): boolean =>
-  (tree.bar?.length ?? 0) === 0 &&
-  (tree.menu?.length ?? 0) === 0 &&
-  (tree.reading_list?.length ?? 0) === 0 &&
-  (tree.mobile?.length ?? 0) === 0;
-
 const treeEquals = (left: BookmarkTree, right: BookmarkTree): boolean =>
   sectionKeys.every((sectionKey) => sectionsEqual(left[sectionKey], right[sectionKey]));
 
@@ -1005,195 +895,35 @@ const verifyTargetWrite = (
     }
   });
 
-const treeFromSections = (
-  sections: Partial<Record<SectionKey, BookmarkSection | undefined>>,
-): BookmarkTree =>
-  BookmarkTree.make({
-    bar: sections.bar,
-    menu: sections.menu,
-    reading_list: sections.reading_list,
-    mobile: sections.mobile,
-  });
-
-const supportedTargetIdsForSection = (
-  targetIds: readonly string[],
-  sectionKey: SectionKey,
-): readonly string[] =>
-  targetIds.filter((targetId) =>
-    sectionKeysForBrowser(browserOfTargetId(targetId)).includes(sectionKey),
-  );
-
-export const decomposeResolvedTrees = (
-  currentConfig: BookmarksConfig,
-  resolvedTrees: Readonly<Record<string, BookmarkTree>>,
-): BookmarksConfig => {
-  const targetIds = Object.keys(resolvedTrees);
-  if (targetIds.length === 0) return emptyConfig();
-
-  const allSections = recordFromEntries(
-    sectionKeys.map((sectionKey) => {
-      const supportedTargetIds = supportedTargetIdsForSection(targetIds, sectionKey);
-      const prefix =
-        supportedTargetIds.length === 0
-          ? undefined
-          : longestCommonPrefix(
-              supportedTargetIds.map((targetId) => targetTree(resolvedTrees, targetId)[sectionKey]),
-            );
-      return [sectionKey, prefix];
-    }),
-  );
-
-  const afterAll = recordFromEntries(
-    targetIds.map((targetId) => [
-      targetId,
-      treeFromSections(
-        recordFromEntries(
-          sectionKeys.map((sectionKey) => {
-            const supported = sectionKeysForBrowser(browserOfTargetId(targetId)).includes(
-              sectionKey,
-            );
-            return [
-              sectionKey,
-              supported
-                ? sectionSuffix(
-                    targetTree(resolvedTrees, targetId)[sectionKey],
-                    allSections[sectionKey]?.length ?? 0,
-                  )
-                : undefined,
-            ];
-          }),
-        ),
-      ),
-    ]),
-  );
-
-  const chromeTargetIds = targetIds.filter((targetId) => browserOfTargetId(targetId) === "chrome");
-  const chromeSections = recordFromEntries(
-    sectionKeys.map((sectionKey) => {
-      const supported = sectionKeysForBrowser("chrome").includes(sectionKey);
-      const prefix =
-        !supported || chromeTargetIds.length === 0
-          ? undefined
-          : longestCommonPrefix(
-              chromeTargetIds.map((targetId) => targetTree(afterAll, targetId)[sectionKey]),
-            );
-      return [sectionKey, prefix];
-    }),
-  );
-
-  const safariOverlay = afterAll["safari"]
-    ? treeFromSections({
-        bar: afterAll["safari"].bar,
-        menu: afterAll["safari"].menu,
-        reading_list: afterAll["safari"].reading_list,
-      })
-    : emptyTree();
-
-  const chromeOverlay = treeFromSections({
-    bar: chromeSections.bar,
-    menu: chromeSections.menu,
-    mobile: chromeSections.mobile,
-  });
-
-  const profileNames = new Set([
-    ...chromeTargetIds
-      .filter((targetId) => profileOfTargetId(targetId) !== undefined)
-      .map((targetId) =>
-        expectDefined(profileOfTargetId(targetId), `Missing Chrome profile for ${targetId}`),
-      ),
-    ...Object.keys(currentConfig.chrome?.profiles ?? {}),
-  ]);
-
-  const chromeProfiles = Object.fromEntries(
-    [...profileNames].sort().flatMap((profile): readonly [string, ChromeProfileBookmarks][] => {
-      const targetId = `chrome/${profile}`;
-      const overlayTree =
-        targetId in afterAll
-          ? treeFromSections({
-              bar: sectionSuffix(
-                targetTree(afterAll, targetId).bar,
-                chromeSections.bar?.length ?? 0,
-              ),
-              menu: sectionSuffix(
-                targetTree(afterAll, targetId).menu,
-                chromeSections.menu?.length ?? 0,
-              ),
-              mobile: sectionSuffix(
-                targetTree(afterAll, targetId).mobile,
-                chromeSections.mobile?.length ?? 0,
-              ),
-            })
-          : emptyTree();
-      const existingProfile = currentConfig.chrome?.profiles?.[profile];
-      if (!existingProfile && isTreeEmpty(overlayTree)) return [];
-      return [
-        [
-          profile,
-          ChromeProfileBookmarks.make({
-            ...(existingProfile?.enabled !== undefined ? { enabled: existingProfile.enabled } : {}),
-            bar: overlayTree.bar,
-            menu: overlayTree.menu,
-            mobile: overlayTree.mobile,
-          }),
-        ],
-      ];
-    }),
-  );
-
-  const nextConfig = BookmarksConfig.make({
-    version: 2,
-    all: treeFromSections(allSections),
-    ...(currentConfig.safari || !isTreeEmpty(safariOverlay)
-      ? {
-          safari: SafariBookmarks.make({
-            ...(currentConfig.safari?.enabled !== undefined
-              ? { enabled: currentConfig.safari.enabled }
-              : {}),
-            bar: safariOverlay.bar,
-            menu: safariOverlay.menu,
-            reading_list: safariOverlay.reading_list,
-          }),
-        }
-      : {}),
-    ...(currentConfig.chrome ||
-    !isTreeEmpty(chromeOverlay) ||
-    Object.keys(chromeProfiles).length > 0
-      ? {
-          chrome: ChromeBookmarks.make({
-            ...(currentConfig.chrome?.enabled !== undefined
-              ? { enabled: currentConfig.chrome.enabled }
-              : {}),
-            bar: chromeOverlay.bar,
-            menu: chromeOverlay.menu,
-            mobile: chromeOverlay.mobile,
-            ...(Object.keys(chromeProfiles).length > 0 ? { profiles: chromeProfiles } : {}),
-          }),
-        }
-      : {}),
-  });
-
-  return nextConfig;
-};
+const renderConfig = (config: BookmarksConfig): Effect.Effect<string, Error> =>
+  YamlModule.render(config);
 
 const saveConfig = (yamlPath: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
     yield* Effect.log("Saving bookmarks.yaml...");
     yield* YamlModule.save(yamlPath, config);
-    yield* Effect.log("Auto-committing bookmarks.yaml...");
     yield* gitAutoCommit(yamlPath);
-    yield* advanceSyncBaseline(yamlPath, config);
   });
 
-const resolveTargetTrees = (
-  config: BookmarksConfig,
-  targetIds: readonly string[],
-): Effect.Effect<Record<string, BookmarkTree>, Error> =>
+const saveBaselines = (
+  previous: Baseline.Baselines,
+  next: Baseline.Baselines,
+): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const trees: Record<string, BookmarkTree> = {};
-    for (const targetId of targetIds) {
-      trees[targetId] = yield* YamlModule.resolveTarget(config, resolvedTargetOfId(targetId));
-    }
-    return trees;
+    if ((yield* Baseline.render(previous)) === (yield* Baseline.render(next))) return;
+    yield* Baseline.save(next);
+  });
+
+/** The tree a target should hold for a config: Chrome's in the form Chrome stores. */
+const desiredTreeFor = (
+  config: BookmarksConfig,
+  target: Targets.TargetDescriptor,
+): Effect.Effect<BookmarkTree, Error> =>
+  Effect.gen(function* () {
+    const tree = yield* YamlModule.resolveTarget(config, resolvedTargetOf(target));
+    return target.browser === "chrome"
+      ? yield* ChromeNative.normalizeDesiredTree(target.path, tree)
+      : tree;
   });
 
 const projectTree = (
@@ -1219,20 +949,20 @@ const projectTree = (
     };
   });
 
-interface PlannedTargetSync {
+interface TargetMerge {
   readonly target: Targets.TargetDescriptor;
-  readonly tree: BookmarkTree;
-  readonly expectedTree: BookmarkTree;
-  readonly result: TargetResult;
-  readonly writePatches: readonly Patch.BookmarkPatch[];
+  readonly browserTree: BookmarkTree;
+  readonly mergedTree: BookmarkTree;
+  readonly graveyarded: readonly Patch.BookmarkPatch[];
 }
 
-const planSyncTarget = (
+/** Merge one target three ways: what changed in the YAML and in the browser since its baseline. */
+const mergeTarget = (
   target: Targets.TargetDescriptor,
   originalBaselineTree: BookmarkTree,
   originalYamlTree: BookmarkTree,
   maxAge: Duration.Duration,
-): Effect.Effect<PlannedTargetSync, Error> =>
+): Effect.Effect<TargetMerge, Error> =>
   Effect.gen(function* () {
     const baselineTree =
       target.browser === "chrome"
@@ -1250,23 +980,23 @@ const planSyncTarget = (
       yamlTree,
       "yaml",
       undefined,
-      "git baseline",
+      "sync baseline",
     );
     const browserPatches = yield* Patch.generatePatches(
       baselineTree,
       browserTree,
       target.browser,
       undefined,
-      "git baseline",
+      "sync baseline",
     );
     const resolution = yield* resolveConflicts(yamlPatches, browserPatches);
 
-    const yamlProjection = yield* projectTree(baselineTree, yamlTree, "yaml", "git baseline");
+    const yamlProjection = yield* projectTree(baselineTree, yamlTree, "yaml", "sync baseline");
     const browserProjection = yield* projectTree(
       baselineTree,
       browserTree,
       target.browser,
-      "git baseline",
+      "sync baseline",
     );
     const mergedLeafTree = yield* applyPatches(baselineTree, resolution.apply);
 
@@ -1276,7 +1006,7 @@ const planSyncTarget = (
           ? yamlTree
           : yield* Effect.fail(
               new Error(
-                `Cannot safely merge divergent structural bookmark changes for ${Targets.displayNameOf(target)}. Run pull or align YAML/browser ordering and empty folders before syncing.`,
+                `Cannot safely merge divergent structural bookmark changes for ${Targets.displayNameOf(target)}. Align YAML/browser ordering and empty folders before syncing.`,
               ),
             )
         : !yamlProjection.exact
@@ -1291,7 +1021,9 @@ const planSyncTarget = (
       "merged",
       "resolved structural state",
     );
-    const mergedTree = mergedProjection.exact ? mergedProjection.projectedTree : structuralBase;
+    // The structural side's layout with every resolved bookmark change applied. Falling back to
+    // the structural side alone when the projection isn't exact would drop the other side's edits.
+    const mergedTree = mergedProjection.projectedTree;
 
     const withGraveyard =
       resolution.graveyard.length > 0
@@ -1302,240 +1034,197 @@ const planSyncTarget = (
             "conflict",
           )
         : mergedTree;
-    const finalTree = yield* Graveyard.gc(withGraveyard, maxAge);
-    const finalProjection = yield* projectTree(
-      browserTree,
-      finalTree,
-      `${target.browser} target`,
-      `${target.browser} target`,
-    );
-    const adapterRequiresRewrite = yield* Targets.requiresFullRewrite(
-      target,
-      finalProjection.patches,
-    );
-    const writeMode =
-      finalProjection.exact && !adapterRequiresRewrite
-        ? ("patches" as const)
-        : ("rewrite" as const);
 
     return {
       target,
-      tree: finalTree,
-      expectedTree: browserTree,
-      result: {
-        target,
-        applied: finalProjection.patches,
-        graveyarded: resolution.graveyard,
-        writeMode,
-      },
-      writePatches: finalProjection.patches,
-    };
-  });
-
-const pullTarget = (
-  target: Targets.TargetDescriptor,
-  currentTree: BookmarkTree,
-): Effect.Effect<
-  {
-    readonly target: Targets.TargetDescriptor;
-    readonly tree: BookmarkTree;
-    readonly result: TargetResult;
-  },
-  Error
-> =>
-  Effect.gen(function* () {
-    const browserTree = yield* Targets.readTree(target);
-    const pulledPatches = yield* Patch.generatePatches(
-      currentTree,
       browserTree,
-      target.browser,
-      undefined,
-      "yaml",
-    );
-    return {
-      target,
-      tree: browserTree,
-      result: {
-        target,
-        applied: pulledPatches,
-        graveyarded: [],
-      },
+      mergedTree: yield* Graveyard.gc(withGraveyard, maxAge),
+      graveyarded: resolution.graveyard,
     };
   });
 
-const pushTarget = (
+interface PlannedWrite {
+  readonly target: Targets.TargetDescriptor;
+  readonly browserTree: BookmarkTree;
+  readonly desiredTree: BookmarkTree;
+  readonly writePatches: readonly Patch.BookmarkPatch[];
+  readonly writeMode: "patches" | "rewrite";
+}
+
+/** How to bring a browser from what it holds to what it should hold. */
+const planWrite = (
   target: Targets.TargetDescriptor,
-  originalYamlTree: BookmarkTree,
-  dryRun: boolean,
-): Effect.Effect<TargetResult, Error> =>
+  browserTree: BookmarkTree,
+  desiredTree: BookmarkTree,
+): Effect.Effect<PlannedWrite, Error> =>
   Effect.gen(function* () {
-    const yamlTree =
-      target.browser === "chrome"
-        ? yield* ChromeNative.normalizeDesiredTree(target.path, originalYamlTree)
-        : originalYamlTree;
-    const browserTree = yield* Targets.readTree(target);
-    yield* ensureUnambiguousPaths(yamlTree, `yaml target ${Targets.displayNameOf(target)}`);
-    const sourceIsAmbiguous = collectAmbiguousPathIssues(browserTree).length > 0;
-    const finalProjection = sourceIsAmbiguous
-      ? undefined
-      : yield* projectTree(browserTree, yamlTree, "yaml", `${target.browser} target`);
-    const writePatches = finalProjection?.patches ?? [];
-    const adapterRequiresRewrite = finalProjection
+    const projection =
+      collectAmbiguousPathIssues(browserTree).length > 0
+        ? undefined
+        : yield* projectTree(browserTree, desiredTree, "yaml", `${target.browser} target`);
+    const writePatches = projection?.patches ?? [];
+    const adapterRequiresRewrite = projection
       ? yield* Targets.requiresFullRewrite(target, writePatches)
       : true;
     const writeMode =
-      finalProjection?.exact && !adapterRequiresRewrite
-        ? ("patches" as const)
-        : ("rewrite" as const);
-
-    if (!dryRun) {
-      if (writeMode === "rewrite") {
-        yield* Targets.writeTree(target, yamlTree, browserTree);
-      } else {
-        yield* Targets.applyPatches(target, writePatches);
-      }
-      yield* verifyTargetWrite(target, yamlTree);
-    }
-
-    return {
-      target,
-      applied: writePatches,
-      graveyarded: [],
-      writeMode,
-    };
+      projection?.exact && !adapterRequiresRewrite ? ("patches" as const) : ("rewrite" as const);
+    return { target, browserTree, desiredTree, writePatches, writeMode };
   });
 
-const gcTree = (
-  currentTree: BookmarkTree,
-  maxAge: Duration.Duration,
-): Effect.Effect<BookmarkTree, Error> => Graveyard.gc(currentTree, maxAge);
+const plannedWritesBrowser = (plan: PlannedWrite): boolean =>
+  plan.writeMode === "rewrite"
+    ? !treeEquals(plan.browserTree, plan.desiredTree)
+    : plan.writePatches.length > 0;
+
+const executeWrite = (plan: PlannedWrite): Effect.Effect<void, Error> =>
+  Effect.gen(function* () {
+    if (!plannedWritesBrowser(plan)) return;
+    if (plan.writeMode === "rewrite") {
+      yield* Targets.writeTree(plan.target, plan.desiredTree, plan.browserTree);
+    } else {
+      yield* Targets.applyPatches(plan.target, plan.writePatches);
+    }
+    yield* verifyTargetWrite(plan.target, plan.desiredTree);
+  });
+
+const toTargetResult = (
+  plan: PlannedWrite,
+  graveyarded: readonly Patch.BookmarkPatch[] = [],
+): TargetResult => ({
+  target: plan.target,
+  applied: plan.writePatches,
+  graveyarded,
+  writeMode: plannedWritesBrowser(plan) ? plan.writeMode : "patches",
+});
 
 /**
  * Run a full bidirectional sync.
  *
- * The sync baseline comes from git when bookmarks.yaml is tracked. Outside git
- * we persist a managed baseline in state storage so three-way sync remains
- * incremental across runs.
- *
- * Fresh sync (no baseline yet): baseline is empty tree,
- * every Safari bookmark becomes an Add patch, YAML is populated from scratch.
- *
- * Incremental sync: three-way diff between committed YAML (baseline),
- * current YAML on disk (user edits), and current Safari (browser changes).
- * Newest-wins conflict resolution, YAML tie-break.
+ * Each selected target merges its YAML and browser edits since its baseline (an empty tree
+ * before its first sync, so nothing is deleted), and absorbs the result into the YAML before
+ * the next target merges. Then every target is written from the final YAML, except a target
+ * whose browser is open: it keeps its writes for later and takes its current tree as its
+ * baseline, so its own edits, already in the YAML, are not applied twice.
  */
 const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
+    const yamlTextAtLoad =
+      "yamlTextAtLoad" in config ? config.yamlTextAtLoad : yield* readYamlBody(config.yamlPath);
     const yamlConfig = yield* loadConfig(config);
-    const baselineConfig = (yield* readSyncBaselineConfig(config.yamlPath)) ?? emptyConfig();
+    const baselines = yield* Baseline.load();
     const maxAge = config.graveyardMaxAge ?? Duration.days(90);
-    const targetResults: TargetResult[] = [];
-    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(
-      yamlConfig,
-      config.requestedTargets,
-    );
-    const resolvedTrees = yield* resolveTargetTrees(
-      yamlConfig,
-      discoveredTargets.map(Targets.keyOf),
-    );
-    const plannedTargetSyncs: PlannedTargetSync[] = [];
+    const readOnlyTargets = config.readOnlyTargets ?? new Map<string, string>();
+    const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets);
 
+    let nextConfig = yamlConfig;
+    const merges: TargetMerge[] = [];
     for (const target of selectedTargets) {
-      yield* Effect.log(`Syncing ${Targets.displayNameOf(target)}...`);
-      const baselineTree = yield* YamlModule.resolveTarget(
-        baselineConfig,
-        resolvedTargetOf(target),
+      yield* Effect.log(`Merging ${Targets.displayNameOf(target)}...`);
+      const yamlTree = yield* YamlModule.resolveTarget(nextConfig, resolvedTargetOf(target));
+      const merge = yield* mergeTarget(
+        target,
+        baselines[Targets.keyOf(target)] ?? emptyTree(),
+        yamlTree,
+        maxAge,
       );
-      const yamlTree = resolvedTrees[Targets.keyOf(target)] ?? emptyTree();
-      const targetSync = yield* planSyncTarget(target, baselineTree, yamlTree, maxAge);
-      resolvedTrees[Targets.keyOf(target)] = targetSync.tree;
-      plannedTargetSyncs.push(targetSync);
-      targetResults.push(targetSync.result);
+      nextConfig = Layers.absorbTargetTree(nextConfig, target, merge.mergedTree);
+      merges.push(merge);
     }
 
-    const nextConfig = decomposeResolvedTrees(yamlConfig, resolvedTrees);
+    const plans: PlannedWrite[] = [];
+    for (const merge of merges) {
+      const desiredTree = yield* desiredTreeFor(nextConfig, merge.target);
+      yield* ensureUnambiguousPaths(
+        desiredTree,
+        `yaml target ${Targets.displayNameOf(merge.target)}`,
+      );
+      plans.push(yield* planWrite(merge.target, merge.browserTree, desiredTree));
+    }
+
+    const yamlChanged = (yield* renderConfig(nextConfig)) !== (yield* renderConfig(yamlConfig));
+    const waiting: WaitingTarget[] = plans.flatMap((plan) => {
+      const browser = readOnlyTargets.get(Targets.keyOf(plan.target));
+      return browser !== undefined && plannedWritesBrowser(plan)
+        ? [{ target: plan.target, browser, pending: plan.writePatches.length || 1 }]
+        : [];
+    });
+
     if (!config.dryRun) {
-      for (const targetSync of plannedTargetSyncs) {
-        if ((targetSync.result.writeMode ?? "patches") === "rewrite") {
-          yield* Targets.writeTree(targetSync.target, targetSync.tree, targetSync.expectedTree);
-        } else {
-          yield* Targets.applyPatches(targetSync.target, targetSync.writePatches);
+      yield* ensureYamlUnchanged(config.yamlPath, yamlTextAtLoad);
+      const nextBaselines: Record<string, BookmarkTree> = { ...baselines };
+      for (const plan of plans) {
+        const key = Targets.keyOf(plan.target);
+        if (readOnlyTargets.has(key)) {
+          nextBaselines[key] = plan.browserTree;
+          continue;
         }
-        yield* verifyTargetWrite(targetSync.target, targetSync.tree);
+        yield* Effect.log(`Writing ${Targets.displayNameOf(plan.target)}...`);
+        yield* executeWrite(plan);
+        nextBaselines[key] = plan.desiredTree;
       }
-      yield* saveConfig(config.yamlPath, nextConfig);
+      if (yamlChanged) {
+        yield* ensureYamlUnchanged(config.yamlPath, yamlTextAtLoad);
+        yield* saveConfig(config.yamlPath, nextConfig);
+      }
+      yield* saveBaselines(baselines, nextBaselines);
     }
 
+    const targetResults = plans.map((plan, index) =>
+      toTargetResult(plan, merges[index]?.graveyarded ?? []),
+    );
     return {
       applied: targetResults.flatMap((result) => result.applied),
       graveyarded: targetResults.flatMap((result) => result.graveyarded),
       targets: targetResults,
+      yamlChanged,
+      ...(waiting.length > 0 ? { waiting } : {}),
     };
   });
 
-const runPull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
+/** Write the YAML to each selected browser as is, and record what each now holds. */
+const pushTrees = (
+  config: SyncConfig,
+  yamlConfig: BookmarksConfig,
+  selectedTargets: readonly Targets.TargetDescriptor[],
+): Effect.Effect<readonly TargetResult[], Error> =>
   Effect.gen(function* () {
-    const yamlConfig = yield* loadConfig(config);
-    const targetResults: TargetResult[] = [];
-    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(
-      yamlConfig,
-      config.requestedTargets,
-    );
-    const resolvedTrees = yield* resolveTargetTrees(
-      yamlConfig,
-      discoveredTargets.map(Targets.keyOf),
-    );
+    const baselines = yield* Baseline.load();
+    const nextBaselines: Record<string, BookmarkTree> = { ...baselines };
+    const results: TargetResult[] = [];
 
     for (const target of selectedTargets) {
-      yield* Effect.log(`Pulling ${Targets.displayNameOf(target)}...`);
-      const targetPull = yield* pullTarget(
-        target,
-        resolvedTrees[Targets.keyOf(target)] ?? emptyTree(),
-      );
-      resolvedTrees[Targets.keyOf(target)] = targetPull.tree;
-      targetResults.push(targetPull.result);
+      yield* Effect.log(`Pushing ${Targets.displayNameOf(target)}...`);
+      const desiredTree = yield* desiredTreeFor(yamlConfig, target);
+      yield* ensureUnambiguousPaths(desiredTree, `yaml target ${Targets.displayNameOf(target)}`);
+      const browserTree = yield* Targets.readTree(target);
+      const plan = yield* planWrite(target, browserTree, desiredTree);
+      if (!config.dryRun) {
+        yield* executeWrite(plan);
+        nextBaselines[Targets.keyOf(target)] = desiredTree;
+      }
+      results.push(toTargetResult(plan));
     }
 
-    const nextConfig = decomposeResolvedTrees(yamlConfig, resolvedTrees);
-    if (!config.dryRun) {
-      yield* saveConfig(config.yamlPath, nextConfig);
-    }
-
-    return {
-      applied: targetResults.flatMap((result) => result.applied),
-      graveyarded: [],
-      targets: targetResults,
-    };
+    if (!config.dryRun) yield* saveBaselines(baselines, nextBaselines);
+    return results;
   });
 
 const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config);
-    const targetResults: TargetResult[] = [];
     const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets);
-
-    for (const target of selectedTargets) {
-      yield* Effect.log(`Pushing ${Targets.displayNameOf(target)}...`);
-      const yamlTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target));
-      targetResults.push(yield* pushTarget(target, yamlTree, config.dryRun ?? false));
-    }
-
-    if (!config.dryRun) {
-      yield* advanceSyncBaseline(config.yamlPath, yamlConfig);
-    }
+    const targetResults = yield* pushTrees(config, yamlConfig, selectedTargets);
 
     return {
       applied: targetResults.flatMap((result) => result.applied),
       graveyarded: [],
       targets: targetResults,
+      yamlChanged: false,
     };
   });
 
 export const sync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   config.dryRun ? runSync(config) : runManagedOperation("sync", config);
-
-export const pull = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
-  config.dryRun ? runPull(config) : runManagedOperation("pull", config);
 
 export const push = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   config.dryRun ? runPush(config) : runManagedOperation("push", config);
@@ -1547,11 +1236,7 @@ export const status = (config: SyncConfig): Effect.Effect<StatusResult, Error> =
     const { selectedTargets } = yield* resolveSelectedTargets(yamlConfig, config.requestedTargets);
 
     for (const target of selectedTargets) {
-      const resolvedTree = yield* YamlModule.resolveTarget(yamlConfig, resolvedTargetOf(target));
-      const yamlTree =
-        target.browser === "chrome"
-          ? yield* ChromeNative.normalizeDesiredTree(target.path, resolvedTree)
-          : resolvedTree;
+      const yamlTree = yield* desiredTreeFor(yamlConfig, target);
       const browserTree = yield* Targets.readTree(target);
       targetStatuses.push({
         target,
@@ -1599,6 +1284,11 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
     const candidates = [
       { label: "yaml", path: config.yamlPath, filename: `${timestamp}--bookmarks.yaml` },
+      {
+        label: "sync baselines",
+        path: Paths.defaultSyncBaselinePath(),
+        filename: `${timestamp}--${Path.basename(Paths.defaultSyncBaselinePath())}`,
+      },
       ...selectedTargets.map((target) => ({
         label: Targets.displayNameOf(target),
         path: target.path,
@@ -1608,20 +1298,7 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
 
     for (const candidate of candidates) {
       const destination = Path.join(backupDir, candidate.filename);
-      const exists = yield* Effect.tryPromise({
-        try: async () => {
-          try {
-            await Fs.access(candidate.path);
-            return true;
-          } catch {
-            return false;
-          }
-        },
-        catch: (error) =>
-          new Error(
-            `Failed to inspect backup candidate ${candidate.path}: ${messageFromUnknown(error)}`,
-          ),
-      });
+      const exists = yield* fileExists(candidate.path);
 
       if (!exists) {
         skipped.push(candidate.label);
@@ -1655,42 +1332,82 @@ export const backup = (config: BackupConfig): Effect.Effect<BackupResult, Error>
     return { backupDir, files, skipped };
   });
 
+/** The graveyard is a menu folder, so an overlay's menu is the only place it can be. */
+const gcMenu = (
+  menu: BookmarkSection | undefined,
+  maxAge: Duration.Duration,
+): Effect.Effect<BookmarkSection | undefined, Error> =>
+  menu === undefined
+    ? Effect.succeed(undefined)
+    : Graveyard.gc(BookmarkTree.make({ menu }), maxAge).pipe(Effect.map((tree) => tree.menu));
+
+/** Remove expired graveyard entries from every layer of the YAML. */
+const gcConfig = (
+  config: BookmarksConfig,
+  maxAge: Duration.Duration,
+): Effect.Effect<BookmarksConfig, Error> =>
+  Effect.gen(function* () {
+    const all = yield* Graveyard.gc(config.all, maxAge);
+    const safari = config.safari
+      ? SafariBookmarks.make({
+          enabled: config.safari.enabled,
+          bar: config.safari.bar,
+          menu: normalizeSection(yield* gcMenu(config.safari.menu, maxAge)),
+          reading_list: config.safari.reading_list,
+        })
+      : undefined;
+    const profiles: Record<string, ChromeProfileBookmarks> = {};
+    for (const [profile, profileConfig] of Object.entries(config.chrome?.profiles ?? {})) {
+      profiles[profile] = ChromeProfileBookmarks.make({
+        enabled: profileConfig.enabled,
+        bar: profileConfig.bar,
+        menu: normalizeSection(yield* gcMenu(profileConfig.menu, maxAge)),
+        mobile: profileConfig.mobile,
+      });
+    }
+    const chrome = config.chrome
+      ? ChromeBookmarks.make({
+          enabled: config.chrome.enabled,
+          bar: config.chrome.bar,
+          menu: normalizeSection(yield* gcMenu(config.chrome.menu, maxAge)),
+          mobile: config.chrome.mobile,
+          profiles: config.chrome.profiles ? profiles : undefined,
+        })
+      : undefined;
+    return BookmarksConfig.make({
+      version: config.version,
+      all: withoutEmptySections(all),
+      safari,
+      chrome,
+    });
+  });
+
+/** A section a graveyard sweep emptied is gone, as it would be after a browser read. */
+const withoutEmptySections = (tree: BookmarkTree): BookmarkTree =>
+  BookmarkTree.make({
+    bar: normalizeSection(tree.bar),
+    menu: normalizeSection(tree.menu),
+    reading_list: normalizeSection(tree.reading_list),
+    mobile: normalizeSection(tree.mobile),
+  });
+
 const runGc = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
   Effect.gen(function* () {
     const yamlConfig = yield* loadConfig(config);
-    const maxAge = config.graveyardMaxAge ?? Duration.days(90);
-    const targetResults: TargetResult[] = [];
-    const { discoveredTargets, selectedTargets } = yield* resolveSelectedTargets(
-      yamlConfig,
+    const cleanedConfig = yield* gcConfig(yamlConfig, config.graveyardMaxAge ?? Duration.days(90));
+    const { selectedTargets } = yield* resolveSelectedTargets(
+      cleanedConfig,
       config.requestedTargets,
     );
-    const currentResolvedTrees = yield* resolveTargetTrees(
-      yamlConfig,
-      discoveredTargets.map(Targets.keyOf),
-    );
-    const cleanedResolvedTrees: Record<string, BookmarkTree> = {};
-
-    for (const targetId of Object.keys(currentResolvedTrees)) {
-      cleanedResolvedTrees[targetId] = yield* gcTree(
-        targetTree(currentResolvedTrees, targetId),
-        maxAge,
-      );
-    }
-
-    for (const target of selectedTargets) {
-      const cleanedTree = cleanedResolvedTrees[Targets.keyOf(target)] ?? emptyTree();
-      targetResults.push(yield* pushTarget(target, cleanedTree, config.dryRun ?? false));
-    }
-
-    const nextConfig = decomposeResolvedTrees(yamlConfig, cleanedResolvedTrees);
-    if (!config.dryRun) {
-      yield* saveConfig(config.yamlPath, nextConfig);
-    }
+    const targetResults = yield* pushTrees(config, cleanedConfig, selectedTargets);
+    const yamlChanged = (yield* renderConfig(cleanedConfig)) !== (yield* renderConfig(yamlConfig));
+    if (!config.dryRun && yamlChanged) yield* saveConfig(config.yamlPath, cleanedConfig);
 
     return {
       applied: targetResults.flatMap((result) => result.applied),
       graveyarded: [],
       targets: targetResults,
+      yamlChanged,
     };
   });
 

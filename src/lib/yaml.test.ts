@@ -44,17 +44,17 @@ describe("yaml", () => {
         },
       },
       base: {
-        favorites_bar: [{ _tag: "BookmarkLeaf", name: "Shared", url: "https://shared.example" }],
-        other: [{ _tag: "BookmarkLeaf", name: "Menu Item", url: "https://menu.example" }],
+        favorites_bar: [{ _tag: "BookmarkLeaf", name: "Shared", url: "https://shared.example/" }],
+        other: [{ _tag: "BookmarkLeaf", name: "Menu Item", url: "https://menu.example/" }],
       },
       profiles: {
         "chrome/default": {
           favorites_bar: [
-            { _tag: "BookmarkLeaf", name: "Default Only", url: "https://default.example" },
+            { _tag: "BookmarkLeaf", name: "Default Only", url: "https://default.example/" },
           ],
         },
         "chrome/work": {
-          other: [{ _tag: "BookmarkLeaf", name: "Work Menu", url: "https://work.example" }],
+          other: [{ _tag: "BookmarkLeaf", name: "Work Menu", url: "https://work.example/" }],
         },
       },
     };
@@ -81,7 +81,7 @@ describe("yaml", () => {
         {
           profiles: {
             "safari/default": {
-              favorites_bar: [{ name: "Nope", url: "https://nope.example" }],
+              favorites_bar: [{ name: "Nope", url: "https://nope.example/" }],
             },
           },
         },
@@ -99,7 +99,7 @@ describe("yaml", () => {
         {
           profiles: {
             default: {
-              favorites_bar: [{ _tag: "BookmarkLeaf", name: "Nope", url: "https://nope.example" }],
+              favorites_bar: [{ _tag: "BookmarkLeaf", name: "Nope", url: "https://nope.example/" }],
             },
           },
         },
@@ -116,7 +116,7 @@ describe("yaml", () => {
           version: 2,
           all: {},
           chrome: {
-            reading_list: [{ name: "Blocked", url: "https://blocked.example" }],
+            reading_list: [{ name: "Blocked", url: "https://blocked.example/" }],
           },
         },
         "bookmarks.yaml",
@@ -132,7 +132,7 @@ describe("yaml", () => {
           chrome: {
             profiles: {
               default: {
-                reading_list: [{ name: "Blocked", url: "https://blocked.example" }],
+                reading_list: [{ name: "Blocked", url: "https://blocked.example/" }],
               },
             },
           },
@@ -151,14 +151,14 @@ describe("yaml", () => {
       const config = BookmarksConfig.make({
         all: new BookmarkTree({
           bar: [
-            leaf("First", "https://first.example"),
+            leaf("First", "https://first.example/"),
             folder("Empty", []),
-            folder("Nested", [leaf("Inside", "https://inside.example")]),
-            leaf("Last", "https://last.example"),
+            folder("Nested", [leaf("Inside", "https://inside.example/")]),
+            leaf("Last", "https://last.example/"),
           ],
         }),
         safari: SafariBookmarks.make({
-          menu: [folder("Profile Empty", []), leaf("Profile Bookmark", "https://profile.example")],
+          menu: [folder("Profile Empty", []), leaf("Profile Bookmark", "https://profile.example/")],
         }),
       });
 
@@ -176,43 +176,23 @@ describe("yaml", () => {
     }
   });
 
-  test("saveStateFile writes plain YAML without the managed config header", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-yaml-state-"));
-    const yamlPath = join(dir, "sync-baseline.yaml");
-
-    try {
-      const config = BookmarksConfig.make({
-        all: new BookmarkTree({}),
-      });
-
-      await run(YamlModule.saveStateFile(yamlPath, config));
-      const saved = await readFile(yamlPath, "utf-8");
-
-      expect(saved).toStartWith("version: 2\n");
-      expect(saved).not.toContain("machine-managed: bookmarks daemon");
-      expect(saved).not.toContain(SCHEMA_MODELINE);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
   test("resolveTarget merges shared, browser, and Chrome profile overlays with browser projection", async () => {
     const config = BookmarksConfig.make({
       all: new BookmarkTree({
-        bar: [leaf("Shared Bar", "https://shared-bar.example")],
-        menu: [leaf("Shared Menu", "https://shared-menu.example")],
-        reading_list: [leaf("Shared Reading", "https://shared-reading.example")],
-        mobile: [leaf("Shared Mobile", "https://shared-mobile.example")],
+        bar: [leaf("Shared Bar", "https://shared-bar.example/")],
+        menu: [leaf("Shared Menu", "https://shared-menu.example/")],
+        reading_list: [leaf("Shared Reading", "https://shared-reading.example/")],
+        mobile: [leaf("Shared Mobile", "https://shared-mobile.example/")],
       }),
       safari: SafariBookmarks.make({
-        bar: [leaf("Safari Bar", "https://safari-bar.example")],
+        bar: [leaf("Safari Bar", "https://safari-bar.example/")],
       }),
       chrome: ChromeBookmarks.make({
         enabled: true,
-        menu: [leaf("Chrome Menu", "https://chrome-menu.example")],
+        menu: [leaf("Chrome Menu", "https://chrome-menu.example/")],
         profiles: {
           default: ChromeProfileBookmarks.make({
-            bar: [leaf("Chrome Profile", "https://chrome-profile.example")],
+            bar: [leaf("Chrome Profile", "https://chrome-profile.example/")],
           }),
         },
       }),
@@ -230,7 +210,8 @@ describe("yaml", () => {
     expect(chromeTree.bar?.map((node) => node.name)).toEqual(["Shared Bar", "Chrome Profile"]);
     expect(chromeTree.menu?.map((node) => node.name)).toEqual(["Shared Menu", "Chrome Menu"]);
     expect(chromeTree.mobile?.map((node) => node.name)).toEqual(["Shared Mobile"]);
-    expect(chromeTree.reading_list).toBeUndefined();
+    // Chrome keeps the shared reading list in its Read Later folder.
+    expect(chromeTree.reading_list?.map((node) => node.name)).toEqual(["Shared Reading"]);
   });
 
   test("configuredChromeProfiles and isTargetEnabled follow browser and profile flags", () => {

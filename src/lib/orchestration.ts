@@ -3,7 +3,7 @@ import * as Fs from "node:fs/promises";
 import * as ManagedPaths from "./managed-paths.ts";
 import * as Paths from "./paths.ts";
 
-export type SyncOperation = "gc" | "pull" | "push" | "sync";
+export type SyncOperation = "gc" | "push" | "sync";
 type OrchestratedOperation = SyncOperation;
 
 interface LockState {

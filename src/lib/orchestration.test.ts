@@ -56,14 +56,14 @@ describe("withOrchestratedSync", () => {
     let executedOperation: Orchestration.SyncOperation | undefined;
 
     const result = await run(
-      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "pull", (operation) => {
+      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "push", (operation) => {
         executedOperation = operation;
         return Effect.succeed("done");
       }),
     );
 
     expect(result).toEqual({ _tag: "completed", value: "done" });
-    expect(executedOperation).toBe("pull");
+    expect(executedOperation).toBe("push");
   });
 
   test("returns a busy notice when another sync holds the lock", async () => {
@@ -112,7 +112,7 @@ describe("withOrchestratedSync", () => {
     );
 
     const result = await run(
-      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "pull", () =>
+      Orchestration.withOrchestratedSync("/tmp/bookmarks.yaml", "push", () =>
         Effect.succeed("done"),
       ),
     );

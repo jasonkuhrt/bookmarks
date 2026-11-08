@@ -296,6 +296,12 @@ const serializeSyncResult = (
   dryRun,
   orchestration: result.orchestration ?? null,
   backup: result.backup ?? null,
+  yamlChanged: result.yamlChanged ?? false,
+  waiting: (result.waiting ?? []).map((waiting) => ({
+    target: waiting.target,
+    browser: waiting.browser,
+    pending: waiting.pending,
+  })),
   applied: result.applied.map(serializePatch),
   graveyarded: result.graveyarded.map(serializePatch),
   targets: result.targets.map((targetResult) => ({
@@ -356,6 +362,11 @@ const printSyncSummary = (
       for (const skipped of result.backup.skipped) {
         yield* Console.log(`    skipped ${skipped}`);
       }
+    }
+    for (const waiting of result.waiting ?? []) {
+      yield* Console.log(
+        `  ${Targets.displayNameOf(waiting.target)}: waits until ${waiting.browser} quits to apply its changes`,
+      );
     }
     for (const targetResult of result.targets) {
       yield* Console.log(
@@ -559,7 +570,7 @@ const program = Effect.gen(function* () {
             });
           } else {
             yield* Console.log(
-              "Daemon started. Sync queues 60 seconds after the last bookmarks.yaml edit.",
+              "Daemon started. It syncs now, then 60 seconds after the last edit to bookmarks.yaml or a browser's bookmarks.",
             );
           }
           break;

@@ -57,7 +57,7 @@ describe("paths", () => {
       join(homedir(), ".config", "bookmarks", "bookmarks.schema.json"),
     );
     expect(Paths.defaultSyncBaselinePath()).toBe(
-      join(homedir(), ".local", "state", "bookmarks", "sync-baseline.yaml"),
+      join(homedir(), ".local", "state", "bookmarks", "sync-baselines.json"),
     );
     expect(Paths.defaultBackupDir()).toBe(
       join(homedir(), ".local", "state", "bookmarks", "backups"),
@@ -91,13 +91,15 @@ describe("paths", () => {
     expect(Paths.defaultStateDir()).toBe("/tmp/bookmarks-state");
     expect(Paths.defaultYamlPath()).toBe("/tmp/bookmarks-config/bookmarks.yaml");
     expect(Paths.defaultSchemaPath()).toBe("/tmp/bookmarks-config/bookmarks.schema.json");
-    expect(Paths.defaultSyncBaselinePath()).toBe("/tmp/bookmarks-state/sync-baseline.yaml");
+    expect(Paths.defaultSyncBaselinePath()).toBe("/tmp/bookmarks-state/sync-baselines.json");
     expect(Paths.defaultBackupDir()).toBe("/tmp/bookmarks-state/backups");
     expect(Paths.defaultRuntimeDir()).toBe("/tmp/bookmarks-state/runtime");
     expect(Paths.defaultSyncLockPath()).toBe("/tmp/bookmarks-state/runtime/sync.lock.json");
   });
 
   test("XDG home env vars feed the default bookmarks directories", () => {
+    delete process.env["BOOKMARKS_CONFIG_DIR"];
+    delete process.env["BOOKMARKS_STATE_DIR"];
     process.env["XDG_CONFIG_HOME"] = "/tmp/xdg-config";
     process.env["XDG_STATE_HOME"] = "/tmp/xdg-state";
 

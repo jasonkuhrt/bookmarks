@@ -13,6 +13,8 @@ import {
   DEFAULT_DAEMON_HEADER_STATE,
   readDaemonHeaderState,
 } from "./managed-config-header.ts";
+import * as Canonical from "./canonical.ts";
+import * as Layers from "./layers.ts";
 import * as ManagedPaths from "./managed-paths.ts";
 import type { BookmarkSection } from "./schema/__.ts";
 import {
@@ -27,14 +29,6 @@ interface ResolvedTarget {
   readonly browser: string;
   readonly profile?: string;
 }
-
-const sectionKeys = ["bar", "menu", "reading_list", "mobile"] as const;
-type SectionKey = (typeof sectionKeys)[number];
-
-const supportedSectionsByBrowser: Record<string, readonly SectionKey[]> = {
-  safari: ["bar", "menu", "reading_list"],
-  chrome: ["bar", "menu", "mobile"],
-};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -226,7 +220,7 @@ const treeFrom = (
   });
 
 const projectTreeForBrowser = (tree: BookmarkTree, browser: string): BookmarkTree => {
-  const supportedSections = new Set(supportedSectionsByBrowser[browser] ?? sectionKeys);
+  const supportedSections = new Set(Layers.sectionKeysForBrowser(browser));
   return BookmarkTree.make({
     bar: supportedSections.has("bar") ? tree.bar : undefined,
     menu: supportedSections.has("menu") ? tree.menu : undefined,
@@ -268,16 +262,8 @@ export const load = (path: string): Effect.Effect<BookmarksConfig, Error> =>
       try: () => Yaml.parse(raw) as unknown,
       catch: (error) => new Error(`Failed to parse ${path}: ${messageFromUnknown(error)}`),
     });
-    return yield* decodeDocument(parsed, path);
+    return Canonical.canonicalConfig(yield* decodeDocument(parsed, path));
   });
-
-interface SaveOptions {
-  readonly managedHeader: boolean;
-}
-
-const defaultSaveOptions: SaveOptions = {
-  managedHeader: true,
-};
 
 const encodeConfig = (config: BookmarksConfig): Effect.Effect<unknown, Error> =>
   Schema.encode(BookmarksConfig)(
@@ -304,33 +290,20 @@ const encodeConfig = (config: BookmarksConfig): Effect.Effect<unknown, Error> =>
     }),
   ).pipe(Effect.mapError((e) => new Error(`Schema encoding failed: ${e.message}`)));
 
-/** Write a BookmarksConfig back to bookmarks.yaml. */
+/** The YAML body a config saves as, without the managed header: equal text, equal bookmarks. */
+export const render = (config: BookmarksConfig): Effect.Effect<string, Error> =>
+  encodeConfig(config).pipe(Effect.map((encoded) => Yaml.stringify(encoded, { indent: 2 })));
+
+/** Write a BookmarksConfig back to bookmarks.yaml, keeping the daemon's managed header. */
 export const save = (path: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
-  saveWithOptions(path, config, defaultSaveOptions);
-
-export const saveStateFile = (path: string, config: BookmarksConfig): Effect.Effect<void, Error> =>
-  saveWithOptions(path, config, {
-    managedHeader: false,
-  });
-
-const saveWithOptions = (
-  path: string,
-  config: BookmarksConfig,
-  options: SaveOptions,
-): Effect.Effect<void, Error> =>
   Effect.gen(function* () {
-    const encoded = yield* encodeConfig(config);
-    const body = Yaml.stringify(encoded, { indent: 2 });
-    const existingHeader = options.managedHeader
-      ? yield* Effect.tryPromise({
-          try: () => readDaemonHeaderState(path),
-          catch: (error) =>
-            new Error(`Failed to inspect managed header at ${path}: ${messageFromUnknown(error)}`),
-        })
-      : undefined;
-    const yamlStr = options.managedHeader
-      ? applyManagedConfigHeader(body, existingHeader ?? DEFAULT_DAEMON_HEADER_STATE)
-      : body;
+    const body = yield* render(config);
+    const existingHeader = yield* Effect.tryPromise({
+      try: () => readDaemonHeaderState(path),
+      catch: (error) =>
+        new Error(`Failed to inspect managed header at ${path}: ${messageFromUnknown(error)}`),
+    });
+    const yamlStr = applyManagedConfigHeader(body, existingHeader ?? DEFAULT_DAEMON_HEADER_STATE);
     yield* ManagedPaths.ensureParentDir(path);
     yield* Effect.tryPromise({
       try: () => Fs.writeFile(path, yamlStr, "utf-8"),

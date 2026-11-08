@@ -3,6 +3,7 @@ import { DateTime, Effect, Layer, Schema } from "effect";
 import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as Baseline from "./baseline.ts";
 import * as Chrome from "./chrome.ts";
 import { NativeRequestSchema } from "./chrome-native-protocol.ts";
 import { ChromeBridgeRuntime } from "./chrome-native-runtime.ts";
@@ -159,7 +160,7 @@ const writeChromeFixture = async (path: string, names: readonly string[]) => {
             children: names.map((name, index) => ({
               type: "url" as const,
               name,
-              url: `https://${name.toLowerCase()}.example`,
+              url: `https://${name.toLowerCase()}.example/`,
               id: String(index + 2),
               guid: `guid-${index + 2}`,
               date_added: "0",
@@ -219,7 +220,7 @@ const writeAmbiguousChromeFolderFixture = async (path: string) => {
                   {
                     type: "url",
                     name: "Heartbeat",
-                    url: "https://heartbeat.example",
+                    url: "https://heartbeat.example/",
                     id: "3",
                     guid: "heartbeat",
                     date_added: "0",
@@ -238,7 +239,7 @@ const writeAmbiguousChromeFolderFixture = async (path: string) => {
                   {
                     type: "url",
                     name: "Effect",
-                    url: "https://effect.example",
+                    url: "https://effect.example/",
                     id: "5",
                     guid: "effect",
                     date_added: "0",
@@ -291,7 +292,7 @@ const setupDiscoveryEnv = async (
   readonly restore: () => void;
 }> => {
   const chromeDataDir = join(dir, "Chrome");
-  const syncBaselinePath = join(dir, "state", "sync-baseline.yaml");
+  const syncBaselinePath = join(dir, "state", "sync-baselines.json");
   const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
   const originalSafariPlistPath = process.env["BOOKMARKS_SAFARI_PLIST_PATH"];
   const originalSafariTabsDbPath = process.env["BOOKMARKS_SAFARI_TABS_DB_PATH"];
@@ -347,10 +348,10 @@ const setupDiscoveryEnv = async (
 describe("resolveConflicts", () => {
   test("non-overlapping patches: all applied, none graveyarded", async () => {
     const yamlPatches = [
-      Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://a.com/", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const browserPatches = [
-      Patch.Add({ url: "https://b.com", name: "B", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://b.com/", name: "B", path: "bar", date: makeDate("2025-01-01") }),
     ];
 
     const result = await run(Sync.resolveConflicts(yamlPatches, browserPatches));
@@ -364,7 +365,7 @@ describe("resolveConflicts", () => {
 
     const yamlPatches = [
       Patch.Update({
-        url: "https://conflict.com",
+        url: "https://conflict.com/",
         oldName: "Original",
         newName: "YAML Version",
         fromPath: "bar",
@@ -374,7 +375,7 @@ describe("resolveConflicts", () => {
     ];
     const browserPatches = [
       Patch.Update({
-        url: "https://conflict.com",
+        url: "https://conflict.com/",
         oldName: "Original",
         newName: "Browser Version",
         fromPath: "bar",
@@ -404,7 +405,7 @@ describe("resolveConflicts", () => {
 
     const yamlPatches = [
       Patch.Update({
-        url: "https://tie.com",
+        url: "https://tie.com/",
         oldName: "Original",
         newName: "YAML",
         fromPath: "bar",
@@ -414,7 +415,7 @@ describe("resolveConflicts", () => {
     ];
     const browserPatches = [
       Patch.Update({
-        url: "https://tie.com",
+        url: "https://tie.com/",
         oldName: "Original",
         newName: "Browser",
         fromPath: "bar",
@@ -433,7 +434,7 @@ describe("resolveConflicts", () => {
   });
 
   test("independent edits to two placements of one URL are both retained", async () => {
-    const url = "https://duplicate.example";
+    const url = "https://duplicate.example/";
     const date = makeDate("2025-03-15");
     const yamlPatch = Patch.Update({
       url,
@@ -459,7 +460,7 @@ describe("resolveConflicts", () => {
   });
 
   test("remove and update of the same source occurrence produce one winner and one loser", async () => {
-    const url = "https://same-source.example";
+    const url = "https://same-source.example/";
     const remove = Patch.Remove({
       url,
       name: "Original",
@@ -483,13 +484,13 @@ describe("resolveConflicts", () => {
 
   test("identical additions from both sides coalesce without a graveyard entry", async () => {
     const yamlAdd = Patch.Add({
-      url: "https://same-add.example",
+      url: "https://same-add.example/",
       name: "Same",
       path: "bar/Folder",
       date: makeDate("2025-01-01"),
     });
     const browserAdd = Patch.Add({
-      url: "https://same-add.example",
+      url: "https://same-add.example/",
       name: "Same",
       path: "bar/Folder",
       date: makeDate("2025-02-01"),
@@ -504,7 +505,7 @@ describe("resolveConflicts", () => {
   test("identical addition groups preserve the larger placement count", async () => {
     const makeAdd = (date: string) =>
       Patch.Add({
-        url: "https://same-add.example",
+        url: "https://same-add.example/",
         name: "Same",
         path: "bar/Folder",
         date: makeDate(date),
@@ -524,7 +525,7 @@ describe("resolveConflicts", () => {
   test("identical removal groups preserve the larger placement count", async () => {
     const makeRemove = (date: string) =>
       Patch.Remove({
-        url: "https://same-remove.example",
+        url: "https://same-remove.example/",
         name: "Same",
         path: "bar/Folder",
         date: makeDate(date),
@@ -549,8 +550,8 @@ describe("resolveConflicts", () => {
 
   test("one side empty: all from other side applied", async () => {
     const patches = [
-      Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
-      Patch.Remove({ url: "https://b.com", name: "B", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://a.com/", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://b.com/", name: "B", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.resolveConflicts(patches, []));
     expect(result.apply.length).toBe(2);
@@ -564,21 +565,21 @@ describe("applyPatches", () => {
   test("add to empty tree creates section and leaf", async () => {
     const tree = emptyTree();
     const patches = [
-      Patch.Add({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Add({ url: "https://a.com/", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
     const bar = expectSection(result.bar, "expected bookmarks bar section");
     expect(bar.length).toBe(1);
     const node = expectLeaf(bar[0], "expected added bookmark leaf");
     expect(node.name).toBe("A");
-    expect(node.url).toBe("https://a.com");
+    expect(node.url).toBe("https://a.com/");
   });
 
   test("add to nested folder path creates folders", async () => {
     const tree = emptyTree();
     const patches = [
       Patch.Add({
-        url: "https://gpt.com",
+        url: "https://gpt.com/",
         name: "ChatGPT",
         path: "bar/AI/Tools",
         date: makeDate("2025-01-01"),
@@ -596,7 +597,7 @@ describe("applyPatches", () => {
       'expected "Tools" folder',
     );
     const gpt = expectLeaf(
-      toolsFolder.children.find((node) => BookmarkLeaf.is(node) && node.url === "https://gpt.com"),
+      toolsFolder.children.find((node) => BookmarkLeaf.is(node) && node.url === "https://gpt.com/"),
       "expected ChatGPT bookmark",
     );
     expect(gpt.name).toBe("ChatGPT");
@@ -604,25 +605,25 @@ describe("applyPatches", () => {
 
   test("remove deletes leaf from tree", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("A", "https://a.com"), leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com/"), leaf("B", "https://b.com/")],
     });
     const patches = [
-      Patch.Remove({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com/", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
     const bar = expectSection(result.bar, "expected remaining bar section");
     expect(bar.length).toBe(1);
     const remaining = expectLeaf(bar[0], "expected remaining bookmark");
-    expect(remaining.url).toBe("https://b.com");
+    expect(remaining.url).toBe("https://b.com/");
   });
 
   test("remove last leaf prunes empty section", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("A", "https://a.com")],
-      menu: [leaf("B", "https://b.com")],
+      bar: [leaf("A", "https://a.com/")],
+      menu: [leaf("B", "https://b.com/")],
     });
     const patches = [
-      Patch.Remove({ url: "https://a.com", name: "A", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Remove({ url: "https://a.com/", name: "A", path: "bar", date: makeDate("2025-01-01") }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
     expect(result.bar).toBeUndefined();
@@ -631,11 +632,11 @@ describe("applyPatches", () => {
 
   test("rename changes leaf name, preserves URL and position", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("Old Name", "https://a.com")],
+      bar: [leaf("Old Name", "https://a.com/")],
     });
     const patches = [
       Patch.Update({
-        url: "https://a.com",
+        url: "https://a.com/",
         oldName: "Old Name",
         newName: "New Name",
         fromPath: "bar",
@@ -646,7 +647,7 @@ describe("applyPatches", () => {
     const result = await run(Sync.applyPatches(tree, patches));
     const bar = expectSection(result.bar, "expected bookmarks bar section");
     const node = expectLeaf(
-      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com"),
+      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com/"),
       "expected renamed bookmark",
     );
     expect(node.name).toBe("New Name");
@@ -654,11 +655,11 @@ describe("applyPatches", () => {
 
   test("move relocates leaf between sections", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com/")],
     });
     const patches = [
       Patch.Update({
-        url: "https://a.com",
+        url: "https://a.com/",
         oldName: "A",
         newName: "A",
         fromPath: "bar",
@@ -670,7 +671,7 @@ describe("applyPatches", () => {
     expect(result.bar).toBeUndefined();
     const menu = expectSection(result.menu, "expected menu section after move");
     const node = expectLeaf(
-      menu.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com"),
+      menu.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://a.com/"),
       "expected moved bookmark",
     );
     expect(node.name).toBe("A");
@@ -678,24 +679,29 @@ describe("applyPatches", () => {
 
   test("multiple patches applied in correct order", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("ToRemove", "https://remove.com"), leaf("ToRename", "https://rename.com")],
+      bar: [leaf("ToRemove", "https://remove.com/"), leaf("ToRename", "https://rename.com/")],
     });
     const patches = [
       Patch.Remove({
-        url: "https://remove.com",
+        url: "https://remove.com/",
         name: "ToRemove",
         path: "bar",
         date: makeDate("2025-01-01"),
       }),
       Patch.Update({
-        url: "https://rename.com",
+        url: "https://rename.com/",
         oldName: "ToRename",
         newName: "Renamed",
         fromPath: "bar",
         toPath: "bar",
         date: makeDate("2025-01-01"),
       }),
-      Patch.Add({ url: "https://new.com", name: "New", path: "bar", date: makeDate("2025-01-01") }),
+      Patch.Add({
+        url: "https://new.com/",
+        name: "New",
+        path: "bar",
+        date: makeDate("2025-01-01"),
+      }),
     ];
     const result = await run(Sync.applyPatches(tree, patches));
     const bar = expectSection(result.bar, "expected bookmarks bar section");
@@ -704,12 +710,12 @@ describe("applyPatches", () => {
       .filter((node): node is BookmarkLeaf => BookmarkLeaf.is(node))
       .map((node) => node.url);
 
-    expect(urls).toContain("https://rename.com");
-    expect(urls).toContain("https://new.com");
-    expect(urls).not.toContain("https://remove.com");
+    expect(urls).toContain("https://rename.com/");
+    expect(urls).toContain("https://new.com/");
+    expect(urls).not.toContain("https://remove.com/");
 
     const renamed = expectLeaf(
-      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://rename.com"),
+      bar.find((bookmark) => BookmarkLeaf.is(bookmark) && bookmark.url === "https://rename.com/"),
       "expected renamed bookmark",
     );
     expect(renamed.name).toBe("Renamed");
@@ -717,7 +723,7 @@ describe("applyPatches", () => {
 
   test("empty patches returns tree unchanged", async () => {
     const tree = new BookmarkTree({
-      bar: [leaf("A", "https://a.com")],
+      bar: [leaf("A", "https://a.com/")],
     });
     const result = await run(Sync.applyPatches(tree, []));
     const bar = expectSection(result.bar, "expected bookmarks bar section");
@@ -727,10 +733,10 @@ describe("applyPatches", () => {
   test("empty patches preserve sibling ordering and empty folders", async () => {
     const tree = new BookmarkTree({
       bar: [
-        leaf("First", "https://first.example"),
+        leaf("First", "https://first.example/"),
         folder("Empty", []),
-        folder("Nested", [leaf("Inside", "https://inside.example")]),
-        leaf("Last", "https://last.example"),
+        folder("Nested", [leaf("Inside", "https://inside.example/")]),
+        leaf("Last", "https://last.example/"),
       ],
       menu: [folder("Other Empty", [])],
     });
@@ -742,13 +748,13 @@ describe("applyPatches", () => {
 
   test("remove preserves folders that become empty", async () => {
     const tree = new BookmarkTree({
-      bar: [folder("Projects", [leaf("Only", "https://only.example")])],
+      bar: [folder("Projects", [leaf("Only", "https://only.example/")])],
     });
 
     const result = await run(
       Sync.applyPatches(tree, [
         Patch.Remove({
-          url: "https://only.example",
+          url: "https://only.example/",
           name: "Only",
           path: "bar/Projects",
           date: makeDate("2025-01-01"),
@@ -764,7 +770,7 @@ describe("applyPatches", () => {
   });
 
   test("updates duplicate names by their pre-mutation occurrence when names swap", async () => {
-    const url = "https://same.example";
+    const url = "https://same.example/";
     const tree = new BookmarkTree({ bar: [leaf("A", url), leaf("B", url)] });
 
     const result = await run(
@@ -792,7 +798,7 @@ describe("applyPatches", () => {
   });
 
   test("moves and renames one duplicate into another duplicate's folder and name", async () => {
-    const url = "https://same.example";
+    const url = "https://same.example/";
     const tree = new BookmarkTree({
       bar: [leaf("Old", url)],
       menu: [folder("Target", [leaf("Existing", url)])],
@@ -822,116 +828,6 @@ describe("applyPatches", () => {
   });
 });
 
-describe("decomposeResolvedTrees", () => {
-  test("extracts common bookmarks into base and profile-specific bookmarks into overlays", () => {
-    const safariTree = new BookmarkTree({
-      bar: [
-        folder("Shared", [leaf("Common", "https://common.example")]),
-        leaf("Safari Only", "https://safari-only.example"),
-      ],
-    });
-    const chromeTree = new BookmarkTree({
-      bar: [
-        folder("Shared", [leaf("Common", "https://common.example")]),
-        leaf("Chrome Only", "https://chrome-only.example"),
-      ],
-    });
-
-    const config = Sync.decomposeResolvedTrees(
-      makeConfig({
-        safari: {},
-        chrome: { profiles: { work: {} } },
-      }),
-      {
-        safari: safariTree,
-        "chrome/work": chromeTree,
-      },
-    );
-
-    const allBar = expectSection(config.all.bar, "expected shared all.bar section");
-    const sharedFolder = expectFolder(
-      allBar.find((node) => BookmarkFolder.is(node) && node.name === "Shared"),
-      'expected shared "Shared" folder',
-    );
-    expect(sharedFolder.children.length).toBe(1);
-
-    expect(config.safari?.bar).toBeDefined();
-    expect(config.chrome?.bar).toBeDefined();
-
-    const safariOnly = config.safari?.bar?.find((node): node is BookmarkLeaf =>
-      BookmarkLeaf.is(node),
-    );
-    const chromeOnly = config.chrome?.bar?.find((node): node is BookmarkLeaf =>
-      BookmarkLeaf.is(node),
-    );
-    expect(safariOnly?.url).toBe("https://safari-only.example");
-    expect(chromeOnly?.url).toBe("https://chrome-only.example");
-  });
-
-  test("omits profile overlays when every resolved tree is identical", () => {
-    const sharedTree = new BookmarkTree({
-      menu: [leaf("Shared", "https://shared.example")],
-    });
-
-    const config = Sync.decomposeResolvedTrees(
-      makeConfig({
-        safari: {},
-        chrome: { profiles: { default: {} } },
-      }),
-      {
-        safari: sharedTree,
-        "chrome/default": sharedTree,
-      },
-    );
-
-    const allMenu = expectSection(config.all.menu, "expected shared all.menu section");
-    expect(allMenu.length).toBe(1);
-    expect(config.safari?.menu).toBeUndefined();
-    expect(config.chrome?.profiles?.["default"]?.menu).toBeUndefined();
-  });
-
-  test("preserves exact resolved ordering when shared bookmarks diverge after the prefix", async () => {
-    const safariTree = new BookmarkTree({
-      bar: [
-        leaf("Common A", "https://common-a.example"),
-        leaf("Safari Only", "https://safari-only.example"),
-        folder("Shared Empty", []),
-        leaf("Common B", "https://common-b.example"),
-      ],
-    });
-
-    const chromeTree = new BookmarkTree({
-      bar: [
-        leaf("Common A", "https://common-a.example"),
-        leaf("Chrome Only", "https://chrome-only.example"),
-        folder("Shared Empty", []),
-        leaf("Common B", "https://common-b.example"),
-      ],
-    });
-
-    const config = Sync.decomposeResolvedTrees(
-      makeConfig({
-        safari: {},
-        chrome: { profiles: { work: {} } },
-      }),
-      {
-        safari: safariTree,
-        "chrome/work": chromeTree,
-      },
-    );
-
-    expect(config.all.bar?.map((node) => node.name)).toEqual(["Common A"]);
-
-    const safariResolved = await run(YamlModule.resolveTarget(config, { browser: "safari" }));
-    const chromeResolved = await run(
-      YamlModule.resolveTarget(config, { browser: "chrome", profile: "work" }),
-    );
-
-    expect(safariResolved).toEqual(safariTree);
-    expect(chromeResolved).toEqual(chromeTree);
-  });
-});
-
 describe("push", () => {
   test("rejects Chrome Sync mutations before creating a backup", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-synced-"));
@@ -951,7 +847,7 @@ describe("push", () => {
       const originalChrome = await readFile(chromePath, "utf-8");
       const config = makeConfig({
         all: new BookmarkTree({
-          bar: [leaf("YAML", "https://yaml.example")],
+          bar: [leaf("YAML", "https://yaml.example/")],
         }),
         chrome: {
           profiles: {
@@ -992,7 +888,7 @@ describe("push", () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-push-paired-"));
     const backupDir = join(dir, "backups");
     const runtimeDir = join(dir, "runtime");
-    const syncBaselinePath = join(dir, "state", "sync-baseline.yaml");
+    const syncBaselinePath = join(dir, "state", "sync-baselines.json");
     const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"];
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"];
     const discovery = await setupDiscoveryEnv(dir);
@@ -1005,7 +901,7 @@ describe("push", () => {
       mobile: [],
     });
     const desiredTree = BookmarkTree.make({
-      bar: [leaf("YAML", "https://yaml.example")],
+      bar: [leaf("YAML", "https://yaml.example/")],
       menu: [],
       mobile: [],
     });
@@ -1077,8 +973,8 @@ describe("push", () => {
       );
       expect(liveBackup).toEqual(initialTree);
 
-      const baseline = await run(YamlModule.load(syncBaselinePath));
-      expect(baseline).toEqual(config);
+      const baseline = await run(Baseline.load(syncBaselinePath));
+      expect(baseline).toEqual({ "chrome/default": canonicalDesiredTree });
 
       const status = await Effect.runPromise(Sync.status({ yamlPath }).pipe(Effect.provide(layer)));
       expect(status.targets[0]?.yamlPatches).toEqual([]);
@@ -1117,7 +1013,7 @@ describe("push", () => {
       const originalChrome = await readFile(chromePath, "utf-8");
       const config = makeConfig({
         all: new BookmarkTree({
-          bar: [leaf("Browser", "https://browser.example")],
+          bar: [leaf("Browser", "https://browser.example/")],
         }),
         chrome: {
           profiles: {
@@ -1170,8 +1066,8 @@ describe("push", () => {
       const config = makeConfig({
         all: new BookmarkTree({
           bar: [
-            leaf("Last", "https://last.example"),
-            leaf("First", "https://first.example"),
+            leaf("Last", "https://last.example/"),
+            leaf("First", "https://first.example/"),
             folder("Empty", []),
           ],
         }),
@@ -1194,7 +1090,7 @@ describe("push", () => {
       expect(result.backup?.backupDir).toBe(backupDir);
       expect(result.backup?.files).toHaveLength(1);
       expect(result.backup?.files[0]).toContain("chrome--default--Bookmarks");
-      expect(result.backup?.skipped).toEqual(["yaml"]);
+      expect(result.backup?.skipped).toEqual(["yaml", "sync baselines"]);
       expect(await readdir(backupDir)).toHaveLength(1);
       const browserTree = await run(Chrome.readBookmarks(chromePath));
       expect(browserTree).toEqual(config.all);
@@ -1231,8 +1127,8 @@ describe("push", () => {
 
       const desiredTree = new BookmarkTree({
         bar: [
-          folder("Heartbeat", [leaf("Heartbeat", "https://heartbeat.example")]),
-          folder("Build", [leaf("Effect", "https://effect.example")]),
+          folder("Heartbeat", [leaf("Heartbeat", "https://heartbeat.example/")]),
+          folder("Build", [leaf("Effect", "https://effect.example/")]),
         ],
       });
       const config = makeConfig({
@@ -1292,8 +1188,8 @@ describe("push", () => {
       const config = makeConfig({
         all: new BookmarkTree({
           bar: [
-            leaf("First Copy", "https://dup.example"),
-            leaf("Second Copy", "https://dup.example"),
+            leaf("First Copy", "https://dup.example/"),
+            leaf("Second Copy", "https://dup.example/"),
           ],
         }),
         chrome: {
@@ -1343,7 +1239,7 @@ describe("push", () => {
       process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
       const config = makeConfig({
         all: new BookmarkTree({
-          bar: [leaf("First", "https://first.example")],
+          bar: [leaf("First", "https://first.example/")],
         }),
         chrome: {
           profiles: {
@@ -1396,7 +1292,7 @@ describe("push", () => {
 
       const config = makeConfig({
         all: new BookmarkTree({
-          bar: [leaf("First", "https://first.example")],
+          bar: [leaf("First", "https://first.example/")],
         }),
         chrome: {
           profiles: {
@@ -1427,59 +1323,44 @@ describe("push", () => {
   });
 });
 
-describe("git baseline helpers", () => {
-  test("treats non-git yaml paths as having no committed baseline", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-non-git-"));
-    const yamlPath = join(dir, "bookmarks.yaml");
-
-    try {
-      expect(await run(Sync.readGitBaselineConfig(yamlPath))).toBeNull();
-      expect(await run(Sync.readGitBaseline(yamlPath))).toEqual(BookmarkTree.make({}));
-      await run(Sync.gitAutoCommit(yamlPath));
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("reads the committed baseline and auto-commits updated bookmarks when git is present", async () => {
+describe("git history", () => {
+  test("auto-commit is a no-op outside git and records each changed YAML inside git", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "bookmarks-sync-non-git-"));
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-git-"));
     const yamlPath = join(dir, "bookmarks.yaml");
-    const baseline = makeConfig({
-      all: BookmarkTree.make({
-        bar: [leaf("Baseline", "https://baseline.example")],
-      }),
-    });
-    const updated = makeConfig({
-      all: BookmarkTree.make({
-        bar: [leaf("Updated", "https://updated.example")],
-      }),
-    });
 
     try {
+      await run(Sync.gitAutoCommit(join(outside, "bookmarks.yaml")));
+
       await runGit(dir, "init", "-b", "main");
       await runGit(dir, "config", "user.name", "Bookmarks Test");
       await runGit(dir, "config", "user.email", "bookmarks-test@example.com");
-      await run(YamlModule.save(yamlPath, baseline));
-      await runGit(dir, "add", "bookmarks.yaml");
-      await runGit(dir, "commit", "-m", "baseline");
-
-      const readBaseline = await run(Sync.readGitBaselineConfig(yamlPath));
-      expect(readBaseline).toEqual(baseline);
-
-      await run(YamlModule.save(yamlPath, updated));
+      await run(YamlModule.save(yamlPath, makeConfig()));
+      await run(Sync.gitAutoCommit(yamlPath));
+      await run(
+        YamlModule.save(
+          yamlPath,
+          makeConfig({ all: BookmarkTree.make({ bar: [leaf("New", "https://new.example/")] }) }),
+        ),
+      );
+      await run(Sync.gitAutoCommit(yamlPath));
       await run(Sync.gitAutoCommit(yamlPath));
 
-      const readUpdatedBaseline = await run(Sync.readGitBaselineConfig(yamlPath));
-      expect(readUpdatedBaseline).toEqual(updated);
+      const log = Bun.spawnSync(["git", "log", "--format=%s"], { cwd: dir }).stdout.toString();
+      expect(log.trim().split("\n")).toEqual([
+        "chore(bookmarks): auto-sync bookmarks.yaml",
+        "chore(bookmarks): auto-sync bookmarks.yaml",
+      ]);
     } finally {
+      await rm(outside, { recursive: true, force: true });
       await rm(dir, { recursive: true, force: true });
     }
   });
 });
 
-describe("pull", () => {
+describe("unsupported browser constructs", () => {
   test("refuses unsupported separator constructs before mutation", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-pull-separator-"));
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-separator-"));
     const discovery = await setupDiscoveryEnv(dir);
     const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks");
 
@@ -1545,7 +1426,7 @@ describe("pull", () => {
 
       await expectRejects(
         run(
-          Sync.pull({
+          Sync.sync({
             yamlPath: join(dir, "bookmarks.yaml"),
             yamlOverride: config,
             dryRun: true,
@@ -1555,67 +1436,6 @@ describe("pull", () => {
       );
     } finally {
       discovery.restore();
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("writes browser state back into bookmarks.yaml", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-pull-save-"));
-    const backupDir = join(dir, "backups");
-    const runtimeDir = join(dir, "runtime");
-    const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"];
-    const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"];
-    const originalForcedBrowserRunning = process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"];
-    const discovery = await setupDiscoveryEnv(dir);
-    const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks");
-    const yamlPath = join(dir, "bookmarks.yaml");
-
-    try {
-      process.env["BOOKMARKS_BACKUP_DIR"] = backupDir;
-      process.env["BOOKMARKS_RUNTIME_DIR"] = runtimeDir;
-      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Google Chrome";
-      await mkdir(join(discovery.chromeDataDir, "Default"), { recursive: true });
-      await writeChromeFixture(chromePath, ["Imported"]);
-
-      const config = makeConfig({
-        chrome: {
-          profiles: {
-            default: {},
-          },
-        },
-      });
-
-      const result = await run(
-        Sync.pull({
-          yamlPath,
-          yamlOverride: config,
-        }),
-      );
-
-      expect(result.targets).toHaveLength(1);
-      expect(result.backup?.files).toHaveLength(1);
-      const saved = await run(YamlModule.load(yamlPath));
-      const resolved = await run(
-        YamlModule.resolveTarget(saved, { browser: "chrome", profile: "default" }),
-      );
-      expect(resolved.bar?.map((node) => node.name)).toEqual(["Imported"]);
-    } finally {
-      discovery.restore();
-      if (originalBackupDir === undefined) {
-        delete process.env["BOOKMARKS_BACKUP_DIR"];
-      } else {
-        process.env["BOOKMARKS_BACKUP_DIR"] = originalBackupDir;
-      }
-      if (originalRuntimeDir === undefined) {
-        delete process.env["BOOKMARKS_RUNTIME_DIR"];
-      } else {
-        process.env["BOOKMARKS_RUNTIME_DIR"] = originalRuntimeDir;
-      }
-      if (originalForcedBrowserRunning === undefined) {
-        delete process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"];
-      } else {
-        process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = originalForcedBrowserRunning;
-      }
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -1679,7 +1499,7 @@ describe("sync", () => {
     }
   });
 
-  test("defers while a selected browser is running without changing YAML, browser data, or backups", async () => {
+  test("merges an open browser into the YAML and writes it once the browser closes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-browser-running-"));
     const backupDir = join(dir, "backups");
     const runtimeDir = join(dir, "runtime");
@@ -1701,7 +1521,7 @@ describe("sync", () => {
           yamlPath,
           makeConfig({
             all: new BookmarkTree({
-              bar: [leaf("YAML", "https://yaml.example")],
+              bar: [leaf("YAML", "https://yaml.example/")],
             }),
             chrome: {
               profiles: {
@@ -1711,21 +1531,39 @@ describe("sync", () => {
           }),
         ),
       );
-      const originalYaml = await readFile(yamlPath, "utf-8");
       const originalChrome = await readFile(chromePath, "utf-8");
 
-      const result = await run(Sync.sync({ yamlPath }));
+      const open = await run(Sync.sync({ yamlPath }));
 
-      expect(result.orchestration?.state).toBe("busy");
-      expect(result.orchestration?.operation).toBe("sync");
-      expect(result.orchestration?.message).toContain("Google Chrome is currently running");
-      expect(result.targets).toEqual([]);
-      expect(result.applied).toEqual([]);
-      expect(result.graveyarded).toEqual([]);
-      expect(result.backup).toBeUndefined();
-      expect(await exists(backupDir)).toBe(false);
-      expect(await readFile(yamlPath, "utf-8")).toBe(originalYaml);
+      // The open browser's bookmarks reach the YAML; its own file waits for it to close.
+      expect(open.orchestration).toBeUndefined();
+      expect(
+        open.waiting?.map((waiting) => [
+          waiting.target.browser,
+          waiting.target.profile,
+          waiting.browser,
+        ]),
+      ).toEqual([["chrome", "default", "Google Chrome"]]);
+      expect(open.yamlChanged).toBe(true);
+      expect(open.backup?.files.some((file) => file.endsWith("--bookmarks.yaml"))).toBe(true);
       expect(await readFile(chromePath, "utf-8")).toBe(originalChrome);
+      const merged = await run(YamlModule.load(yamlPath));
+      expect(merged.all.bar?.map((node) => node.name).sort()).toEqual(["Browser", "YAML"]);
+
+      // Asked again while still open, the sync changes nothing and adds nothing twice.
+      const again = await run(Sync.sync({ yamlPath }));
+      expect(again.yamlChanged).toBe(false);
+      expect(again.backup).toBeUndefined();
+      expect(
+        (await run(YamlModule.load(yamlPath))).all.bar?.map((node) => node.name).sort(),
+      ).toEqual(["Browser", "YAML"]);
+
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+      const closed = await run(Sync.sync({ yamlPath }));
+      expect(closed.waiting).toBeUndefined();
+      expect(closed.yamlChanged).toBe(false);
+      const chromeAfter = await run(Chrome.readBookmarks(chromePath));
+      expect(chromeAfter.bar?.map((node) => node.name).sort()).toEqual(["Browser", "YAML"]);
     } finally {
       discovery.restore();
       if (originalBackupDir === undefined) {
@@ -1843,11 +1681,11 @@ describe("sync", () => {
     }
   });
 
-  test("outside git, managed sync baseline keeps later structural syncs on the fast path", async () => {
+  test("the per-target baseline in the state folder keeps later structural syncs on the fast path", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-sync-managed-baseline-"));
     const backupDir = join(dir, "backups");
     const runtimeDir = join(dir, "runtime");
-    const syncBaselinePath = join(dir, "state", "sync-baseline.yaml");
+    const syncBaselinePath = join(dir, "state", "sync-baselines.json");
     const originalBackupDir = process.env["BOOKMARKS_BACKUP_DIR"];
     const originalRuntimeDir = process.env["BOOKMARKS_RUNTIME_DIR"];
     const originalSyncBaselinePath = process.env["BOOKMARKS_SYNC_BASELINE_PATH"];
@@ -1855,13 +1693,13 @@ describe("sync", () => {
     const chromePath = join(discovery.chromeDataDir, "Default", "Bookmarks");
     const yamlPath = join(dir, "bookmarks.yaml");
     const initialBrowserTree = BookmarkTree.make({
-      bar: [folder("Existing Empty", []), leaf("Imported", "https://imported.example")],
+      bar: [folder("Existing Empty", []), leaf("Imported", "https://imported.example/")],
     });
     const updatedConfig = makeConfig({
       all: BookmarkTree.make({
         bar: [
           folder("Existing Empty", []),
-          leaf("Imported", "https://imported.example"),
+          leaf("Imported", "https://imported.example/"),
           folder("_Sync Test", [
             leaf("Test Link 1", "https://example.com/?bookmarks-sync-test=1"),
             leaf("Test Link 2", "https://example.com/?bookmarks-sync-test=2"),
@@ -1886,8 +1724,8 @@ describe("sync", () => {
       );
 
       expect(await Bun.file(syncBaselinePath).exists()).toBe(true);
-      const initialBaseline = await run(YamlModule.load(syncBaselinePath));
-      expect(initialBaseline.all.bar?.map((node) => node.name)).toEqual([
+      const initialBaseline = await run(Baseline.load(syncBaselinePath));
+      expect(initialBaseline["chrome/default"]?.bar?.map((node) => node.name)).toEqual([
         "Existing Empty",
         "Imported",
       ]);
@@ -1907,8 +1745,8 @@ describe("sync", () => {
       const browserTree = await run(Chrome.readBookmarks(chromePath));
       expect(browserTree).toEqual(updatedConfig.all);
 
-      const managedBaseline = await run(YamlModule.load(syncBaselinePath));
-      expect(managedBaseline).toEqual(updatedConfig);
+      const managedBaseline = await run(Baseline.load(syncBaselinePath));
+      expect(managedBaseline).toEqual({ "chrome/default": updatedConfig.all });
     } finally {
       discovery.restore();
       if (originalBackupDir === undefined) {
@@ -1943,7 +1781,7 @@ describe("status and backup", () => {
 
       const config = makeConfig({
         all: BookmarkTree.make({
-          bar: [leaf("Yaml", "https://yaml.example")],
+          bar: [leaf("Yaml", "https://yaml.example/")],
         }),
         chrome: {
           profiles: {
@@ -1991,6 +1829,8 @@ describe("status and backup", () => {
         ),
       );
 
+      await run(Baseline.save({ "chrome/default": BookmarkTree.make({}) }));
+
       const result = await run(
         Sync.backup({
           yamlPath,
@@ -1998,9 +1838,10 @@ describe("status and backup", () => {
         }),
       );
 
-      expect(result.files).toHaveLength(2);
+      // The YAML, the per-target baselines, and the browser file.
+      expect(result.files).toHaveLength(3);
       expect(result.skipped).toEqual([]);
-      expect(await readdir(backupDir)).toHaveLength(2);
+      expect(await readdir(backupDir)).toHaveLength(3);
     } finally {
       discovery.restore();
       await rm(dir, { recursive: true, force: true });
@@ -2032,7 +1873,7 @@ describe("gc", () => {
             children: [
               BookmarkFolder.make({
                 name: expiredFolderName,
-                children: [leaf("Old", "https://old.example")],
+                children: [leaf("Old", "https://old.example/")],
               }),
             ],
           }),
