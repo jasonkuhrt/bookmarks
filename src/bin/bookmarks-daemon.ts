@@ -10,10 +10,14 @@ import {
   stripManagedConfigHeader,
   writeManagedConfigHeader,
 } from "../lib/managed-config-header.ts";
+import { Effect } from "effect";
 import * as Paths from "../lib/paths.ts";
+import * as Permissions from "../lib/permissions.ts";
+import * as Targets from "../lib/targets.ts";
 
 const DEFAULT_SYNC_DELAY_MS = 60_000;
 const BUSY_RETRY_DELAY_MS = 5_000;
+const BROWSER_EXIT_POLL_MS = 5_000;
 const ERROR_RETRY_INITIAL_DELAY_MS = 5_000;
 const ERROR_RETRY_MAX_DELAY_MS = 5 * 60_000;
 
@@ -50,19 +54,20 @@ const statePath = (): string => Paths.defaultDaemonStatePath();
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
-const hasPendingChanges = (statusResult: Record<string, unknown>): boolean => {
-  const targets = statusResult["targets"];
-  if (!Array.isArray(targets)) return false;
+/** Browsers whose open window kept a sync from writing their bookmarks. */
+const waitingBrowsers = (syncResult: Record<string, unknown>): ReadonlySet<string> => {
+  const waiting = syncResult["waiting"];
+  if (!Array.isArray(waiting)) return new Set();
+  return new Set(
+    waiting.flatMap((entry) =>
+      isRecord(entry) && typeof entry["browser"] === "string" ? [entry["browser"]] : [],
+    ),
+  );
+};
 
-  return targets.some((target) => {
-    if (!isRecord(target)) return false;
-    const pendingToBrowser = target["pendingToBrowser"];
-    const pendingToYaml = target["pendingToYaml"];
-    return (
-      (Array.isArray(pendingToBrowser) && pendingToBrowser.length > 0) ||
-      (Array.isArray(pendingToYaml) && pendingToYaml.length > 0)
-    );
-  });
+const changedAnything = (syncResult: Record<string, unknown>): boolean => {
+  const applied = syncResult["applied"];
+  return syncResult["yamlChanged"] === true || (Array.isArray(applied) && applied.length > 0);
 };
 
 const isDeferredSync = (syncResult: Record<string, unknown>): boolean => {
@@ -74,9 +79,12 @@ const isDeferredSync = (syncResult: Record<string, unknown>): boolean => {
   );
 };
 
-const readComparableConfigText = async (yamlPath: string): Promise<string> => {
-  const raw = await Fs.readFile(yamlPath, "utf-8");
-  return stripManagedConfigHeader(raw);
+const readComparableConfigText = async (yamlPath: string): Promise<string | undefined> => {
+  try {
+    return stripManagedConfigHeader(await Fs.readFile(yamlPath, "utf-8"));
+  } catch {
+    return undefined;
+  }
 };
 
 const daemonSyncDelayMs = (): number => {
@@ -99,6 +107,27 @@ const daemonErrorRetryInitialDelayMs = (): number => {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : ERROR_RETRY_INITIAL_DELAY_MS;
 };
+
+const daemonBrowserExitPollMs = (): number => {
+  const raw = process.env["BOOKMARKS_DAEMON_BROWSER_EXIT_POLL_MS"];
+  if (!raw) return BROWSER_EXIT_POLL_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : BROWSER_EXIT_POLL_MS;
+};
+
+/** The bookmark files of every discovered browser target, which a browser edit rewrites. */
+const browserBookmarkFiles = async (): Promise<readonly string[]> => {
+  try {
+    const targets = await Effect.runPromise(Targets.discoverTargets());
+    return targets.map((target) => target.path);
+  } catch (error) {
+    console.error(`Failed to discover browser bookmark files: ${messageFromUnknown(error)}`);
+    return [];
+  }
+};
+
+const isBrowserRunning = (browser: string): Promise<boolean> =>
+  Effect.runPromise(Permissions.checkBrowserRunning(browser));
 
 const execFileResult = async (
   cmd: string,
@@ -177,15 +206,16 @@ const runWatcherProcess = async (): Promise<never> => {
   const delayMs = daemonSyncDelayMs();
   const busyRetryDelayMs = daemonBusyRetryDelayMs();
   const errorRetryInitialDelayMs = daemonErrorRetryInitialDelayMs();
+  const browserExitPollMs = daemonBrowserExitPollMs();
   let state: DaemonRuntimeState = {
     phase: "starting",
     pid: process.pid,
     startedAt: new Date().toISOString(),
     yamlPath,
   };
-  let lastComparableText = await readComparableConfigText(yamlPath).catch(() => "");
-  let lastSettledComparableText = lastComparableText;
+  let lastComparableText = (await readComparableConfigText(yamlPath)) ?? "";
   let queueTimer: ReturnType<typeof setTimeout> | undefined;
+  let browserExitTimer: ReturnType<typeof setInterval> | undefined;
   let flushInProgress = false;
   let errorRetryCount = 0;
   let stateWriteQueue: Promise<unknown> | undefined;
@@ -236,8 +266,14 @@ const runWatcherProcess = async (): Promise<never> => {
     }
   };
 
+  const stopWaitingForBrowsers = (): void => {
+    if (browserExitTimer) clearInterval(browserExitTimer);
+    browserExitTimer = undefined;
+  };
+
   const armSchedule = async (request: ScheduleRequest): Promise<void> => {
     if (queueTimer) clearTimeout(queueTimer);
+    stopWaitingForBrowsers();
     const nextSyncAt = new Date(Date.now() + request.delayMs).toISOString();
     await updateState({
       lastError: request.preserveError ? state.lastError : undefined,
@@ -270,6 +306,19 @@ const runWatcherProcess = async (): Promise<never> => {
     await armSchedule(request);
   };
 
+  /** Sync again once every browser that kept the last sync from writing has quit. */
+  const waitForBrowsersToQuit = async (browsers: ReadonlySet<string>): Promise<void> => {
+    await updateState({ phase: "waiting" });
+    browserExitTimer = setInterval(() => {
+      void (async () => {
+        const stillRunning = await Promise.all([...browsers].map(isBrowserRunning));
+        if (stillRunning.some(Boolean) || browserExitTimer === undefined) return;
+        stopWaitingForBrowsers();
+        await scheduleSync(0, new Date().toISOString(), false, false);
+      })();
+    }, browserExitPollMs);
+  };
+
   const flushQueue = async (): Promise<void> => {
     if (flushInProgress) {
       deferSchedule({
@@ -288,32 +337,9 @@ const runWatcherProcess = async (): Promise<never> => {
         phase: "syncing",
       });
 
-      const currentComparableText = await readComparableConfigText(yamlPath);
-      lastComparableText = currentComparableText;
-
-      if (currentComparableText === lastSettledComparableText) {
-        errorRetryCount = 0;
-        await updateState({
-          lastError: undefined,
-          lastOutcome: "noop",
-          phase: "idle",
-        });
-        return;
-      }
-
-      const statusResult = await runCliJson(["status", "--json"]);
-      if (!hasPendingChanges(statusResult)) {
-        lastSettledComparableText = currentComparableText;
-        errorRetryCount = 0;
-        await updateState({
-          lastError: undefined,
-          lastOutcome: "noop",
-          phase: "idle",
-        });
-        return;
-      }
-
       const syncResult = await runCliJson(["sync", "--json"]);
+      // The sync's own YAML write is not an edit to sync again.
+      lastComparableText = (await readComparableConfigText(yamlPath)) ?? lastComparableText;
       if (isDeferredSync(syncResult)) {
         errorRetryCount = 0;
         await updateState({ lastOutcome: "deferred" });
@@ -321,21 +347,15 @@ const runWatcherProcess = async (): Promise<never> => {
         return;
       }
 
-      const syncedComparableText = await readComparableConfigText(yamlPath);
-      lastComparableText = syncedComparableText;
       errorRetryCount = 0;
       await updateState({
         lastError: undefined,
-        lastOutcome: "success",
+        lastOutcome: changedAnything(syncResult) ? "success" : "noop",
         lastSyncAt: new Date().toISOString(),
         phase: "idle",
       });
-
-      if (syncedComparableText !== currentComparableText || pendingSchedule !== undefined) {
-        await scheduleSync(0, undefined, false, false);
-      } else {
-        lastSettledComparableText = syncedComparableText;
-      }
+      const waiting = waitingBrowsers(syncResult);
+      if (waiting.size > 0 && pendingSchedule === undefined) await waitForBrowsersToQuit(waiting);
     } catch (error) {
       const message = messageFromUnknown(error);
       await updateState({
@@ -343,17 +363,12 @@ const runWatcherProcess = async (): Promise<never> => {
         lastOutcome: "failed",
         phase: "error",
       });
-
-      const comparableText = await readComparableConfigText(yamlPath).catch(() => undefined);
-      if (comparableText !== undefined) lastComparableText = comparableText;
-      if (comparableText !== undefined && comparableText !== lastSettledComparableText) {
-        const retryDelayMs = Math.min(
-          errorRetryInitialDelayMs * 2 ** Math.min(errorRetryCount, 16),
-          ERROR_RETRY_MAX_DELAY_MS,
-        );
-        errorRetryCount += 1;
-        await scheduleSync(retryDelayMs, undefined, true, false);
-      }
+      const retryDelayMs = Math.min(
+        errorRetryInitialDelayMs * 2 ** Math.min(errorRetryCount, 16),
+        ERROR_RETRY_MAX_DELAY_MS,
+      );
+      errorRetryCount += 1;
+      await scheduleSync(retryDelayMs, undefined, true, false);
     } finally {
       flushInProgress = false;
       const schedule = pendingSchedule;
@@ -362,14 +377,18 @@ const runWatcherProcess = async (): Promise<never> => {
     }
   };
 
-  const onWatchedChange = async (fileName: string | null) => {
-    if (fileName !== null && fileName !== Path.basename(yamlPath)) return;
-
-    const comparableText = await readComparableConfigText(yamlPath).catch(() => undefined);
+  const onYamlChange = async () => {
+    const comparableText = await readComparableConfigText(yamlPath);
+    // The daemon's own header updates leave the bookmarks unchanged.
     if (comparableText !== undefined && comparableText === lastComparableText) return;
     if (comparableText !== undefined) lastComparableText = comparableText;
     errorRetryCount = 0;
     await scheduleSync(delayMs);
+  };
+
+  const onBrowserChange = async () => {
+    errorRetryCount = 0;
+    await scheduleSync(delayMs, new Date().toISOString());
   };
 
   const recordWatcherError = async (error: unknown) => {
@@ -386,21 +405,34 @@ const runWatcherProcess = async (): Promise<never> => {
     }
   };
 
-  const watcher = watch(Path.dirname(yamlPath), { persistent: true }, (_, fileName) => {
-    const normalizedFileName =
-      fileName === null ? null : typeof fileName === "string" ? fileName : String(fileName);
-    void (async () => {
-      try {
-        await onWatchedChange(normalizedFileName);
-      } catch (error) {
-        await recordWatcherError(error);
-      }
-    })();
-  });
+  /** Watch a file through its folder, so the watch survives the file being replaced by a rename. */
+  const watchFile = (filePath: string, onChange: () => Promise<void>) =>
+    watch(Path.dirname(filePath), { persistent: true }, (_, fileName) => {
+      const name =
+        fileName === null ? null : typeof fileName === "string" ? fileName : String(fileName);
+      if (name !== null && name !== Path.basename(filePath)) return;
+      void (async () => {
+        try {
+          await onChange();
+        } catch (error) {
+          await recordWatcherError(error);
+        }
+      })();
+    });
+
+  const watchers = [watchFile(yamlPath, onYamlChange)];
+  for (const filePath of await browserBookmarkFiles()) {
+    try {
+      watchers.push(watchFile(filePath, onBrowserChange));
+    } catch (error) {
+      console.error(`Failed to watch ${filePath}: ${messageFromUnknown(error)}`);
+    }
+  }
 
   const cleanup = async (exitCode: number) => {
-    watcher.close();
+    for (const watcher of watchers) watcher.close();
     if (queueTimer) clearTimeout(queueTimer);
+    stopWaitingForBrowsers();
     try {
       await writeManagedConfigHeader(yamlPath, DEFAULT_DAEMON_HEADER_STATE);
     } catch {
@@ -425,6 +457,8 @@ const runWatcherProcess = async (): Promise<never> => {
     ...state,
     phase: "idle",
   });
+  // Changes made while the daemon was down have no event left to wait for.
+  await scheduleSync(0, new Date().toISOString());
 
   return forever();
 };

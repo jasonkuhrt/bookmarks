@@ -1,6 +1,14 @@
 import * as Fs from "node:fs/promises";
 
-export type DaemonPhase = "error" | "idle" | "queued" | "starting" | "stopped" | "syncing";
+/** `waiting`: a sync left changes for a browser that was open, and runs again when it quits. */
+export type DaemonPhase =
+  | "error"
+  | "idle"
+  | "queued"
+  | "starting"
+  | "stopped"
+  | "syncing"
+  | "waiting";
 export type DaemonServiceStatus = "running" | "stopped";
 
 export interface DaemonHeaderState {
@@ -70,7 +78,8 @@ export const isDaemonPhase = (value: string | undefined): value is DaemonPhase =
   value === "queued" ||
   value === "starting" ||
   value === "stopped" ||
-  value === "syncing";
+  value === "syncing" ||
+  value === "waiting";
 
 export const stripManagedConfigHeader = (raw: string): string => {
   const lines = raw.split("\n");
