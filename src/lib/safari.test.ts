@@ -209,6 +209,32 @@ describe("readBookmarks", () => {
     }
   });
 
+  test("a standard section Safari stores without Children reads as that section, empty", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-childless-section-"));
+    const path = join(dir, "Bookmarks.plist");
+
+    try {
+      await Bun.write(
+        path,
+        serialize({
+          Children: [
+            { WebBookmarkType: "WebBookmarkTypeList", Title: "BookmarksBar" },
+            { WebBookmarkType: "WebBookmarkTypeList", Title: "BookmarksMenu" },
+            { WebBookmarkType: "WebBookmarkTypeList", Title: "com.apple.ReadingList" },
+          ],
+        }),
+      );
+
+      const tree = await run(Safari.readBookmarks(path));
+
+      expect(tree.bar ?? []).toEqual([]);
+      expect(tree.menu ?? []).toEqual([]);
+      expect(tree.reading_list ?? []).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("refuses unsupported separator-like nodes that would otherwise be dropped", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-unsupported-"));
     const path = join(dir, "Bookmarks.plist");
@@ -510,6 +536,75 @@ describe("writeTree", () => {
 
       const reread = await run(Safari.readBookmarks(path));
       expect(reread).toEqual(desired);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an empty Reading List survives a full rewrite beside a root-level folder", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-safari-empty-section-"));
+    const path = join(dir, "Bookmarks.plist");
+    const top = BookmarkLeaf.make({ name: "Top", url: "https://top.example/" });
+    const custom = BookmarkFolder.make({
+      name: "Custom",
+      children: [BookmarkLeaf.make({ name: "C", url: "https://c.example/" })],
+    });
+
+    try {
+      await Bun.write(
+        path,
+        serialize({
+          Children: [
+            {
+              WebBookmarkType: "WebBookmarkTypeList",
+              Title: "BookmarksBar",
+              Children: [
+                {
+                  WebBookmarkType: "WebBookmarkTypeLeaf",
+                  URLString: top.url,
+                  URIDictionary: { title: top.name },
+                },
+              ],
+            },
+            { WebBookmarkType: "WebBookmarkTypeList", Title: "BookmarksMenu", Children: [] },
+            {
+              WebBookmarkType: "WebBookmarkTypeList",
+              Title: "com.apple.ReadingList",
+              Children: [],
+            },
+            {
+              WebBookmarkType: "WebBookmarkTypeList",
+              Title: custom.name,
+              Children: [
+                {
+                  WebBookmarkType: "WebBookmarkTypeLeaf",
+                  URLString: "https://c.example/",
+                  URIDictionary: { title: "C" },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      const added = BookmarkLeaf.make({ name: "Added", url: "https://added.example/" });
+      const desired = BookmarkTree.make({ bar: [top, added], menu: [custom] });
+      const patches = [Patch.Add({ url: added.url, name: added.name, path: "bar", date: now })];
+      expect(await run(Safari.requiresFullRewrite(path, patches))).toBe(true);
+
+      await run(Safari.writeTree(path, desired));
+
+      const reread = await run(Safari.readBookmarks(path));
+      expect(reread.bar).toEqual([top, added]);
+      expect(reread.menu).toEqual([custom]);
+      expect(reread.reading_list ?? []).toEqual([]);
+      const root = parse(await Bun.file(path).arrayBuffer());
+      const readingList =
+        isRecord(root) && Array.isArray(root["Children"])
+          ? root["Children"].find(
+              (node) => isRecord(node) && node["Title"] === "com.apple.ReadingList",
+            )
+          : undefined;
+      expect(isRecord(readingList) ? readingList["Children"] : undefined).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

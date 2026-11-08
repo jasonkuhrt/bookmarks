@@ -225,9 +225,12 @@ export const readBookmarks = (plistPath: string): Effect.Effect<BookmarkTree, Er
       const sectionKey = title ? SECTION_TITLE_TO_KEY[title] : undefined;
       const sectionChildren = plistDictChildren(child);
 
-      if (sectionKey && sectionChildren) {
-        // Standard section (BookmarksBar, ReadingList)
-        sections[sectionKey] = decodeNodes(sectionChildren);
+      if (sectionKey && type === "WebBookmarkTypeList") {
+        // Standard section (BookmarksBar, ReadingList). Safari omits an empty one's Children.
+        const rawChildren = child["Children"];
+        sections[sectionKey] = decodeUnknownChildren(
+          Array.isArray(rawChildren) ? rawChildren : undefined,
+        );
       } else if (title === "BookmarksMenu") {
         // BookmarksMenu maps to "menu" — its children merge with root-level extras
         sections.menu ??= [];
@@ -614,12 +617,9 @@ const assignSafariLeaves = (
 const reuseOrCreateSectionNode = (lookup: SafariNodeLookup, title: string): PlistDict =>
   lookup.sectionsByTitle.get(title) ?? makeSafariFolderNode(title);
 
+/** An empty section keeps an empty Children array, so it reads back as that section. */
 const setSectionChildren = (section: PlistDict, children: PlistDict[]): void => {
-  if (children.length > 0) {
-    section["Children"] = children;
-  } else {
-    delete section["Children"];
-  }
+  section["Children"] = children;
 };
 
 const buildSafariChildren = (
