@@ -164,7 +164,8 @@ const readChrome = () =>
   );
 const readSafari = () => run(Safari.readBookmarks(world.safariPath));
 const readYaml = () => run(YamlModule.load(world.yamlPath));
-const syncNow = () => run(Sync.sync({ yamlPath: world.yamlPath }));
+const syncNowEffect = () => Sync.sync({ yamlPath: world.yamlPath });
+const syncNow = () => run(syncNowEffect());
 
 /**
  * Chrome paired through a stand-in for its extension, holding `start` live. `onRequest` runs
@@ -381,6 +382,29 @@ describe("sync across browsers", () => {
       Targets.CHROME_READING_LIST_FOLDER,
       "Menu Item",
     ]);
+  });
+
+  test("a regular folder named Read Later in the menu is refused before any browser is written", async () => {
+    await run(
+      YamlModule.save(
+        world.yamlPath,
+        sharedConfig(
+          BookmarkTree.make({
+            menu: [folder(Targets.CHROME_READING_LIST_FOLDER, [leaf("A")])],
+            reading_list: [leaf("B")],
+          }),
+        ),
+      ),
+    );
+    await writeSafari(world.safariPath, BookmarkTree.make({}));
+    const chromeBefore = await readFile(world.chromePath, "utf-8");
+    const safariBefore = await readSafari();
+
+    const failure = await Effect.runPromise(Effect.flip(syncNowEffect()));
+
+    expect(failure.message).toContain(`folder named "${Targets.CHROME_READING_LIST_FOLDER}"`);
+    expect(await readFile(world.chromePath, "utf-8")).toBe(chromeBefore);
+    expect(await readSafari()).toEqual(safariBefore);
   });
 
   test("a YAML addition survives a structural change made in the browser", async () => {

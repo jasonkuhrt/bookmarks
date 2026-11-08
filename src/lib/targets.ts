@@ -282,6 +282,22 @@ export const CHROME_READING_LIST_FOLDER = "Read Later";
 const isReadingListFolder = (node: BookmarkNode): node is BookmarkFolder =>
   BookmarkFolder.is(node) && node.name === CHROME_READING_LIST_FOLDER;
 
+/**
+ * Refuse a tree a target can't hold, before any browser is written. In Chrome, a regular
+ * folder named Read Later at the top of Other Bookmarks would read back as the reading list.
+ */
+export const ensureWritable = (
+  target: Pick<TargetDescriptor, "browser" | "profile">,
+  tree: BookmarkTree,
+): Effect.Effect<void, Error> =>
+  target.browser === "chrome" && (tree.menu ?? []).some(isReadingListFolder)
+    ? Effect.fail(
+        new Error(
+          `${displayNameOf(target)} keeps the reading list in Other Bookmarks' "${CHROME_READING_LIST_FOLDER}" folder, so its Other Bookmarks can't hold another top-level folder named "${CHROME_READING_LIST_FOLDER}". Rename that folder in bookmarks.yaml or in the browser it came from.`,
+        ),
+      )
+    : Effect.void;
+
 /** Chrome's own layout to the engine's: the first Read Later folder of Other Bookmarks is the reading list. */
 export const fromChromeLayout = (native: BookmarkTree): BookmarkTree => {
   const menu = native.menu ?? [];

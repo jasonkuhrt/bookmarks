@@ -117,7 +117,7 @@ The baseline lives in the state folder, never in git: a YAML edit committed befo
 
 Every tree is compared in one canonical form, Chrome's: web URLs in their WHATWG form, a `'` in a bookmarklet's query as `%27`, and line breaks in titles as spaces. A bookmark stored differently by Safari and Chrome compares equal.
 
-Chrome has no reading list an extension can write, so `all.reading_list` lives in a **Read Later** folder in Chrome's Other Bookmarks. Moving that folder within Other Bookmarks is kept; editing its links edits the shared reading list.
+Chrome has no reading list an extension can write, so `all.reading_list` lives in a **Read Later** folder in Chrome's Other Bookmarks. Moving that folder within Other Bookmarks is kept; editing its links edits the shared reading list. The name is reserved at the top of Other Bookmarks: a sync that would put another folder named Read Later there stops before writing any browser and names the folder to rename.
 
 The same URL can appear in multiple folders or more than once in a folder. Sync preserves every placement, and `status` reports duplicate counts as information. You do not need to remove duplicates before syncing.
 

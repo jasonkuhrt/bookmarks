@@ -1065,13 +1065,18 @@ interface PlannedWrite {
   readonly writeMode: "patches" | "rewrite";
 }
 
-/** How to bring a browser from what it holds to what it should hold. */
+/**
+ * How to bring a browser from what it holds to what it should hold. Fails, before any browser
+ * is written, for a tree the target can't hold.
+ */
 const planWrite = (
   target: Targets.TargetDescriptor,
   browserTree: BookmarkTree,
   desiredTree: BookmarkTree,
 ): Effect.Effect<PlannedWrite, Error> =>
   Effect.gen(function* () {
+    yield* ensureUnambiguousPaths(desiredTree, `yaml target ${Targets.displayNameOf(target)}`);
+    yield* Targets.ensureWritable(target, desiredTree);
     const projection =
       collectAmbiguousPathIssues(browserTree).length > 0
         ? undefined
@@ -1148,10 +1153,6 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     const plans: PlannedWrite[] = [];
     for (const merge of merges) {
       const desiredTree = yield* desiredTreeFor(nextConfig, merge.target);
-      yield* ensureUnambiguousPaths(
-        desiredTree,
-        `yaml target ${Targets.displayNameOf(merge.target)}`,
-      );
       plans.push(yield* planWrite(merge.target, merge.browserTree, desiredTree));
     }
 
@@ -1204,35 +1205,44 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     };
   });
 
-/** Write the YAML to each selected browser as is, and record what each now holds. */
+/**
+ * Write the YAML to each selected browser as is, and record what each now holds. Every target
+ * is planned before any is written, so a tree one target can't hold stops the push untouched.
+ */
 const pushTrees = (
   config: SyncConfig,
   yamlConfig: BookmarksConfig,
   selectedTargets: readonly Targets.TargetDescriptor[],
 ): Effect.Effect<readonly TargetResult[], Error> =>
   Effect.gen(function* () {
-    let savedBaselines = yield* Baseline.load();
-    const results: TargetResult[] = [];
-
+    const plans: PlannedWrite[] = [];
     for (const target of selectedTargets) {
       yield* Effect.log(`Pushing ${Targets.displayNameOf(target)}...`);
       const desiredTree = yield* desiredTreeFor(yamlConfig, target);
-      yield* ensureUnambiguousPaths(desiredTree, `yaml target ${Targets.displayNameOf(target)}`);
       const browserTree = yield* Targets.readTree(target);
-      const plan = yield* planWrite(target, browserTree, desiredTree);
-      if (!config.dryRun) {
+      plans.push(yield* planWrite(target, browserTree, desiredTree));
+    }
+
+    if (!config.dryRun) {
+      let savedBaselines = yield* Baseline.load();
+      for (const plan of plans) {
         // A one-way write can't wait: a browser opened since the push began stops it here.
-        const openBrowser = plannedWritesBrowser(plan) ? yield* openFileBrowser(target) : undefined;
+        const openBrowser = plannedWritesBrowser(plan)
+          ? yield* openFileBrowser(plan.target)
+          : undefined;
         if (openBrowser !== undefined) {
           return yield* new Permissions.BrowserRunning({ browser: openBrowser });
         }
         yield* executeWrite(plan);
-        savedBaselines = yield* saveBaseline(savedBaselines, Targets.keyOf(target), desiredTree);
+        savedBaselines = yield* saveBaseline(
+          savedBaselines,
+          Targets.keyOf(plan.target),
+          plan.desiredTree,
+        );
       }
-      results.push(toTargetResult(plan));
     }
 
-    return results;
+    return plans.map((plan) => toTargetResult(plan));
   });
 
 const runPush = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
