@@ -52,7 +52,7 @@ Relevant commands bootstrap what they can safely bootstrap:
 - they create the managed config and state directories if they do not exist
 - they mirror the repo JSON schema into the managed schema path
 - write commands create `bookmarks.yaml` when they first save it
-- syncs keep `sync-baselines.json`: the tree each target held after its last sync, which the next merge diffs against
+- syncs keep `sync-baselines.json`: the tree and Reading List each target held after its last sync, which the next merge diffs against
 
 The YAML file can reference the adjacent schema with:
 
@@ -117,7 +117,7 @@ The baseline lives in the state folder, never in git: a YAML edit committed befo
 
 Every tree is compared in one canonical form, Chrome's: web URLs in their WHATWG form, a `'` in a bookmarklet's query as `%27`, and line breaks in titles as spaces. A bookmark stored differently by Safari and Chrome compares equal.
 
-Chrome has no reading list an extension can write, so `all.reading_list` lives in a **Read Later** folder in Chrome's Other Bookmarks. Moving that folder within Other Bookmarks is kept; editing its links edits the shared reading list. The name is reserved at the top of Other Bookmarks: a sync that would put another folder named Read Later there stops before writing any browser and names the folder to rename.
+Safari's Reading List and paired Chrome's native Reading List share `all.reading_list`, a flat list of `{ name, url, read }` items. Unread items omit `read`; read items write `read: true`. Titles are trimmed and whitespace collapsed; URLs must use HTTP(S). Read/unread changes sync in both directions. List membership and fields merge by URL, independently of order: removal wins over an edit, which is archived whole under read/unread graveyard folders. YAML retains its order and browser additions go first; Safari follows that order. Unpaired Chrome profiles sync bookmarks only. Browser-specific Reading List overlays are refused.
 
 The same URL can appear in multiple folders or more than once in a folder. Sync preserves every placement, and `status` reports duplicate counts as information. You do not need to remove duplicates before syncing.
 
@@ -143,9 +143,9 @@ bookmarks sync chrome/profile-1 --dry-run
 
 On this machine, dotfiles exposes installation through `just bookmarks-chrome-setup`.
 
-The companion extension requests only bookmarks, native messaging, local extension storage, and reconnect alarms. It has no website permissions. A private local socket connects the CLI to the native host; the host accepts only this extension's stable ID. Pairing compares the live tree against the selected profile and pins that extension instance. Multiple matching instances require the user to disambiguate.
+The companion extension requests bookmarks, Reading List, native messaging, local extension storage, and reconnect alarms. It has no website permissions. A private local socket connects the CLI to the native host; the host accepts only this extension's stable ID. Pairing compares the live tree against the selected profile and pins that extension instance. Multiple matching instances require the user to disambiguate.
 
-Backups include Chrome's live tree as well as its disk snapshot. An interrupted write does not advance that target's baseline: the YAML already holds the merge, so the next sync finishes the write. Inspect `bookmarks status` before retrying by hand. Bookmark changes are individual Chrome operations, not an atomic transaction.
+Backups include Chrome's live tree and Reading List as well as its disk snapshot. An interrupted write does not advance that target's baseline: the YAML already holds the merge, so the next sync finishes the write. Inspect `bookmarks status` before retrying by hand. Bookmark changes are individual Chrome operations, not an atomic transaction.
 
 ## CLI
 
@@ -188,7 +188,7 @@ Notes:
 What it does:
 
 - syncs once when it starts, so changes made while it was down are not left waiting for an edit
-- watches `bookmarks.yaml` and every discovered browser's bookmark file (Safari's `Bookmarks.plist`, each Chrome profile's `Bookmarks`)
+- watches `bookmarks.yaml` and every discovered browser's bookmark file (Safari's `Bookmarks.plist`, each Chrome profile's `Bookmarks`) and paired Chrome Reading List change stamps
 - queues a sync 60 seconds after the last edit to any of them instead of syncing on every keystroke; a browser rewriting its file without changing its bookmarks is no edit
 - after each sync, compares every watched file with what the sync read there and left there (`snapshot` in `sync --json`), and queues another sync for anything else: the sync's own writes queue nothing, and an edit saved while a sync ran is never lost, even when its file event arrives late
 - updates the machine-managed header at the top of `bookmarks.yaml` with watcher state
