@@ -334,6 +334,15 @@ const runWatcherProcess = async (): Promise<never> => {
     return write;
   };
 
+  /**
+   * Only file events queue a sync while a sync runs. After it succeeds their files are judged
+   * again against what it read and left, so its own writes queue nothing and a later edit
+   * queues the next sync.
+   */
+  const dropSchedulesQueuedByEdits = (): void => {
+    pendingSchedule = undefined;
+  };
+
   const deferSchedule = (request: ScheduleRequest): void => {
     if (request.supersedesPending || pendingSchedule === undefined) {
       pendingSchedule = request;
@@ -422,6 +431,7 @@ const runWatcherProcess = async (): Promise<never> => {
 
       errorRetryCount = 0;
       await watchBrowserFiles();
+      dropSchedulesQueuedByEdits();
       const unsynced = await settleAfterSync(settledBefore, snapshotOf(syncResult));
       await updateState({
         lastError: undefined,

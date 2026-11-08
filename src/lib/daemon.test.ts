@@ -18,7 +18,7 @@ import { join } from "node:path";
 import * as StaticDaemon from "./daemon.ts";
 import * as Fingerprint from "./fingerprint.ts";
 import { readDaemonHeaderState } from "./managed-config-header.ts";
-import { BookmarkTree, BookmarksConfig } from "./schema/__.ts";
+import { BookmarkLeaf, BookmarkTree, BookmarksConfig } from "./schema/__.ts";
 import * as Targets from "./targets.ts";
 import * as YamlModule from "./yaml.ts";
 
@@ -128,6 +128,26 @@ const chromeFile = (
       },
     },
   });
+
+/** A Safari plist whose bar holds one bookmark to a.example, titled `title`. */
+const safariFile = (title: string) =>
+  new Uint8Array(
+    serialize({
+      Children: [
+        {
+          WebBookmarkType: "WebBookmarkTypeList",
+          Title: "BookmarksBar",
+          Children: [
+            {
+              WebBookmarkType: "WebBookmarkTypeLeaf",
+              URLString: "https://a.example/",
+              URIDictionary: { title },
+            },
+          ],
+        },
+      ],
+    }),
+  );
 
 const setupDaemonEnv = async (): Promise<{
   readonly bunPath: string;
@@ -609,24 +629,6 @@ console.log(reply);
     const chromeDataDir = join(dir, "Chrome");
     const chromePath = join(chromeDataDir, "Default", "Bookmarks");
     const safariPath = join(dir, "Safari", "Bookmarks.plist");
-    const safariFile = (title: string) =>
-      new Uint8Array(
-        serialize({
-          Children: [
-            {
-              WebBookmarkType: "WebBookmarkTypeList",
-              Title: "BookmarksBar",
-              Children: [
-                {
-                  WebBookmarkType: "WebBookmarkTypeLeaf",
-                  URLString: "https://a.example/",
-                  URIDictionary: { title },
-                },
-              ],
-            },
-          ],
-        }),
-      );
     // Browsers save through a temporary file they rename over the real one.
     const replace = async (path: string, contents: string | Uint8Array) => {
       await writeFile(`${path}.tmp`, contents);
@@ -713,6 +715,78 @@ console.log(reply);
         await waitFor(async () => (await cli.syncs()) === 2);
         await Bun.sleep(400);
         expect(await cli.syncs()).toBe(2);
+      } finally {
+        await stopWatcher(proc);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("watcher queues no second sync for the sync's own writes, and still syncs a later edit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bookmarks-daemon-own-writes-"));
+    const yamlPath = join(dir, "bookmarks.yaml");
+    const safariPath = join(dir, "Safari", "Bookmarks.plist");
+    const safari = { browser: "safari", path: safariPath } as const;
+    const safariFingerprint = async () =>
+      Fingerprint.ofTree(await run(Targets.readFileTree(safari)));
+
+    try {
+      await mkdir(join(dir, "Safari"), { recursive: true });
+      await writeFile(safariPath, safariFile("A"));
+      const read = await safariFingerprint();
+      await writeFile(safariPath, safariFile("Renamed by the sync"));
+      const written = await safariFingerprint();
+      await writeFile(safariPath, safariFile("A"));
+      await run(YamlModule.save(yamlPath, BookmarksConfig.make({ all: BookmarkTree.make({}) })));
+      const yamlWritten = await run(
+        YamlModule.render(
+          BookmarksConfig.make({
+            all: BookmarkTree.make({
+              bar: [BookmarkLeaf.make({ name: "Renamed by the sync", url: "https://a.example/" })],
+            }),
+          }),
+        ),
+      );
+      // The sync writes the YAML and Safari's plist, then takes a while to finish.
+      const cli = await writeFakeCli(
+        dir,
+        [
+          JSON.stringify({
+            ...syncDoneReply,
+            yamlChanged: true,
+            snapshot: {
+              files: [
+                { path: yamlPath, fingerprints: [Fingerprint.ofText(yamlWritten)] },
+                { path: safariPath, fingerprints: [read, written] },
+              ],
+            },
+          }),
+          syncDone,
+        ],
+        [
+          `const { rename } = await import("node:fs/promises");
+await writeFile(${JSON.stringify(yamlPath)}, ${JSON.stringify(yamlWritten)});
+await writeFile(${JSON.stringify(`${safariPath}.tmp`)}, Buffer.from(${JSON.stringify(Buffer.from(safariFile("Renamed by the sync")).toString("base64"))}, "base64"));
+await rename(${JSON.stringify(`${safariPath}.tmp`)}, ${JSON.stringify(safariPath)});
+await Bun.sleep(500);`,
+        ],
+      );
+      const proc = await startWatcher(dir, cli.path, {
+        BOOKMARKS_DAEMON_SYNC_DELAY_MS: "150",
+        BOOKMARKS_SAFARI_PLIST_PATH: safariPath,
+      });
+      try {
+        await waitFor(async () => (await cli.syncs()) === 1);
+        await waitFor(
+          async () =>
+            (await readRuntimeState(join(dir, "runtime", "daemon.state.json"))).phase === "idle",
+        );
+        await Bun.sleep(600);
+        expect(await cli.syncs()).toBe(1);
+
+        await appendFile(yamlPath, "# a later edit\n", "utf-8");
+        await waitFor(async () => (await cli.syncs()) === 2);
       } finally {
         await stopWatcher(proc);
       }
