@@ -435,6 +435,69 @@ describe("sync across browsers", () => {
     expect(chrome.live().bar).toEqual([docs("corrected.example")]);
   });
 
+  test("Safari opened while a sync plans is left unwritten, so its save of the tree it loaded deletes nothing", async () => {
+    const start = BookmarkTree.make({ bar: [leaf("A")] });
+    await run(YamlModule.save(world.yamlPath, sharedConfig(start)));
+    await writeSafari(world.safariPath, start);
+    let safariOpensNow = false;
+    const chrome = pairedChrome(start, () => {
+      if (safariOpensNow) process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Safari";
+      return undefined;
+    });
+    try {
+      await run(syncThrough(chrome.layer));
+      await run(
+        YamlModule.save(
+          world.yamlPath,
+          sharedConfig(BookmarkTree.make({ bar: [leaf("A"), leaf("B")] })),
+        ),
+      );
+
+      // Safari opens while the sync reads Chrome, and loads its file as it is.
+      safariOpensNow = true;
+      const open = await run(syncThrough(chrome.layer));
+      expect(open.waiting?.map((waiting) => waiting.browser)).toEqual(["Safari"]);
+      expect(names((await readSafari()).bar)).toEqual(["A"]);
+
+      // Safari saves the tree it loaded, then quits.
+      safariOpensNow = false;
+      await writeSafari(world.safariPath, start);
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+      await run(syncThrough(chrome.layer));
+
+      expect(names((await readYaml()).all.bar)).toEqual(["A", "B"]);
+      expect(names((await readSafari()).bar)).toEqual(["A", "B"]);
+      expect(names(chrome.live().bar)).toEqual(["A", "B"]);
+    } finally {
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+    }
+  });
+
+  test("a restore from the YAML stops before writing Safari once Safari opens", async () => {
+    const start = BookmarkTree.make({ bar: [leaf("A")] });
+    await run(
+      YamlModule.save(
+        world.yamlPath,
+        sharedConfig(BookmarkTree.make({ bar: [leaf("A"), leaf("B")] })),
+      ),
+    );
+    await writeSafari(world.safariPath, start);
+    const chrome = pairedChrome(start, () => {
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "Safari";
+      return undefined;
+    });
+    try {
+      const failure = await Effect.runPromise(
+        Effect.flip(Sync.push({ yamlPath: world.yamlPath }).pipe(Effect.provide(chrome.layer))),
+      );
+
+      expect(failure.message).toContain("Safari is currently running");
+      expect(names((await readSafari()).bar)).toEqual(["A"]);
+    } finally {
+      process.env["BOOKMARKS_FORCE_BROWSER_RUNNING"] = "";
+    }
+  });
+
   test("a YAML edit made while a sync runs is never overwritten", async () => {
     await run(
       YamlModule.save(world.yamlPath, sharedConfig(BookmarkTree.make({ bar: [leaf("A")] }))),

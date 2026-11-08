@@ -711,24 +711,29 @@ const emptySyncResult = (orchestration?: Orchestration.SyncNotice): SyncResult =
       };
 
 /**
- * Selected targets whose browser is running and owns the bookmark file, keyed by target with
- * the browser's process name. Paired Chrome is written through its live API, so it never is.
+ * The process name of the browser holding a target's bookmark file, when it runs. A running
+ * browser saves the tree it loaded over the file, so the file must not be written under it.
+ * Paired Chrome is written through its live API, so it never holds one.
  */
+const openFileBrowser = (
+  target: Targets.TargetDescriptor,
+): Effect.Effect<string | undefined, Error> =>
+  Effect.gen(function* () {
+    if (target.browser === "chrome" && (yield* ChromeNative.isPaired(target.path))) return;
+    const browser = Targets.processNameOf(target.browser);
+    return (yield* Permissions.checkBrowserRunning(browser)) ? browser : undefined;
+  });
+
+/** Selected targets whose browser holds their bookmark file, keyed by target with its process name. */
 const runningFileTargets = (
   targets: readonly Targets.TargetDescriptor[],
 ): Effect.Effect<ReadonlyMap<string, string>, Error> =>
   Effect.gen(function* () {
     const running = new Map<string, string>();
-    const checked = new Map<string, boolean>();
-
     for (const target of targets) {
-      if (target.browser === "chrome" && (yield* ChromeNative.isPaired(target.path))) continue;
-      const browser = Targets.processNameOf(target.browser);
-      const isRunning = checked.get(browser) ?? (yield* Permissions.checkBrowserRunning(browser));
-      checked.set(browser, isRunning);
-      if (isRunning) running.set(Targets.keyOf(target), browser);
+      const browser = yield* openFileBrowser(target);
+      if (browser !== undefined) running.set(Targets.keyOf(target), browser);
     }
-
     return running;
   });
 
@@ -1151,14 +1156,17 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
     }
 
     const yamlChanged = (yield* renderConfig(nextConfig)) !== (yield* renderConfig(yamlConfig));
-    const waiting: WaitingTarget[] = plans.flatMap((plan) => {
-      const browser = readOnlyTargets.get(Targets.keyOf(plan.target));
-      return browser !== undefined && plannedWritesBrowser(plan)
-        ? [{ target: plan.target, browser, pending: plan.writePatches.length || 1 }]
-        : [];
-    });
+    const waiting: WaitingTarget[] = [];
+    const waitFor = (plan: PlannedWrite, browser: string): void => {
+      waiting.push({ target: plan.target, browser, pending: plan.writePatches.length || 1 });
+    };
 
-    if (!config.dryRun) {
+    if (config.dryRun) {
+      for (const plan of plans) {
+        const browser = readOnlyTargets.get(Targets.keyOf(plan.target));
+        if (browser !== undefined && plannedWritesBrowser(plan)) waitFor(plan, browser);
+      }
+    } else {
       yield* ensureYamlUnchanged(config.yamlPath, yamlTextAtLoad);
       // The YAML records the merge before any browser is written. A target whose write then
       // fails keeps its old baseline, so the next sync reads the YAML as ahead of it, and a
@@ -1167,11 +1175,18 @@ const runSync = (config: SyncConfig): Effect.Effect<SyncResult, Error> =>
       let savedBaselines = baselines;
       for (const plan of plans) {
         const key = Targets.keyOf(plan.target);
+        const writes = plannedWritesBrowser(plan);
+        // A browser opened since the sync began loaded its file as it was, and would save that
+        // over this write: its target waits like one that was open from the start.
+        const openBrowser =
+          readOnlyTargets.get(key) ?? (writes ? yield* openFileBrowser(plan.target) : undefined);
         let settledTree = plan.browserTree;
-        if (!readOnlyTargets.has(key)) {
+        if (openBrowser === undefined) {
           yield* Effect.log(`Writing ${Targets.displayNameOf(plan.target)}...`);
           yield* executeWrite(plan);
           settledTree = plan.desiredTree;
+        } else if (writes) {
+          waitFor(plan, openBrowser);
         }
         savedBaselines = yield* saveBaseline(savedBaselines, key, settledTree);
       }
@@ -1206,6 +1221,11 @@ const pushTrees = (
       const browserTree = yield* Targets.readTree(target);
       const plan = yield* planWrite(target, browserTree, desiredTree);
       if (!config.dryRun) {
+        // A one-way write can't wait: a browser opened since the push began stops it here.
+        const openBrowser = plannedWritesBrowser(plan) ? yield* openFileBrowser(target) : undefined;
+        if (openBrowser !== undefined) {
+          return yield* new Permissions.BrowserRunning({ browser: openBrowser });
+        }
         yield* executeWrite(plan);
         savedBaselines = yield* saveBaseline(savedBaselines, Targets.keyOf(target), desiredTree);
       }

@@ -121,7 +121,7 @@ Chrome has no reading list an extension can write, so `all.reading_list` lives i
 
 The same URL can appear in multiple folders or more than once in a folder. Sync preserves every placement, and `status` reports duplicate counts as information. You do not need to remove duplicates before syncing.
 
-Paired Chrome stays open during sync. The CLI opens its profile if needed. Safari and unpaired file-backed targets are read while open, and their changes reach the YAML and the other browsers; the writes they need wait until they quit (`waiting` in `sync --json`). `sync --from-yaml` and `gc` write every target, so they defer while such a browser is open.
+Paired Chrome stays open during sync. The CLI opens its profile if needed. Safari and unpaired file-backed targets are read while open, and their changes reach the YAML and the other browsers; the writes they need wait until they quit (`waiting` in `sync --json`). Each browser is checked again right before its file is written, so one opened while the sync ran waits the same way instead of saving the tree it loaded over the write. `sync --from-yaml` and `gc` write every target, so they defer while such a browser is open, and stop before a browser that opens while they run.
 
 If sync hits ambiguous or unsupported semantics, it stops before mutation and returns a clear error instead of silently mangling data.
 
