@@ -6,7 +6,9 @@
  * Read-only — no side effects.
  */
 
-import { Effect } from "effect";
+import { Effect, Either } from "effect";
+import * as Path from "node:path";
+import * as ChromeNative from "./chrome-native.ts";
 import * as Paths from "./paths.ts";
 import * as Permissions from "./permissions.ts";
 import type { BookmarksConfig } from "./schema/__.ts";
@@ -143,6 +145,40 @@ const checkBrowserNotRunning = (browser: string): Effect.Effect<DoctorCheck> =>
       : pass(`${browser} not running`, `${browser} is not running`),
   );
 
+const checkChromePairings = (
+  targets: readonly Targets.TargetDescriptor[],
+): Effect.Effect<readonly DoctorCheck[]> =>
+  targets.length === 0
+    ? Effect.succeed([])
+    : ChromeNative.status.pipe(
+        Effect.map((statuses) =>
+          targets.map((target) => {
+            const name = `Chrome pairing ${Targets.displayNameOf(target)}`;
+            const status = statuses.find(
+              (binding) => binding.profilePath === Path.resolve(target.path),
+            );
+            return status?.connected
+              ? pass(name, "The paired Chrome extension is connected.")
+              : fail(
+                  name,
+                  status?.error ?? "The Chrome profile pairing is unavailable.",
+                  "Open the paired Chrome profile and enable Bookmarks CLI in chrome://extensions; pair the profile again if needed.",
+                );
+          }),
+        ),
+        Effect.catchAll((error) =>
+          Effect.succeed(
+            targets.map((target) =>
+              fail(
+                `Chrome pairing ${Targets.displayNameOf(target)}`,
+                error.message,
+                "Check the Chrome pairing configuration, then pair the profile again.",
+              ),
+            ),
+          ),
+        ),
+      );
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -181,8 +217,19 @@ export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult, E
     const needsFullDiskAccess = enabledTargets.some((target) =>
       Targets.requiresFullDiskAccess(target),
     );
+    const pairedChromeTargets = yield* Effect.filter(enabledTargets, (target) =>
+      target.browser === "chrome" ? ChromeNative.isPaired(target.path) : Effect.succeed(false),
+    ).pipe(Effect.either);
     const browserChecks = [
-      ...new Set(enabledTargets.map((target) => Targets.processNameOf(target.browser))),
+      ...new Set(
+        enabledTargets
+          .filter(
+            (target) =>
+              target.browser !== "chrome" ||
+              (Either.isRight(pairedChromeTargets) && !pairedChromeTargets.right.includes(target)),
+          )
+          .map((target) => Targets.processNameOf(target.browser)),
+      ),
     ];
 
     const checks = yield* Effect.all(
@@ -196,10 +243,20 @@ export const runDiagnostics = (yamlPath?: string): Effect.Effect<DoctorResult, E
       ],
       { concurrency: "unbounded" },
     );
+    const pairingChecks = Either.isLeft(pairedChromeTargets)
+      ? [
+          fail(
+            "Chrome pairings",
+            pairedChromeTargets.left.message,
+            "Check the Chrome pairing configuration, then pair the profile again.",
+          ),
+        ]
+      : yield* checkChromePairings(pairedChromeTargets.right);
+    const allChecks = [...checks, ...pairingChecks];
 
     return {
-      checks,
-      allPassed: checks.every((check) => check.passed),
+      checks: allChecks,
+      allPassed: allChecks.every((check) => check.passed),
     };
   });
 };

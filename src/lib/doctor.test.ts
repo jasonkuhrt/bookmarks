@@ -3,19 +3,98 @@ import { Effect } from "effect";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as ChromeBridge from "./chrome-native-runtime.ts";
 import * as Doctor from "./doctor.ts";
 import {
   BookmarkTree,
   BookmarksConfig,
   ChromeBookmarks,
   ChromeProfileBookmarks,
+  SafariBookmarks,
 } from "./schema/__.ts";
 import { copyChromeBookmarksFixture } from "./test-fixtures.ts";
 import * as YamlModule from "./yaml.ts";
 
 // -- Test helpers --
 
-const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
+const unpairedRuntime: ChromeBridge.Runtime = {
+  loadBindings: Effect.succeed([]),
+  saveBindings: () => Effect.die("Unexpected binding write"),
+  instances: Effect.die("Unexpected extension discovery"),
+  request: () => Effect.die("Unexpected extension request"),
+  launch: () => Effect.die("Unexpected browser launch"),
+};
+
+const run = <A, E>(effect: Effect.Effect<A, E>, runtime: ChromeBridge.Runtime = unpairedRuntime) =>
+  Effect.runPromise(effect.pipe(Effect.provideService(ChromeBridge.ChromeBridgeRuntime, runtime)));
+
+const withDoctorTargets = async (
+  options: { readonly unpairedChrome?: boolean; readonly safari?: boolean },
+  check: (yamlPath: string, chromePath: string) => Promise<void>,
+) => {
+  const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-pairing-"));
+  const chromeDataDir = join(dir, "Chrome");
+  const chromePath = join(chromeDataDir, "Work", "Bookmarks");
+  const environment = {
+    BOOKMARKS_CHROME_DATA_DIR: chromeDataDir,
+    BOOKMARKS_SAFARI_PLIST_PATH: join(dir, "Safari", "Bookmarks.plist"),
+    BOOKMARKS_FORCE_BROWSER_RUNNING: "Google Chrome,Safari",
+    BOOKMARKS_FORCE_FULL_DISK_ACCESS: "1",
+  };
+  const original = Object.fromEntries(
+    Object.keys(environment).map((key) => [key, process.env[key]]),
+  );
+
+  try {
+    Object.assign(process.env, environment);
+    const profiles = options.unpairedChrome ? ["Work", "Personal"] : ["Work"];
+    await Promise.all(
+      profiles.map(async (profile) => {
+        await mkdir(join(chromeDataDir, profile), { recursive: true });
+        await copyChromeBookmarksFixture(join(chromeDataDir, profile, "Bookmarks"));
+      }),
+    );
+    if (options.safari) {
+      await mkdir(join(dir, "Safari"));
+      await Bun.write(environment.BOOKMARKS_SAFARI_PLIST_PATH, "fixture");
+    }
+    const yamlPath = join(dir, "bookmarks.yaml");
+    await run(
+      YamlModule.save(
+        yamlPath,
+        BookmarksConfig.make({
+          all: BookmarkTree.make({}),
+          chrome: ChromeBookmarks.make({
+            profiles: Object.fromEntries(
+              profiles.map((profile) => [profile.toLowerCase(), ChromeProfileBookmarks.make({})]),
+            ),
+          }),
+          ...(options.safari ? { safari: SafariBookmarks.make({}) } : {}),
+        }),
+      ),
+    );
+    await check(yamlPath, chromePath);
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+};
+
+const pairedRuntime = (
+  profilePath: string,
+  response: Effect.Effect<unknown, Error>,
+): ChromeBridge.Runtime => ({
+  ...unpairedRuntime,
+  loadBindings: Effect.succeed([
+    { profilePath, instanceId: "12345678-1234-1234-1234-123456789abc" },
+  ]),
+  request: () => response,
+});
+
+const connected = Effect.succeed({ id: "cli", ok: true, value: BookmarkTree.make({}) });
 
 // -- DoctorCheck / DoctorResult types --
 
@@ -129,41 +208,100 @@ describe("formatReport", () => {
 // -- runDiagnostics --
 
 describe("runDiagnostics", () => {
+  test("a connected paired Chrome profile passes while Chrome is running", async () => {
+    await withDoctorTargets({}, async (yamlPath, chromePath) => {
+      const result = await run(
+        Doctor.runDiagnostics(yamlPath),
+        pairedRuntime(chromePath, connected),
+      );
+
+      expect(result.allPassed).toBe(true);
+      expect(result.checks.find((check) => check.name === "Chrome pairing chrome/work")).toEqual({
+        name: "Chrome pairing chrome/work",
+        passed: true,
+        message: "The paired Chrome extension is connected.",
+      });
+      expect(result.checks.some((check) => check.name === "Google Chrome not running")).toBe(false);
+    });
+  });
+
+  test("an unavailable paired extension fails with its error instead of requiring Chrome to close", async () => {
+    await withDoctorTargets({}, async (yamlPath, chromePath) => {
+      const result = await run(
+        Doctor.runDiagnostics(yamlPath),
+        pairedRuntime(chromePath, Effect.fail(new Error("Extension is disconnected."))),
+      );
+
+      expect(result.allPassed).toBe(false);
+      expect(result.checks.find((check) => check.name === "Chrome pairing chrome/work")).toEqual({
+        name: "Chrome pairing chrome/work",
+        passed: false,
+        message: "Extension is disconnected.",
+        fix: "Open the paired Chrome profile and enable Bookmarks CLI in chrome://extensions; pair the profile again if needed.",
+      });
+      expect(result.checks.some((check) => check.name === "Google Chrome not running")).toBe(false);
+    });
+  });
+
+  test("a paired Chrome profile does not exempt an unpaired profile from closing Chrome", async () => {
+    await withDoctorTargets({ unpairedChrome: true }, async (yamlPath, chromePath) => {
+      const result = await run(
+        Doctor.runDiagnostics(yamlPath),
+        pairedRuntime(chromePath, connected),
+      );
+
+      expect(result.allPassed).toBe(false);
+      expect(
+        result.checks.find((check) => check.name === "Chrome pairing chrome/work")?.passed,
+      ).toBe(true);
+      expect(result.checks.find((check) => check.name === "Google Chrome not running")).toEqual({
+        name: "Google Chrome not running",
+        passed: false,
+        message: "Google Chrome is currently running",
+        fix: "Close Google Chrome before syncing to avoid data corruption.",
+      });
+    });
+  });
+
+  test("Safari still must close when Chrome is paired", async () => {
+    await withDoctorTargets({ safari: true }, async (yamlPath, chromePath) => {
+      const result = await run(
+        Doctor.runDiagnostics(yamlPath),
+        pairedRuntime(chromePath, connected),
+      );
+
+      expect(result.allPassed).toBe(false);
+      expect(result.checks.find((check) => check.name === "Safari not running")).toEqual({
+        name: "Safari not running",
+        passed: false,
+        message: "Safari is currently running",
+        fix: "Close Safari before syncing to avoid data corruption.",
+      });
+    });
+  });
+
+  test("unreadable Chrome pairing configuration fails without aborting the other checks", async () => {
+    await withDoctorTargets({ safari: true }, async (yamlPath) => {
+      const result = await run(Doctor.runDiagnostics(yamlPath), {
+        ...unpairedRuntime,
+        loadBindings: Effect.fail(new Error("Pairing configuration is unreadable.")),
+      });
+
+      expect(result.allPassed).toBe(false);
+      expect(result.checks.find((check) => check.name === "Chrome pairings")).toEqual({
+        name: "Chrome pairings",
+        passed: false,
+        message: "Pairing configuration is unreadable.",
+        fix: "Check the Chrome pairing configuration, then pair the profile again.",
+      });
+      expect(result.checks.find((check) => check.name === "Safari not running")?.passed).toBe(
+        false,
+      );
+    });
+  });
+
   test("reports the actual configured targets and browser processes", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-"));
-    const yamlPath = join(dir, "bookmarks.yaml");
-    const chromeDataDir = join(dir, "Chrome");
-    const chromePath = join(chromeDataDir, "Work", "Bookmarks");
-    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
-
-    try {
-      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
-      await mkdir(join(chromeDataDir, "Work"), { recursive: true });
-      await copyChromeBookmarksFixture(chromePath);
-      await Bun.write(
-        join(chromeDataDir, "Local State"),
-        JSON.stringify({
-          profile: {
-            info_cache: {
-              Work: {},
-            },
-          },
-        }),
-      );
-      await run(
-        YamlModule.save(
-          yamlPath,
-          BookmarksConfig.make({
-            all: BookmarkTree.make({}),
-            chrome: ChromeBookmarks.make({
-              profiles: {
-                work: ChromeProfileBookmarks.make({}),
-              },
-            }),
-          }),
-        ),
-      );
-
+    await withDoctorTargets({}, async (yamlPath) => {
       const result = await run(Doctor.runDiagnostics(yamlPath));
       const names = result.checks.map((check) => check.name);
 
@@ -173,14 +311,7 @@ describe("runDiagnostics", () => {
       expect(names).toContain("Enabled targets");
       expect(names).toContain("Discovered target chrome/work exists");
       expect(names).toContain("Google Chrome not running");
-    } finally {
-      if (originalChromeDataDir === undefined) {
-        delete process.env["BOOKMARKS_CHROME_DATA_DIR"];
-      } else {
-        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir;
-      }
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("surfaces YAML errors without inventing target checks", async () => {
@@ -202,40 +333,7 @@ describe("runDiagnostics", () => {
   });
 
   test("each check has required fields", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "bookmarks-doctor-shape-"));
-    const yamlPath = join(dir, "bookmarks.yaml");
-    const chromeDataDir = join(dir, "Chrome");
-    const chromePath = join(chromeDataDir, "Default", "Bookmarks");
-    const originalChromeDataDir = process.env["BOOKMARKS_CHROME_DATA_DIR"];
-
-    try {
-      process.env["BOOKMARKS_CHROME_DATA_DIR"] = chromeDataDir;
-      await mkdir(join(chromeDataDir, "Default"), { recursive: true });
-      await copyChromeBookmarksFixture(chromePath);
-      await Bun.write(
-        join(chromeDataDir, "Local State"),
-        JSON.stringify({
-          profile: {
-            info_cache: {
-              Default: {},
-            },
-          },
-        }),
-      );
-      await run(
-        YamlModule.save(
-          yamlPath,
-          BookmarksConfig.make({
-            all: BookmarkTree.make({}),
-            chrome: ChromeBookmarks.make({
-              profiles: {
-                default: ChromeProfileBookmarks.make({}),
-              },
-            }),
-          }),
-        ),
-      );
-
+    await withDoctorTargets({}, async (yamlPath) => {
       const result = await run(Doctor.runDiagnostics(yamlPath));
       for (const check of result.checks) {
         expect(typeof check.name).toBe("string");
@@ -245,13 +343,6 @@ describe("runDiagnostics", () => {
           expect(typeof check.fix).toBe("string");
         }
       }
-    } finally {
-      if (originalChromeDataDir === undefined) {
-        delete process.env["BOOKMARKS_CHROME_DATA_DIR"];
-      } else {
-        process.env["BOOKMARKS_CHROME_DATA_DIR"] = originalChromeDataDir;
-      }
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
